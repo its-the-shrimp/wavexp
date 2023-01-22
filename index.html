@@ -5,48 +5,40 @@
 		<title>Test</title>
 		<style>
 			body {
-				background-color: #181818;
+				background-color: #232328;
 				color: #0069E1;
 				overflow: hidden;
 				text-align: center;
 				font-family: consolas;
 				display: flex}
-			canvas {
-				object-fit: contain}
-			#main-grid {
-				margin: auto;
-				width: 75%;
-				height: 75%;
-				display: grid;
-				grid-template-rows: 3;
-				grid-template-columns: 2;
-				gap: 2em}
+			canvas {object-fit: contain}
 			#ctrl-panel {
-				grid-column: 2 / 3;
-				grid-row: 1 / 2;
+				position: fixed;
+				left: 0;
+				top: 0;
 				display: flex;
+				padding: 1em;
+				background-color: #181818;
 				flex-direction: column}
-			#component-menu {
-				grid-column: 1 / 2;
-				grid-row: 1 / 2}
-			#component-map {
-				grid-column: 1 / 3;
-				grid-row: 2 / 3}
-			.graph {
-				border: 3px solid #0069E1;
-				flex: 1;
-				object-fit: contain}
+			#help-msg {
+				background-color: #232328;
+				padding: 1em}
+			.graph {border: 3px solid #0069E1}
 			#inputs {
 				display: grid;
 				grid-template-rows: repeat(3, 1fr);
-				grid-template-columns: repeat(2, 1fr);
-			}
+				grid-template-columns: repeat(2, 1fr)}
 			#visuals {
-				grid-column: 3 / 4;
-				grid-row: 1 / 3;
+				position: fixed;
+				right: 0;
+				top: 0;
+				height: 90vh;
+				background-color: #181818;
+				padding: 1em;
 				display: flex;
 				flex-direction: column;
 				justify-content: flex-end}
+			#visuals > canvas {flex: 1}
 			#visuals > button {
 				height: 3em;
 				border-style: solid;

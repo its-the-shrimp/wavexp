@@ -263,10 +263,9 @@ impl yew::Component for Main {
 	}
 
 	fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
-		yew::html! {<div id="main-grid">
-            <div id="component-menu">{"Nothing here yet"}</div>
+		yew::html! {<>
 			<div id="ctrl-panel">
-                <div>{self.help_msg.clone()}</div>
+                <div id="help-msg">{self.help_msg.clone()}</div>
                 <div id="inputs">
                     <Slider
                         coef={Self::MAX_FREQ} precision={0}
@@ -312,8 +311,7 @@ impl yew::Component for Main {
 					{"Play"}
 				</button>
 			</div>
-            <div id="component-map" class="graph">{"Nothing here yet"}</div>
-		</div>}
+		</>}
 	}
 
 	fn rendered(&mut self, ctx: &yew::Context<Self>, first: bool) {

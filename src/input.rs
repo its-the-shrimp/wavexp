@@ -73,7 +73,7 @@ impl yew::Component for Slider {
                 .expect_throw_val("releasing the cursor focus from the input slider");
             SliderCmd::Unfocus(input)});
         yew::html! {
-            <canvas id={self.id.clone()} class={ctx.props().class.clone()} width="300" height="300"
+            <canvas id={self.id.clone()} class={ctx.props().class.clone()}
             onpointerdown={ctx.link().callback(|e: web_sys::PointerEvent| {
                 let input = e.target()
                     .expect_throw("fetching the input element in the `pointerdown` event")
