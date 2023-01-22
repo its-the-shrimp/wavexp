@@ -83,10 +83,10 @@ pub fn document() -> crate::web_sys::Document {
 }
 
 pub fn get_canvas_ctx(name: &str, options: &wasm_bindgen::JsValue)
--> Option<(usize, usize, web_sys::CanvasRenderingContext2d)> {
+-> Option<(f64, f64, web_sys::CanvasRenderingContext2d)> {
     let res = document().get_element_by_id(name)?
         .unchecked_into::<web_sys::HtmlCanvasElement>();
-    Some((res.width() as usize, res.height() as usize,
+    Some((res.width() as f64, res.height() as f64,
         res.get_context_with_context_options("2d", options)
             .expect_throw_val("fetching the rendering context for the canvas")
             .expect_throw("fetching the rendering context for the canvas")

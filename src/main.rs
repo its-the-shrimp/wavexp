@@ -2,7 +2,7 @@ mod render;
 mod utils;
 mod input;
 use input::{Slider, Switch};
-use utils::{ExpectThrowVal, Pipe};
+use utils::ExpectThrowVal;
 use web_sys;
 use js_sys;
 use wasm_bindgen;
@@ -36,7 +36,7 @@ fn start_animation_loop() {
                     .unwrap_unchecked()};
     // `unwrap_unchecked` here is safe because the enclosing function is only called after
     // the canvases "main" and "envelope" has been shown to the user
-            let buf = ctx.renderer.set_size(main_width, main_height).get_in_buffer();
+            let buf = ctx.renderer.set_size(main_width as usize, main_height as usize).get_in_buffer();
             ctx.analyser.get_byte_frequency_data(buf);
             main_ctx.put_image_data(
                 &web_sys::ImageData::new_with_u8_clamped_array(
@@ -46,7 +46,7 @@ fn start_animation_loop() {
                 0.0, 0.0)
                 .expect_throw_val("outputting the rendered audio visualisation");
             
-            envelope_ctx.fill_rect(0.0, 0.0, envelope_width as f64, envelope_height as f64);
+            envelope_ctx.fill_rect(0.0, 0.0, envelope_width, envelope_height);
             envelope_ctx.set_line_dash(&ctx.solid_line)
                 .expect_throw_val("drawing the envelope graph");
             envelope_ctx.set_line_width(3.0);
@@ -63,12 +63,11 @@ fn start_animation_loop() {
                     (time / 1000.0 - ctx.envelope_pbar_start).min(ctx.envelope_in_time)
                 } else {
                     time / 1000.0 + ctx.envelope_pbar_start + ctx.envelope_in_time
-                } / ctx.envelope_span * envelope_width as f64;
+                } / ctx.envelope_span * envelope_width;
                 envelope_ctx.begin_path();
                 envelope_ctx.move_to(x, 0.0);
-                envelope_ctx.line_to(x, envelope_height as f64);
-                envelope_ctx.stroke();
-            }
+                envelope_ctx.line_to(x, envelope_height);
+                envelope_ctx.stroke()}
 
             utils::window()
                 .request_animation_frame(&ctx.js_callback)
@@ -187,14 +186,16 @@ impl yew::Component for Main {
                     .expect_throw_val("getting the rendering context of one of the canvases after resizing the screen")
                     .expect_throw("getting the rendering context of one of the canvases after resizing the screen")
                     .unchecked_into::<web_sys::CanvasRenderingContext2d>();
-                let (fill_style, stroke_style, line_width, text_align, text_baseline) = 
+                let (fill_style, stroke_style, font, line_width, text_align, text_baseline) = 
                     (ctx.fill_style(),
                      ctx.stroke_style(),
+                     ctx.font(),
                      ctx.line_width(),
                      ctx.text_align(),
                      ctx.text_baseline());
-                canvas.set_height((300.0 * canvas.client_height() as f64 / canvas.client_width() as f64) as u32);
-                ctx.set_font("2em consolas");
+                canvas.set_width(300);
+                canvas.set_height((canvas.client_height() as f64 / canvas.client_width() as f64 * 300.0) as u32);
+                ctx.set_font(&font);
                 ctx.set_fill_style(&fill_style);
                 ctx.set_stroke_style(&stroke_style);
                 ctx.set_line_width(line_width);
@@ -326,10 +327,8 @@ impl yew::Component for Main {
 
         unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}.lock().map(|mut handle| {
             let ctx = &mut *handle;
-            let (width, height) = unsafe{utils::document()
-                .get_element_by_id("envelope").unwrap_unchecked()}
-                .unchecked_into::<web_sys::HtmlCanvasElement>()
-                .pipe(|x| (x.client_width() as f64, x.client_height() as f64));
+            let (width, height, _) = unsafe{utils::get_canvas_ctx("envelope", &Default::default())
+                .unwrap_unchecked()};
 
             ctx.envelope_in_time = self.attack + self.decay;
             ctx.envelope_span = ctx.envelope_in_time + self.release;

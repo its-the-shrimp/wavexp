@@ -30,6 +30,9 @@ pub enum SliderCmd {
     Unfocus(web_sys::HtmlElement)
 }
 
+const LINE_WIDTH: f64 = 10.0;
+const FONT: &'static str = "4em consolas";
+
 impl yew::Component for Slider {
     type Message = SliderCmd;
     type Properties = SliderProps;
@@ -87,32 +90,31 @@ impl yew::Component for Slider {
         let SliderProps{coef, precision, postfix, ..} = ctx.props();
         let (w, h, ctx) = unsafe {utils::get_canvas_ctx(&self.id, &Default::default())
             .unwrap_unchecked()};
-        let (w, h) = (w as f64 / 2.0, h as f64 / 2.0);
+        let (w, h) = (w / 2.0, h / 2.0);
 // this is safe because by the time this function is called,
 // the canvas for the slider itself is already rendered
-        const WIDTH: f64 = 5.0;
         if first_render {
             ctx.set_fill_style(&"#0069E1".into());
             ctx.set_stroke_style(&"#0069E1".into());
-            ctx.set_line_width(WIDTH);
-            ctx.set_font("2em consolas");
+            ctx.set_line_width(LINE_WIDTH);
+            ctx.set_font(FONT);
             ctx.set_text_align("center")}
         ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
         ctx.begin_path();
-        let r = w.min(h) - WIDTH * 1.5; // 1.5 is an arbitrary multiplier without which the
+        let r = w.min(h) - LINE_WIDTH * 1.5; // 1.5 is an arbitrary multiplier without which the
                                         // slider would go slightly over the edge, idk why
         if self.value != 0.0 {
-            ctx.arc(w, h + WIDTH, r,
+            ctx.arc(w, h + LINE_WIDTH, r,
                 PI * 1.5, (self.value as f64 * 2.0 + 1.5) * PI)
                 .expect_throw_val("drawing the slider");
             ctx.stroke()}
         ctx.set_text_baseline("middle");
         ctx.fill_text_with_max_width(&format!("{:.*}", precision, coef * self.value),
-            w, h + WIDTH / 2.0, r)
+            w, h + LINE_WIDTH / 2.0, r)
             .expect_throw_val("drawing the text on the slider");
         ctx.set_text_baseline("top");
         ctx.fill_text_with_max_width(postfix, 
-            w, h + WIDTH * 2.0 + ctx.measure_text("0")
+            w, h + LINE_WIDTH * 2.0 + ctx.measure_text("0")
                 .expect_throw_val("getting the font height while rendering the slider")
                 .font_bounding_box_ascent() * 2.0, r * 1.5)
             .expect_throw_val("drawing the unit name below the slider's value");
@@ -202,24 +204,24 @@ impl yew::Component for Switch {
             .unwrap_unchecked()};
 // this is safe because by the time this function is called,
 // the canvas for the slider itself is already rendered
-        let (w, h) = (w as f64 / 2.0, h as f64 / 2.0);
-        const WIDTH: f64 = 5.0;
+        let (w, h) = (w / 2.0, h / 2.0);
         if first_render {
+            ctx.set_fill_style(&"#0069E1".into());
             ctx.set_stroke_style(&"#0069E1".into());
-            ctx.set_line_width(WIDTH);
-            ctx.set_font("2em consolas");
+            ctx.set_line_width(LINE_WIDTH);
+            ctx.set_font(FONT);
             ctx.set_text_align("center");
             ctx.set_text_baseline("middle")}
         ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
-        let r = w.min(h) - WIDTH * 1.5; // 1.5 is an arbitrary multiplier without which the
+        let r = w.min(h) - LINE_WIDTH * 1.5; // 1.5 is an arbitrary multiplier without which the
                                         // slider would go slightly over the edge, idk why
         let index = self.value.floor();
         ctx.begin_path();
-        ctx.arc(w, h + WIDTH, r, (index / 2.0 + 1.5) * PI, index / 2.0 * PI)
+        ctx.arc(w, h + LINE_WIDTH, r, (index / 2.0 + 1.5) * PI, index / 2.0 * PI)
             .expect_throw_val("drawing the switch");
         ctx.stroke();
         ctx.fill_text_with_max_width(unsafe{options.get_unchecked(index as usize)},
-            w, h + WIDTH, r * 1.5)
+            w, h + LINE_WIDTH, r * 1.5)
             .expect_throw_val("drawing the chosen option name on a switch");
     }
 }
