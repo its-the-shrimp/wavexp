@@ -63,8 +63,6 @@ impl Renderer {
 	}
 	pub fn set_size(&mut self, width: usize, height: usize) -> &mut Self {
 		// TODO: correctly readjust the graph when shrinked in the UI
-        if self.width != width || self.height != height {
-            crate::utils::js_log!("{} {}", width, height)}
 		self.width = width;
 		self.height = height;
 		self.out_data.resize(width * height, Self::BG);

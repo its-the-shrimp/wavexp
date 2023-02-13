@@ -1,17 +1,17 @@
-use wasm_bindgen::{JsCast, UnwrapThrowExt};
+use wasm_bindgen::JsCast;
 
 pub trait Check: Sized {
-	#[inline]
-	fn check<F>(self, f: F) -> Result<Self, Self> where F: FnOnce(&Self) -> bool {
+	#[inline] fn check<F>(self, f: F) -> Result<Self, Self>
+    where F: FnOnce(&Self) -> bool {
 		if f(&self) {Ok(self)} else {Err(self)}
 	}
-	#[inline]
-	fn is_in<R>(self, range: R) -> Result<Self, Self>
+
+    #[inline] fn is_in<R>(self, range: R) -> Result<Self, Self>
 	where Self: PartialOrd, R: std::ops::RangeBounds<Self> {
 		if range.contains(&self) {Ok(self)} else {Err(self)}
 	}
-	#[inline]
-	fn not_in<R>(self, range: R) -> Result<Self, Self>
+
+	#[inline] fn not_in<R>(self, range: R) -> Result<Self, Self>
 	where Self: PartialOrd, R: std::ops::RangeBounds<Self> {
 		if !range.contains(&self) {Ok(self)} else {Err(self)}
 	}
@@ -19,10 +19,14 @@ pub trait Check: Sized {
 impl<T> Check for T {}
 
 pub trait Tee: Sized {
-	#[inline]
-	fn tee<F>(self, f: F) -> Self where F: FnOnce(&Self) {
-		f(&self); self
+	#[inline] fn tee<F>(self, f: F) -> Self where F: FnOnce(&Self) {
+        f(&self); self
 	}
+
+    #[inline] fn js_log<'a>(self, label: &'a str) -> Self 
+    where Self: std::fmt::Debug {
+        js_log!("{}{:?}", label, &self); self
+    }
 }
 impl<T> Tee for T {}
 
@@ -82,35 +86,95 @@ pub fn document() -> crate::web_sys::Document {
 	unsafe {web_sys::window().unwrap_unchecked().document().unwrap_unchecked()}
 }
 
+
 pub fn get_canvas_ctx(name: &str, options: &wasm_bindgen::JsValue)
--> Option<(f64, f64, web_sys::CanvasRenderingContext2d)> {
-    let res = document().get_element_by_id(name)?
+-> JsResult<(f64, f64, web_sys::CanvasRenderingContext2d)> {
+    let res = document().get_element_by_id(name)
+        .ok_or_else(|| js_sys::Error::new(&*format!("could not find the canvas '{}'", name)))?
         .unchecked_into::<web_sys::HtmlCanvasElement>();
-    Some((res.width() as f64, res.height() as f64,
-        res.get_context_with_context_options("2d", options)
-            .expect_throw_val("fetching the rendering context for the canvas")
-            .expect_throw("fetching the rendering context for the canvas")
+    Ok((res.width() as f64, res.height() as f64,
+        res.get_context_with_context_options("2d", options)?
+            .ok_or_else(|| js_sys::Error::new(&*format!("could not get the rendering context of the canvas '{}'", name)))?
             .unchecked_into::<web_sys::CanvasRenderingContext2d>()))
 }
 
-pub trait ExpectThrowVal<T>: Sized {
-	fn expect_throw_val(self, msg: &str) -> T;
-	fn unwrap_throw_val(self) -> T {
-		self.expect_throw_val("`expect_or_throw` failed")
-	}
+pub fn sync_canvas(name: &str) {
+    let canvas = document().get_element_by_id(name)
+        .expect_throw_with(|| format!("could not find the canvas '{}' to adjust its size", name))
+        .unchecked_into::<web_sys::HtmlCanvasElement>();
+    canvas.set_height((canvas.client_height() as f64 / canvas.client_width() as f64 * 300.0) as u32);
 }
 
-impl<T, E> ExpectThrowVal<T> for Result<T, E>
-where E: Into<wasm_bindgen::JsValue> {
-	fn expect_throw_val(self, msg: &str) -> T {
+fn to_error_with_msg(err: wasm_bindgen::JsValue, msg: &str) -> wasm_bindgen::JsValue {
+    let s = format!("error while {}: {}", msg, 
+        match err.dyn_into::<js_sys::Error>() {
+            Ok(val) => val.message().into(),
+            Err(val) => js_sys::Object::from(val).to_string()});
+    js_sys::Error::new(&s).into()
+}
+
+pub trait ResultUtils<T>: Sized {
+    fn expect_throw_with<F>(self, f: F) -> T
+    where F: FnOnce() -> String;
+    fn expect_throw(self, msg: &str) -> T;
+}
+
+pub type JsResult<T> = Result<T, wasm_bindgen::JsValue>;
+
+impl<T, E> ResultUtils<T> for Result<T, E> {
+    fn expect_throw_with<F>(self, f: F) -> T
+    where F: FnOnce() -> String {
+        match self {
+            Ok(val) => val,
+            Err(_) => wasm_bindgen::throw_str(&f())}
+    }
+
+    fn expect_throw(self, msg: &str) -> T {
+        match self {
+            Ok(val) => val,
+            Err(_) => wasm_bindgen::throw_str(msg)}
+    }
+}
+
+impl<T> ResultUtils<T> for Option<T> {
+    fn expect_throw_with<F>(self, f: F) -> T
+    where F: FnOnce() -> String {
+        match self {
+            Some(val) => val,
+            None => wasm_bindgen::throw_str(&f())}
+    }
+
+    fn expect_throw(self, msg: &str) -> T {
+        match self {
+            Some(val) => val,
+            None => wasm_bindgen::throw_str(msg)}
+    }
+}
+
+pub trait JsResultUtils<T>: Sized {
+    fn add_msg_to_err(self, msg: &str) -> Self;
+    fn expect_throw_val_with<F>(self, f: F) -> T
+    where F: FnOnce() -> String;
+	fn expect_throw_val(self, msg: &str) -> T;
+}
+
+impl<T> JsResultUtils<T> for Result<T, wasm_bindgen::JsValue> {
+    #[inline] fn add_msg_to_err(self, msg: &str) -> Self {
+        self.map_err(|err| to_error_with_msg(err, msg))
+    }
+
+    fn expect_throw_val_with<F>(self, f: F) -> T
+    where F: FnOnce() -> String {
 		match self {
 			Ok(val)  => val,
-			Err(err) => wasm_bindgen::throw_val(match err.into().dyn_into::<js_sys::Error>() {
-				Ok(res) => 
-					js_sys::Error::new(&*format!("panicked at `{}`: {}", msg, res.message()))
-						.into(),
-				Err(err) => err})}
+			Err(err) => wasm_bindgen::throw_val(to_error_with_msg(err, &f()))}
 	}
+
+    fn expect_throw_val(self, msg: &str) -> T {
+        match self {
+            Ok(val) => val,
+            Err(err) => wasm_bindgen::throw_val(to_error_with_msg(err, msg))}
+    }
 }
 
 pub struct EveryNth<'a, T> {
@@ -149,7 +213,6 @@ impl<'a, T> std::iter::Iterator for EveryNthMut<'a, T> {
 				.map(|x| unsafe{(x as *mut T).as_mut().unwrap_unchecked()})
     }
 }
-
 
 pub trait ToEveryNth<T> {
     fn every_nth<'a>(&'a self, n: usize) -> EveryNth<'a, T>;

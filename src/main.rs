@@ -1,16 +1,18 @@
+#![feature(get_many_mut)]
+#![feature(is_some_and)]
 mod render;
 mod utils;
 mod input;
-use input::{Slider, Switch};
-use utils::ExpectThrowVal;
+mod sound;
+use utils::{ResultUtils, JsResultUtils, Pipe};
 use web_sys;
 use js_sys;
 use wasm_bindgen;
-use wasm_bindgen::{UnwrapThrowExt, JsCast};
+use wasm_bindgen::JsCast;
 use std::rc::Rc;
 
 struct AnimationCtx {
-    analyser: web_sys::AnalyserNode,
+    analyser: Rc<web_sys::AnalyserNode>,
     envelope_graph: web_sys::Path2d,
     envelope_in_time: f64,
     envelope_span: f64,
@@ -46,7 +48,7 @@ fn start_animation_loop() {
                 0.0, 0.0)
                 .expect_throw_val("outputting the rendered audio visualisation");
             
-            envelope_ctx.fill_rect(0.0, 0.0, envelope_width, envelope_height);
+            /*envelope_ctx.fill_rect(0.0, 0.0, envelope_width, envelope_height);
             envelope_ctx.set_line_dash(&ctx.solid_line)
                 .expect_throw_val("drawing the envelope graph");
             envelope_ctx.set_line_width(3.0);
@@ -67,12 +69,12 @@ fn start_animation_loop() {
                 envelope_ctx.begin_path();
                 envelope_ctx.move_to(x, 0.0);
                 envelope_ctx.line_to(x, envelope_height);
-                envelope_ctx.stroke()}
+                envelope_ctx.stroke()}*/
 
             utils::window()
                 .request_animation_frame(&ctx.js_callback)
                 .expect_throw_val("rescheduling the animation callback");
-        }).expect_throw("getting the animation context from the animation loop");
+        }).expect_throw("getting the animation context from the animation loop")
     }
 
     let (_, _, main_ctx) = unsafe {
@@ -99,69 +101,59 @@ fn start_animation_loop() {
 }
 
 struct Main {
-	attack: f64,
-    decay: f64,
-    sustain: f64,
-	release: f64,
-	player: web_sys::AudioContext,
-	source: web_sys::OscillatorNode,
-	envelope: web_sys::GainNode,
-    help_msg: Rc<str>
+    player: web_sys::AudioContext,
+    help_msg: Rc<str>,
+    selected_comp: Option<usize>
+}
+
+pub fn sound_comps() -> &'static mut Vec<sound::SoundFunctor> {
+    static mut RES: Vec<sound::SoundFunctor> = Vec::new();
+    unsafe{&mut RES}
 }
 
 #[derive(Debug)]
-enum MainCmd {
-	SetFreq(f64),
-	SetAttack(f64),
-    SetDecay(f64),
-    SetSustain(f64),
-	SetRelease(f64),
+pub enum MainCmd {
     SetDesc(Rc<str>),
-    RemoveDesc(()),
-    SetWaveType(u8),
-	Start(), 
-	End(),
-    Redraw()
+    RemoveDesc(),
+    Select(Option<usize>),
+    TryConnect(usize, i32, i32),
+    SetParam(usize, usize, f64),
+    Start(), 
+    End(),
+}
+
+static mut MAINCMD_SENDER: Option<yew::Callback<MainCmd>> = None;
+impl MainCmd {
+    #[inline] pub fn send(self) {
+        unsafe{MAINCMD_SENDER.as_ref().unwrap_unchecked()}.emit(self)
+    }
 }
 
 impl Main {
-	const CHANNEL_COUNT: u32 = 2;
-    const MAX_FREQ: f64 = 5000.0;
-    const MAX_INTERVAL: f64 = 2.0;
-	const MAX_VOLUME: f32 = 0.2;
-	const MIN_VOLUME: f32 = f32::MIN_POSITIVE;
-    const DEF_DESC: &'static str = "Here will be a help message";
+    const DEF_DESC: &'static str = "Hover over an element to get help";
 }
 
-static mut REDRAW_HOOK: Option<yew::Callback<()>> = None;
-
 impl yew::Component for Main {
-	type Message = MainCmd;
-	type Properties = ();
+    type Message = MainCmd;
+    type Properties = ();
 
-	fn create(ctx: &yew::Context<Self>) -> Self {
-		let player = web_sys::AudioContext::new()
-			.expect_throw_val("initialising the audio context");
-		let envelope = web_sys::GainNode::new_with_options(
-			&player,
-			web_sys::GainOptions::new()
-				.channel_count(Self::CHANNEL_COUNT)
-				.gain(Self::MIN_VOLUME))
-			.expect_throw_val("initialising the volume controller");
-		let source = web_sys::OscillatorNode::new_with_options(
-			&player, web_sys::OscillatorOptions::new()
-				.channel_count(Self::CHANNEL_COUNT)
-				.frequency(0.0))
-			.expect_throw_val("initializing the audio source");
-        let analyser = web_sys::AnalyserNode::new(&player)
-            .expect_throw_val("initialising the audio analyser");
-		source.connect_with_audio_node(&envelope)
-			.expect_throw_val("connecting the volume controller")
-			.connect_with_audio_node(&analyser)
-			.expect_throw_val("connecting the audio analyser")
-			.connect_with_audio_node(&player.destination())
-			.expect_throw_val("connecting the audio output");
-		source.start().expect_throw_val("starting the audio");
+    fn create(ctx: &yew::Context<Self>) -> Self {
+        *unsafe{&mut MAINCMD_SENDER} = Some(ctx.link().callback(|msg| msg));
+
+        let player = web_sys::AudioContext::new()
+            .expect_throw_val("creating the audio context");
+        let analyser = Rc::new(web_sys::AnalyserNode::new(&player)
+            .expect_throw_val("creating the main audio visualiser"));
+        analyser.connect_with_audio_node(&player.destination())
+            .expect_throw_val("connecting the analyser with the built-in output node");
+        *sound_comps() = vec![
+            sound::SoundFunctor::new_wave(&player, 0, 300, 350)
+                .expect_throw_val("create the generator component"), 
+            sound::SoundFunctor::new_envelope(&player, 1, 500, 350)
+                .expect_throw_val("creating the envelope component"),
+            sound::SoundFunctor::new_builtin_output(analyser.clone(), 2, 750, 350)
+                .expect_throw_val("creating the output component")];
+
 // initalizing context for the animation loop
         *unsafe{&mut ANIMATION_CTX} = Some(std::sync::Mutex::new(AnimationCtx {
             analyser,
@@ -174,156 +166,99 @@ impl yew::Component for Main {
             renderer: render::Renderer::new(),
             js_callback: Default::default() // initialized later in `start_animation_loop`
         }));
-// initializing the resize callback to adjust the canvases
-        *unsafe{&mut REDRAW_HOOK} = Some(ctx.link().callback(|()| MainCmd::Redraw()));
-        utils::window().set_onresize(Some(&wasm_bindgen::closure::Closure::<dyn Fn(web_sys::Event)>::new(|_| {
-            let iter = utils::document().query_selector_all("canvas")
-                .expect_throw_val("selecting all the canvases after resizing the screen");
-            for i in 0..iter.length() {
-                let canvas = unsafe{iter.get(i).unwrap_unchecked()} // this is safe because `i` is
-                    .unchecked_into::<web_sys::HtmlCanvasElement>(); // guaranteed to be in the range `[0; iter.length())`
-                let ctx = canvas.get_context("2d")
-                    .expect_throw_val("getting the rendering context of one of the canvases after resizing the screen")
-                    .expect_throw("getting the rendering context of one of the canvases after resizing the screen")
-                    .unchecked_into::<web_sys::CanvasRenderingContext2d>();
-                let (fill_style, stroke_style, font, line_width, text_align, text_baseline) = 
-                    (ctx.fill_style(),
-                     ctx.stroke_style(),
-                     ctx.font(),
-                     ctx.line_width(),
-                     ctx.text_align(),
-                     ctx.text_baseline());
-                canvas.set_width(300);
-                canvas.set_height((canvas.client_height() as f64 / canvas.client_width() as f64 * 300.0) as u32);
-                ctx.set_font(&font);
-                ctx.set_fill_style(&fill_style);
-                ctx.set_stroke_style(&stroke_style);
-                ctx.set_line_width(line_width);
-                ctx.set_text_align(&text_align);
-                ctx.set_text_baseline(&text_baseline);
-            }
-            unsafe{REDRAW_HOOK.as_ref().unwrap_unchecked()} // this is safe because by the time the handler
-                .emit(())                                   // is registered, `REDRAW_HOOK` is already defined
-        }).into_js_value().unchecked_into::<js_sys::Function>()));
 
-		Self {help_msg: Self::DEF_DESC.into(),
-            attack: 0.0, release: 0.0,
-            decay: 0.0, sustain: 0.5,
-			source, envelope, player}
-	}
+        Self {help_msg: Self::DEF_DESC.into(),
+            selected_comp: None, player}
+    }
 
-	fn update(&mut self, _: &yew::Context<Self>, msg: Self::Message) -> bool {
+    fn update(&mut self, _: &yew::Context<Self>, msg: Self::Message) -> bool {
         let cur_time = self.player.current_time();
-		match msg {
-			MainCmd::SetFreq(value) => {
-                self.source.frequency()
-                    .set_value_at_time(value as f32, cur_time)
-                    .expect_throw_val("updating the frequency");
-                false}
-			MainCmd::SetAttack(value)  => {self.attack   = value;                 true}
-            MainCmd::SetDecay(value)   => {self.decay    = value;                 true}
-            MainCmd::SetSustain(value) => {self.sustain  = value;                 true}
-			MainCmd::SetRelease(value) => {self.release  = value;                 true}
-            MainCmd::SetDesc(value)    => {self.help_msg = value;                 true}
-            MainCmd::RemoveDesc(())    => {self.help_msg = Self::DEF_DESC.into(); true}
-            MainCmd::SetWaveType(id)   => {
-                self.source.set_type(
-                    [web_sys::OscillatorType::Sine,
-                        web_sys::OscillatorType::Square,
-                        web_sys::OscillatorType::Sawtooth,
-                        web_sys::OscillatorType::Triangle][id as usize]);
-                false}
-			MainCmd::Start() => {
+        match msg {
+            MainCmd::SetDesc(value) =>
+                self.help_msg = format!("{:1$}", value, Self::DEF_DESC.len()).into(),
+            MainCmd::RemoveDesc() => 
+                self.help_msg = Self::DEF_DESC.into(),
+            MainCmd::Select(id) => if id.zip(std::mem::replace(&mut self.selected_comp, id)).is_some_and(|(x, y)| x == y) {
+                self.selected_comp = None
+            }
+            MainCmd::TryConnect(src_id, x, y) => {
+                if let Some(dst_id) = sound_comps().iter().position(|dst| dst.contains(x, y)) {
+                    if let Ok([src, dst]) = sound_comps().get_many_mut([src_id, dst_id]) {
+                        src.connect(dst)
+                            .expect_throw_val("executing `MainCmd::TryConnect` command");
+                    }
+                }
+            }
+            MainCmd::SetParam(component_id, param_id, value) => {
+                sound_comps().get_mut(component_id)
+                    .expect_throw_with(|| format!("could not find component #{} to set one of its parameters", component_id))
+                    .set_param(param_id, value, cur_time)
+                    .expect_throw_val("setting the component's parameter")
+            }
+            MainCmd::Start() => {
                 unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}
-                    .lock().expect_throw("accessing the animation context")
+                    .lock().expect_throw("failed to access the animation context")
                     .envelope_pbar_start = f64::INFINITY;
-                self.envelope.gain()
-                    .cancel_scheduled_values(0.0)
-                    .expect_throw_val("resetting the volume control")
-                    .linear_ramp_to_value_at_time(Self::MAX_VOLUME,
-                        cur_time + self.attack)
-                    .expect_throw_val("setting the attack period")
-                    .linear_ramp_to_value_at_time(Self::MAX_VOLUME * self.sustain as f32,
-                        cur_time + self.attack + self.decay)
-                    .expect_throw_val("setting the decay period");
-                false}
-			MainCmd::End() => {
+                for comp in sound_comps().iter_mut() {
+                    comp.start(cur_time)
+                        .expect_throw_val("starting a sound component")
+                }
+                return false}
+            MainCmd::End() => {
                 unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}
-                    .lock().expect_throw("accessing the animation context")
+                    .lock().expect_throw("failed to access the animation context")
                     .envelope_pbar_start = f64::NEG_INFINITY;
-                self.envelope.gain()
-                    .cancel_scheduled_values(0.0)
-                    .expect_throw_val("resetting the envelope for the fade-out")
-                    .linear_ramp_to_value_at_time(Self::MIN_VOLUME,
-                        cur_time + self.release)
-                    .expect_throw_val("setting the volume fade-out");
-                false}
-            MainCmd::Redraw() => true
-		}
-	}
+                for comp in sound_comps().iter_mut() {
+                    comp.end(cur_time)
+                        .expect_throw_val("ending a sound component")
+                }
+                return false}
+        }
+        true
+    }
 
-	fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
-		yew::html! {<>
-			<div id="ctrl-panel">
+    fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
+        yew::html! {<>
+            <svg width="100%" height="100%"
+            viewBox={utils::document().body()
+                .expect_throw("failed because the whole freaking body is absent for some reason").pipe(|body|
+                   format!("0 0 {} {}", body.client_width(), body.client_height()))}>
+                {for sound_comps().iter().map(sound::SoundFunctor::as_html)}
+            </svg>
+            <div id="ctrl-panel">
                 <div id="help-msg">{self.help_msg.clone()}</div>
                 <div id="inputs">
-                    <Slider
-                        coef={Self::MAX_FREQ} precision={0}
-                        postfix={"Hz"}
-                        onfocus={ctx.link().callback(|()| MainCmd::SetDesc("Frequency".into()))}
-                        onunfocus={ctx.link().callback(MainCmd::RemoveDesc)}
-                        oninput={ctx.link().callback(MainCmd::SetFreq)}/>
-                    <Slider
-                        coef={Self::MAX_INTERVAL}
-                        postfix={"s"}
-                        onfocus={ctx.link().callback(|()| MainCmd::SetDesc("Attack time".into()))} 
-                        onunfocus={ctx.link().callback(MainCmd::RemoveDesc)} 
-                        oninput={ctx.link().callback(MainCmd::SetAttack)}/>
-                    <Slider
-                        coef={Self::MAX_INTERVAL}
-                        postfix={"s"}
-                        onfocus={ctx.link().callback(|()| MainCmd::SetDesc("Decay time".into()))} 
-                        onunfocus={ctx.link().callback(MainCmd::RemoveDesc)} 
-                        oninput={ctx.link().callback(MainCmd::SetDecay)}/>
-                    <Slider
-                        onfocus={ctx.link().callback(|()| MainCmd::SetDesc("Sustain level".into()))} 
-                        onunfocus={ctx.link().callback(MainCmd::RemoveDesc)} 
-                        oninput={ctx.link().callback(MainCmd::SetSustain)}/>
-                    <Slider
-                        coef={Self::MAX_INTERVAL}
-                        postfix={"s"}
-                        onfocus={ctx.link().callback(|()| MainCmd::SetDesc("Release time".into()))} 
-                        onunfocus={ctx.link().callback(MainCmd::RemoveDesc)} 
-                        oninput={ctx.link().callback(MainCmd::SetRelease)}/>
-                    <Switch
-                        options={vec!["Sine".into(), "Square".into(), "Saw".into(), "Triangle".into()]}
-                        onfocus={ctx.link().callback(|()| MainCmd::SetDesc("Wave type".into()))}
-                        onunfocus={ctx.link().callback(|()| MainCmd::RemoveDesc(()))}
-                        oninput={ctx.link().callback(MainCmd::SetWaveType)}/>
+                    if let Some(selected) = self.selected_comp {
+                        {sound_comps().get(selected)
+                            .expect_throw("getting the selected component")
+                            .params()}
+                    }
                 </div>
                 <canvas id="envelope" class="graph"></canvas>
-			</div>
-			<div id="visuals">
-				<canvas id="main" class="graph"></canvas>
-				<button
-				onmousedown={ctx.link().callback(|_| MainCmd::Start())}
-				onmouseup={ctx.link().callback(|_| MainCmd::End())}>
-					{"Play"}
-				</button>
-			</div>
-		</>}
-	}
+            </div>
+            <div id="visuals">
+                <canvas id="main" class="graph"></canvas>
+                <button
+                onmousedown={ctx.link().callback(|_| MainCmd::Start())}
+                onmouseup={ctx.link().callback(|_| MainCmd::End())}>
+                    {"Play"}
+                </button>
+            </div>
+        </>}
+    }
 
-	fn rendered(&mut self, ctx: &yew::Context<Self>, first: bool) {
-        if first {
-            unsafe{utils::window().onresize().unwrap_unchecked()}
-                .call0(&wasm_bindgen::JsValue::UNDEFINED)
-                .expect_throw_val("emitting the first resize event to prepare the canvases");
+    fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
+        if first_render {
             start_animation_loop();
-            ctx.link().send_message(MainCmd::Redraw());
+            utils::sync_canvas("main");
+            utils::sync_canvas("envelope");
+            utils::document()
+                .get_element_by_id("help-msg")
+                .expect_throw("could not find the help message bar")
+                .unchecked_into::<web_sys::HtmlElement>();
         }
 
-        unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}.lock().map(|mut handle| {
+        /*unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}.lock().map(|mut handle| {
             let ctx = &mut *handle;
             let (width, height, _) = unsafe{utils::get_canvas_ctx("envelope", &Default::default())
                 .unwrap_unchecked()};
@@ -337,7 +272,7 @@ impl yew::Component for Main {
             ctx.envelope_graph.line_to(ctx.envelope_in_time / ctx.envelope_span * width,
                 (1.0 - self.sustain) as f64 * height);
             ctx.envelope_graph.line_to(width, height);
-        }).expect_throw("accessing the animation context");
+        }).expect_throw("accessing the animation context");*/
     }
 }
 

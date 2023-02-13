@@ -4,13 +4,17 @@
 		<link data-trunk rel="copy-dir" href="static/">
 		<title>Test</title>
 		<style>
+			html {height: 100%}
 			body {
+				z-index: 1;
 				background-color: #232328;
 				color: #0069E1;
 				overflow: hidden;
 				text-align: center;
 				font-family: consolas;
-				display: flex}
+				display: flex;
+				z-index: 1;
+				height: 100%}
 			canvas {object-fit: contain}
 			#ctrl-panel {
 				position: fixed;
@@ -22,7 +26,9 @@
 				flex-direction: column}
 			#help-msg {
 				background-color: #232328;
-				padding: 1em}
+				padding: 1em;
+				white-space: pre;
+				overflow: hidden}
 			.graph {border: 3px solid #0069E1}
 			#inputs {
 				display: grid;
@@ -47,6 +53,10 @@
 			.default-input {
 				width: 6em;
 				height: 6em}
+			.component {
+				fill: #232328;
+				stroke: #0069E1;
+				stroke-width: 2}
 		</style>
 	</head>
 	<body>

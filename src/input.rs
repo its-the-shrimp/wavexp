@@ -1,93 +1,104 @@
 use std::rc::Rc;
-use wasm_bindgen::{UnwrapThrowExt, JsCast};
+use wasm_bindgen::JsCast;
 use yew::TargetCast;
-use crate::utils::{self, ExpectThrowVal};
+use crate::{utils::{self, ResultUtils, JsResultUtils, Tee}, MainCmd};
 
 pub struct Slider {
     value: f64,
-    onpointermove: js_sys::Function,
-    id: Rc<str>
+    id: Rc<str>,
+    focused: bool
 }
 
 #[derive(PartialEq, yew::Properties)]
 pub struct SliderProps {
+    #[prop_or(yew::classes!("default-input"))]
+    pub class: yew::html::Classes,
+    pub name: Rc<str>,
     #[prop_or(1.0)]
     pub coef: f64,
     #[prop_or(2)]
     pub precision: usize,
-    #[prop_or(yew::classes!("default-input"))]
-    pub class: yew::html::Classes,
     #[prop_or_default]
     pub postfix: yew::AttrValue,
-    pub oninput: yew::Callback<f64>,
-    pub onfocus: yew::Callback<()>,
-    pub onunfocus: yew::Callback<()>
+    pub component_id: usize,
+    pub id: usize,
+    pub initial: f64
 }
 
-pub enum SliderCmd {
-    ChangeValue(f64),
-    Focus(web_sys::HtmlElement),
-    Unfocus(web_sys::HtmlElement)
+pub enum InputCmd {
+    ChangeValue(web_sys::PointerEvent),
+    Focus(web_sys::PointerEvent),
+    Unfocus(web_sys::PointerEvent),
+    MaybeShowHelp(),
+    MaybeHideHelp()
 }
 
 const LINE_WIDTH: f64 = 10.0;
 const FONT: &'static str = "4em consolas";
 
 impl yew::Component for Slider {
-    type Message = SliderCmd;
+    type Message = InputCmd;
     type Properties = SliderProps;
 
     fn create(ctx: &yew::Context<Self>) -> Self {
-        let c: &'static yew::Callback<_> = Box::leak(ctx.link().callback(|e: web_sys::PointerEvent| 
-            SliderCmd::ChangeValue(
-                e.movement_y() as f64 / e.target_unchecked_into::<web_sys::Element>().client_height() as f64 / -2.0)
-        ).into());
-        Self {value: 0.0,
-            onpointermove: wasm_bindgen::closure::Closure::<dyn Fn(_)>::new(|e: web_sys::PointerEvent| c.emit(e))
-                .into_js_value().unchecked_into(),
+        let SliderProps {coef, initial, ..} = ctx.props();
+        Self {focused: false, value: initial / coef,
             id: uuid::Uuid::new_v4().to_string().into()}
     }
 
     fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
         match msg {
-            SliderCmd::ChangeValue(val) => {
-                self.value = (self.value + val).clamp(0.0, 1.0);
-                ctx.props().oninput.emit(self.value * ctx.props().coef);
+            InputCmd::ChangeValue(e) => {
+                self.value = match e.target_unchecked_into::<web_sys::Element>().client_height() {
+                    0 => self.value,
+                    h => (self.value + e.movement_y() as f64 / (h * -2) as f64).clamp(0.0, 1.0)};
+                let SliderProps {component_id, id, coef, ..} = ctx.props();
+                MainCmd::SetParam(*component_id, *id, self.value * coef).send();
                 true}
-            SliderCmd::Focus(target) => {
-                target.set_onpointermove(Some(&self.onpointermove));
-                ctx.props().onfocus.emit(());
+            InputCmd::Focus(e) => {
+                let target = e.target()
+                    .expect_throw("fetching the input element in the `pointerdown` event")
+                    .unchecked_into::<web_sys::HtmlElement>();
+                target.set_pointer_capture(e.pointer_id())
+                    .expect_throw_val("setting the cursor focus on the input switch");
+                self.focused = true;
+                MainCmd::SetDesc(ctx.props().name.clone()).send();
+                true}
+            InputCmd::Unfocus(e) => {
+                let target = e.target()
+                    .expect_throw("fetching the input element in the `pointerup` event")
+                    .unchecked_into::<web_sys::HtmlElement>();
+                target.release_pointer_capture(e.pointer_id())
+                    .expect_throw_val("releasing the cursor focus from the input switch");
+                self.focused = false;
+                MainCmd::RemoveDesc().send();
+                true}
+            InputCmd::MaybeShowHelp() => {
+                if !self.focused {
+                    MainCmd::SetDesc(ctx.props().name.clone()).send()}
                 false}
-            SliderCmd::Unfocus(target) => {
-                target.set_onpointermove(None);
-                ctx.props().onunfocus.emit(());
-            false}}
+            InputCmd::MaybeHideHelp() => {
+                if !self.focused {
+                    MainCmd::RemoveDesc().send()}
+                false}
+        }
     }
 
 	fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
-        let on_unfocus = ctx.link().callback(|e: web_sys::PointerEvent| {
-            let input = e.target()
-                .expect_throw("fetching the input element in the `pointerup` event")
-                .unchecked_into::<web_sys::HtmlElement>();
-            input.release_pointer_capture(e.pointer_id())
-                .expect_throw_val("releasing the cursor focus from the input slider");
-            SliderCmd::Unfocus(input)});
         yew::html! {
             <canvas id={self.id.clone()} class={ctx.props().class.clone()}
-            onpointerdown={ctx.link().callback(|e: web_sys::PointerEvent| {
-                let input = e.target()
-                    .expect_throw("fetching the input element in the `pointerdown` event")
-                    .unchecked_into::<web_sys::HtmlElement>();
-                input.set_pointer_capture(e.pointer_id())
-                    .expect_throw_val("setting the cursor focus on the input slider");
-                SliderCmd::Focus(input)})}
-            onpointerup={on_unfocus.clone()}
-            onpointercancel={on_unfocus}/>}
+            onpointerdown={ctx.link().callback(InputCmd::Focus)}
+            onpointerup={ctx.link().callback(InputCmd::Unfocus)}
+            onpointercancel={ctx.link().callback(InputCmd::Unfocus)}
+            onpointerenter={ctx.link().callback(|_| InputCmd::MaybeShowHelp())}
+            onpointerleave={ctx.link().callback(|_| InputCmd::MaybeHideHelp())}
+            onpointermove={self.focused.then(|| ctx.link().callback(InputCmd::ChangeValue))}/>}
     }
 
     fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
         use std::f64::consts::PI;
         let SliderProps{coef, precision, postfix, ..} = ctx.props();
+        if first_render {utils::sync_canvas(&self.id)}
         let (w, h, ctx) = unsafe {utils::get_canvas_ctx(&self.id, &Default::default())
             .unwrap_unchecked()};
         let (w, h) = (w / 2.0, h / 2.0);
@@ -123,83 +134,85 @@ impl yew::Component for Slider {
 
 pub struct Switch {
     value: f64,
-    onpointermove: js_sys::Function,
-    id: Rc<str>
+    id: Rc<str>,
+    focused: bool
 }
 
 #[derive(PartialEq, yew::Properties)]
 pub struct SwitchProps {
     #[prop_or(yew::classes!("default-input"))]
     pub class: yew::Classes,
+    pub name: Rc<str>,
     pub options: Vec<Rc<str>>,
-    pub oninput: yew::Callback<u8>,
-    pub onfocus: yew::Callback<()>,
-    pub onunfocus: yew::Callback<()>
-}
-
-pub enum SwitchCmd {
-    ChangeValue(f64),
-    Focus(web_sys::HtmlElement),
-    Unfocus(web_sys::HtmlElement)
+    pub component_id: usize,
+    pub id: usize,
+    pub initial: usize
 }
 
 impl yew::Component for Switch {
-    type Message = SwitchCmd;
+    type Message = InputCmd;
     type Properties = SwitchProps;
 
     fn create(ctx: &yew::Context<Self>) -> Self {
-        let c: &'static yew::Callback<_> = Box::leak(ctx.link().callback(|e: web_sys::PointerEvent| 
-            SwitchCmd::ChangeValue(
-                e.movement_y() as f64 / e.target_unchecked_into::<web_sys::Element>().client_height() as f64 / -0.5)
-        ).into());
-        Self {value: 0.0,
-            onpointermove: wasm_bindgen::closure::Closure::<dyn Fn(_)>::new(|e: web_sys::PointerEvent| c.emit(e))
-                .into_js_value().unchecked_into(),
+        Self {focused: false, value: ctx.props().initial as f64,
             id: uuid::Uuid::new_v4().to_string().into()}
     }
 
     fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
+        let SwitchProps {options, component_id, id, name, ..} = ctx.props();
         match msg {
-            SwitchCmd::ChangeValue(val) => {
-                let old_value = self.value as u8;
-                self.value = (self.value + val).rem_euclid(ctx.props().options.len() as f64);
-                if old_value == self.value as u8 {return false}
-                ctx.props().oninput.emit(self.value as u8);
+            InputCmd::ChangeValue(e) => {
+                let old_value = self.value as usize;
+                self.value = match e.target_dyn_into::<web_sys::Element>() {
+                    None => return false,
+                    Some(t) => (self.value + e.movement_y() as f64 / t.client_height() as f64 / -0.5)
+                        .rem_euclid(options.len() as f64)
+                };
+                if old_value == self.value as usize {return false}
+                MainCmd::SetParam(*component_id, *id, self.value).send();
                 true}
-            SwitchCmd::Focus(target) => {
-                target.set_onpointermove(Some(&self.onpointermove));
-                ctx.props().onfocus.emit(());
+            InputCmd::Focus(e) => {
+                e.target()
+                    .expect_throw("fetching the input element in the `pointerdown` event")
+                    .unchecked_into::<web_sys::HtmlElement>()
+                    .set_pointer_capture(e.pointer_id())
+                    .expect_throw_val("setting the cursor focus on the input switch");
+                self.focused = true;
+                MainCmd::SetDesc(name.clone()).send();
+                true}
+            InputCmd::Unfocus(e) => {
+                e.target()
+                    .expect_throw("fetching the input element in the `pointerup` event")
+                    .unchecked_into::<web_sys::HtmlElement>()
+                    .release_pointer_capture(e.pointer_id())
+                    .expect_throw_val("releasing the cursor focus from the input switch");
+                self.focused = false;
+                MainCmd::RemoveDesc().send();
+                true}
+            InputCmd::MaybeShowHelp() => {
+                MainCmd::SetDesc(name.clone()).send();
                 false}
-            SwitchCmd::Unfocus(target) => {
-                target.set_onpointermove(None);
-                ctx.props().onunfocus.emit(());
-            false}}
+            InputCmd::MaybeHideHelp() => {
+                MainCmd::RemoveDesc().send();
+                false}
+        }
     }
 
 	fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
-        let on_unfocus = ctx.link().callback(|e: web_sys::PointerEvent| {
-            let input = e.target()
-                .expect_throw("fetching the input element in the `pointerup` event")
-                .unchecked_into::<web_sys::HtmlElement>();
-            input.release_pointer_capture(e.pointer_id())
-                .expect_throw_val("releasing the cursor focus from the input switch");
-            SwitchCmd::Unfocus(input)});
         yew::html! {
             <canvas id={self.id.clone()} class={ctx.props().class.clone()}
-            onpointerdown={ctx.link().callback(|e: web_sys::PointerEvent| {
-                let input = e.target()
-                    .expect_throw("fetching the input element in the `pointerdown` event")
-                    .unchecked_into::<web_sys::HtmlElement>();
-                input.set_pointer_capture(e.pointer_id())
-                    .expect_throw_val("setting the cursor focus on the input switch");
-                SwitchCmd::Focus(input)})}
-            onpointerup={on_unfocus.clone()}
-            onpointercancel={on_unfocus}/>}
+            onpointerdown={ctx.link().callback(InputCmd::Focus)}
+            onpointerup={ctx.link().callback(InputCmd::Unfocus)}
+            onpointercancel={ctx.link().callback(InputCmd::Unfocus)}
+            onpointerenter={ctx.link().callback(|_| InputCmd::MaybeShowHelp())}
+            onpointerleave={ctx.link().callback(|_| InputCmd::MaybeHideHelp())}
+            onpointermove={self.focused.then(|| ctx.link().callback(InputCmd::ChangeValue))}/>}
     }
 
     fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
         use std::f64::consts::PI;
         let SwitchProps{options, ..} = ctx.props();
+        if first_render {utils::sync_canvas(&self.id)}
         let (w, h, ctx) = unsafe {utils::get_canvas_ctx(&self.id, &Default::default())
             .unwrap_unchecked()};
 // this is safe because by the time this function is called,
