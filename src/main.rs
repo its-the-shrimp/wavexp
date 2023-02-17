@@ -13,13 +13,13 @@ use std::rc::Rc;
 
 struct AnimationCtx {
     analyser: Rc<web_sys::AnalyserNode>,
-    envelope_graph: web_sys::Path2d,
-    envelope_in_time: f64,
-    envelope_span: f64,
-    envelope_pbar_start: f64,
+    renderer: render::Renderer,
+    graph: web_sys::Path2d,
     solid_line: wasm_bindgen::JsValue,
     dotted_line: wasm_bindgen::JsValue,
-    renderer: render::Renderer,
+    graph_in_span: f64,
+    graph_span: f64,
+    pbar_start: f64,
     js_callback: js_sys::Function
 }
 
@@ -27,68 +27,70 @@ static mut ANIMATION_CTX: Option<std::sync::Mutex<AnimationCtx>> = None;
 
 fn start_animation_loop() {
     fn render(time: f64) {
-        unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}.lock().map(|mut handle| {
-            let ctx = &mut *handle;
-            let (main_width, main_height, main_ctx) = unsafe {
-                utils::get_canvas_ctx("main",
-                    &utils::js_obj!{ bool antialias: false, bool alpha: false })
-                    .unwrap_unchecked()};
-            let (envelope_width, envelope_height, envelope_ctx) = unsafe {
-                utils::get_canvas_ctx("envelope", &utils::js_obj!{ bool alpha: false })
-                    .unwrap_unchecked()};
-    // `unwrap_unchecked` here is safe because the enclosing function is only called after
-    // the canvases "main" and "envelope" has been shown to the user
-            let buf = ctx.renderer.set_size(main_width as usize, main_height as usize).get_in_buffer();
-            ctx.analyser.get_byte_frequency_data(buf);
-            main_ctx.put_image_data(
-                &web_sys::ImageData::new_with_u8_clamped_array(
-                    wasm_bindgen::Clamped(ctx.renderer.graph().get_out_bytes()),
-                    main_width as u32)
-                    .expect_throw_val("preparing the rendered audio visualisation"),
-                0.0, 0.0)
-                .expect_throw_val("outputting the rendered audio visualisation");
-            
-            /*envelope_ctx.fill_rect(0.0, 0.0, envelope_width, envelope_height);
-            envelope_ctx.set_line_dash(&ctx.solid_line)
-                .expect_throw_val("drawing the envelope graph");
-            envelope_ctx.set_line_width(3.0);
-            envelope_ctx.stroke_with_path(&ctx.envelope_graph);
-            if !ctx.envelope_pbar_start.is_nan() {
-                envelope_ctx.set_line_dash(&ctx.dotted_line)
-                    .expect_throw_val("drawing the envelope progress bar");
-                envelope_ctx.set_line_width(1.0);
-                envelope_ctx.set_line_dash_offset(time / 100.0);
-                if ctx.envelope_pbar_start.is_infinite() {
-                    ctx.envelope_pbar_start = time.copysign(ctx.envelope_pbar_start) / 1000.0
-                }
-                let x = if ctx.envelope_pbar_start.is_sign_positive() {
-                    (time / 1000.0 - ctx.envelope_pbar_start).min(ctx.envelope_in_time)
-                } else {
-                    time / 1000.0 + ctx.envelope_pbar_start + ctx.envelope_in_time
-                } / ctx.envelope_span * envelope_width;
-                envelope_ctx.begin_path();
-                envelope_ctx.move_to(x, 0.0);
-                envelope_ctx.line_to(x, envelope_height);
-                envelope_ctx.stroke()}*/
+        if let Ok(AnimationCtx {analyser, renderer,
+            graph, solid_line, dotted_line, 
+            graph_in_span, graph_span, pbar_start,
+            js_callback }) = unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}.lock().as_deref_mut() {
+            let graph_out_span = *graph_span - *graph_in_span;
 
+            if let Some((w, h, ctx)) = utils::get_canvas_ctx("main", false, false) {
+                let buf = renderer.set_size(w as usize, h as usize).get_in_buffer();
+                analyser.get_byte_frequency_data(buf);
+                ctx.put_image_data(
+                    &web_sys::ImageData::new_with_u8_clamped_array(
+                        wasm_bindgen::Clamped(renderer.graph().get_out_bytes()), w as u32)
+                        .expect_throw_val("preparing the rendered audio visualisation"),
+                    0.0, 0.0)
+                    .expect_throw_val("outputting the rendered audio visualisation");
+            }
+
+            if let Some((w, h, ctx)) = utils::get_canvas_ctx("graph", true, true) {
+                ctx.set_fill_style(&"#181818".into());
+                ctx.fill_rect(0.0, 0.0, w, h);
+                if graph_span.is_finite() {
+                    ctx.set_line_width(3.0);
+                    ctx.set_stroke_style(&"#0069E1".into());
+                    ctx.stroke_with_path(graph);
+                    if !pbar_start.is_nan() {
+                        if pbar_start.is_infinite() {
+                            *pbar_start = time.copysign(*pbar_start) / 1000.0}
+
+                        if pbar_start.is_sign_negative() && (time / 1000.0 + *pbar_start > graph_out_span) {
+                            *pbar_start = f64::NAN;
+                        } else {
+                            let x = if pbar_start.is_sign_positive() {
+                                (time / 1000.0 - *pbar_start).min(*graph_in_span)
+                            } else {
+                                time / 1000.0 + *pbar_start + *graph_in_span
+                            } / *graph_span * w;
+                            ctx.set_line_dash(dotted_line)
+                                .expect_throw_val("drawing the envelope progress bar");
+                            ctx.set_line_width(1.0);
+                            ctx.set_line_dash_offset(time / 100.0);
+                            ctx.begin_path();
+                            ctx.move_to(x, 0.0);
+                            ctx.line_to(x, h);
+                            ctx.stroke();
+                            ctx.set_line_dash(solid_line)
+                                .expect_throw_val("drawing the graph");
+                        }
+                    }
+                }
+            }
+            
             utils::window()
-                .request_animation_frame(&ctx.js_callback)
+                .request_animation_frame(js_callback)
                 .expect_throw_val("rescheduling the animation callback");
-        }).expect_throw("getting the animation context from the animation loop")
+        }
     }
 
-    let (_, _, main_ctx) = unsafe {
-        utils::get_canvas_ctx("main",
-            &utils::js_obj!{ bool antialias: false, bool alpha: false })
-            .unwrap_unchecked()};
-    let (_, _, envelope_ctx) = unsafe {
-        utils::get_canvas_ctx("envelope",
-            &utils::js_obj!{ bool alpha: false })
-            .unwrap_unchecked()};
-    main_ctx.set_stroke_style(&"#0069E1".into());
-    main_ctx.set_fill_style(&"#181818".into());
-    envelope_ctx.set_stroke_style(&"#0069E1".into());
-    envelope_ctx.set_fill_style(&"#181818".into());
+    for name in ["main", "graph"] {
+        if let Some((_, _, ctx)) = utils::get_canvas_ctx(name, false, false) {
+            ctx.set_stroke_style(&"#0069E1".into());
+            ctx.set_fill_style(&"#181818".into());
+        }
+    }
+
     unsafe{ANIMATION_CTX
         .as_mut().unwrap_unchecked()
         .get_mut().unwrap_unchecked()}
@@ -157,13 +159,14 @@ impl yew::Component for Main {
 // initalizing context for the animation loop
         *unsafe{&mut ANIMATION_CTX} = Some(std::sync::Mutex::new(AnimationCtx {
             analyser,
-            envelope_graph: web_sys::Path2d::new()
-                .expect_throw_val("initializing an empty envelope graph"),
-            envelope_in_time: f64::NAN, envelope_span: f64::NAN,
-            envelope_pbar_start: f64::NAN,
+            renderer: render::Renderer::new(),
             solid_line: js_sys::Array::new().into(),
             dotted_line: js_sys::Array::of2(&(10.0).into(), &(10.0).into()).into(),
-            renderer: render::Renderer::new(),
+            graph: web_sys::Path2d::new()
+                .expect_throw_val("initializing an empty envelope graph"),
+            graph_in_span: f64::NAN,
+            graph_span: f64::NAN,
+            pbar_start: f64::NAN,
             js_callback: Default::default() // initialized later in `start_animation_loop`
         }));
 
@@ -174,50 +177,65 @@ impl yew::Component for Main {
     fn update(&mut self, _: &yew::Context<Self>, msg: Self::Message) -> bool {
         let cur_time = self.player.current_time();
         match msg {
-            MainCmd::SetDesc(value) =>
-                self.help_msg = format!("{:1$}", value, Self::DEF_DESC.len()).into(),
-            MainCmd::RemoveDesc() => 
-                self.help_msg = Self::DEF_DESC.into(),
-            MainCmd::Select(id) => if id.zip(std::mem::replace(&mut self.selected_comp, id)).is_some_and(|(x, y)| x == y) {
-                self.selected_comp = None
-            }
-            MainCmd::TryConnect(src_id, x, y) => {
+            MainCmd::SetDesc(value) =>{
+                self.help_msg = format!("{:1$}", value, Self::DEF_DESC.len()).into();
+            return true}
+            MainCmd::RemoveDesc() => {
+                self.help_msg = Self::DEF_DESC.into();
+            return true}
+            MainCmd::Select(id) => {
+                self.selected_comp = id.filter(|&x| Some(x) != self.selected_comp);
+                if let Ok(mut ctx) = unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}.lock() {
+                    ctx.graph_span = f64::NAN;
+                }
+            return true}
+
+            MainCmd::TryConnect(src_id, x, y) => 
                 if let Some(dst_id) = sound_comps().iter().position(|dst| dst.contains(x, y)) {
                     if let Ok([src, dst]) = sound_comps().get_many_mut([src_id, dst_id]) {
                         src.connect(dst)
                             .expect_throw_val("executing `MainCmd::TryConnect` command");
                     }
                 }
-            }
-            MainCmd::SetParam(component_id, param_id, value) => {
-                sound_comps().get_mut(component_id)
-                    .expect_throw_with(|| format!("could not find component #{} to set one of its parameters", component_id))
-                    .set_param(param_id, value, cur_time)
-                    .expect_throw_val("setting the component's parameter")
-            }
+
+            MainCmd::SetParam(component_id, param_id, value) =>
+                if let Some(comp) = sound_comps().get_mut(component_id) {
+                    comp.set_param(param_id, value, cur_time)
+                        .expect_throw_val("setting the component's parameter");
+                    if let Some((w, h, _)) = utils::get_canvas_ctx("graph", false, false) {
+                        if let Ok(mut ctx) = unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}.lock() {
+                            if let Ok((graph, graph_in_span, graph_span)) = comp.graph(w, h) {
+                                ctx.graph = graph;
+                                ctx.graph_in_span = graph_in_span;
+                                ctx.graph_span = graph_span;
+                            } else {
+                                ctx.graph_span = f64::NAN;
+                            }
+                        }
+                    }
+                }
+
             MainCmd::Start() => {
-                unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}
-                    .lock().expect_throw("failed to access the animation context")
-                    .envelope_pbar_start = f64::INFINITY;
-                for comp in sound_comps().iter_mut() {
-                    comp.start(cur_time)
-                        .expect_throw_val("starting a sound component")
-                }
-                return false}
+                if let Ok(mut ctx) = unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}.lock() {
+                    ctx.pbar_start = f64::INFINITY}
+
+                sound_comps().iter_mut().try_for_each(|comp| comp.start(cur_time))
+                    .expect_throw_val("starting a sound component")
+            }
+
             MainCmd::End() => {
-                unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}
-                    .lock().expect_throw("failed to access the animation context")
-                    .envelope_pbar_start = f64::NEG_INFINITY;
-                for comp in sound_comps().iter_mut() {
-                    comp.end(cur_time)
-                        .expect_throw_val("ending a sound component")
-                }
-                return false}
+                if let Ok(mut ctx) = unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}.lock() {
+                    ctx.pbar_start = f64::NEG_INFINITY}
+
+                sound_comps().iter_mut().try_for_each(|comp| comp.end(cur_time))
+                    .expect_throw_val("ending a sound component")
+            }
         }
-        true
+        false
     }
 
     fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
+        let comp = self.selected_comp.and_then(|i| sound_comps().get(i));
         yew::html! {<>
             <svg width="100%" height="100%"
             viewBox={utils::document().body()
@@ -228,16 +246,14 @@ impl yew::Component for Main {
             <div id="ctrl-panel">
                 <div id="help-msg">{self.help_msg.clone()}</div>
                 <div id="inputs">
-                    if let Some(selected) = self.selected_comp {
-                        {sound_comps().get(selected)
-                            .expect_throw("getting the selected component")
-                            .params()}
-                    }
+                    {comp.map(sound::SoundFunctor::params)}
                 </div>
-                <canvas id="envelope" class="graph"></canvas>
+                if comp.map(|comp| comp.graphable()).unwrap_or(false) {
+                    <canvas id="graph" class="visual"/>
+                }
             </div>
             <div id="visuals">
-                <canvas id="main" class="graph"></canvas>
+                <canvas id="main" class="visual"/>
                 <button
                 onmousedown={ctx.link().callback(|_| MainCmd::Start())}
                 onmouseup={ctx.link().callback(|_| MainCmd::End())}>
@@ -247,32 +263,12 @@ impl yew::Component for Main {
         </>}
     }
 
-    fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
+    fn rendered(&mut self, _: &yew::Context<Self>, first_render: bool) {
         if first_render {
             start_animation_loop();
             utils::sync_canvas("main");
-            utils::sync_canvas("envelope");
-            utils::document()
-                .get_element_by_id("help-msg")
-                .expect_throw("could not find the help message bar")
-                .unchecked_into::<web_sys::HtmlElement>();
         }
-
-        /*unsafe{ANIMATION_CTX.as_ref().unwrap_unchecked()}.lock().map(|mut handle| {
-            let ctx = &mut *handle;
-            let (width, height, _) = unsafe{utils::get_canvas_ctx("envelope", &Default::default())
-                .unwrap_unchecked()};
-
-            ctx.envelope_in_time = self.attack + self.decay;
-            ctx.envelope_span = ctx.envelope_in_time + self.release;
-            ctx.envelope_graph = web_sys::Path2d::new()
-                .expect_throw_val("creating the envelope graph");
-            ctx.envelope_graph.move_to(0.0, height);
-            ctx.envelope_graph.line_to(self.attack / ctx.envelope_span * width, 0.0);
-            ctx.envelope_graph.line_to(ctx.envelope_in_time / ctx.envelope_span * width,
-                (1.0 - self.sustain) as f64 * height);
-            ctx.envelope_graph.line_to(width, height);
-        }).expect_throw("accessing the animation context");*/
+        utils::sync_canvas("graph");
     }
 }
 

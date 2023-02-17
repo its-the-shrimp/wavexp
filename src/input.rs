@@ -1,7 +1,8 @@
 use std::rc::Rc;
+use std::f64::consts::PI;
 use wasm_bindgen::JsCast;
 use yew::TargetCast;
-use crate::{utils::{self, ResultUtils, JsResultUtils, Tee}, MainCmd};
+use crate::{utils::{self, ResultUtils, JsResultUtils}, MainCmd};
 
 pub struct Slider {
     value: f64,
@@ -96,39 +97,36 @@ impl yew::Component for Slider {
     }
 
     fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
-        use std::f64::consts::PI;
         let SliderProps{coef, precision, postfix, ..} = ctx.props();
         if first_render {utils::sync_canvas(&self.id)}
-        let (w, h, ctx) = unsafe {utils::get_canvas_ctx(&self.id, &Default::default())
-            .unwrap_unchecked()};
-        let (w, h) = (w / 2.0, h / 2.0);
-// this is safe because by the time this function is called,
-// the canvas for the slider itself is already rendered
-        if first_render {
-            ctx.set_fill_style(&"#0069E1".into());
-            ctx.set_stroke_style(&"#0069E1".into());
-            ctx.set_line_width(LINE_WIDTH);
-            ctx.set_font(FONT);
-            ctx.set_text_align("center")}
-        ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
-        ctx.begin_path();
-        let r = w.min(h) - LINE_WIDTH * 1.5; // 1.5 is an arbitrary multiplier without which the
-                                        // slider would go slightly over the edge, idk why
-        if self.value != 0.0 {
-            ctx.arc(w, h + LINE_WIDTH, r,
-                PI * 1.5, (self.value as f64 * 2.0 + 1.5) * PI)
-                .expect_throw_val("drawing the slider");
-            ctx.stroke()}
-        ctx.set_text_baseline("middle");
-        ctx.fill_text_with_max_width(&format!("{:.*}", precision, coef * self.value),
-            w, h + LINE_WIDTH / 2.0, r)
-            .expect_throw_val("drawing the text on the slider");
-        ctx.set_text_baseline("top");
-        ctx.fill_text_with_max_width(postfix, 
-            w, h + LINE_WIDTH * 2.0 + ctx.measure_text("0")
-                .expect_throw_val("getting the font height while rendering the slider")
-                .font_bounding_box_ascent() * 2.0, r * 1.5)
-            .expect_throw_val("drawing the unit name below the slider's value");
+        if let Some((w, h, ctx)) = utils::get_canvas_ctx(&self.id, true, true) {
+            let (w, h) = (w / 2.0, h / 2.0);
+            if first_render {
+                ctx.set_fill_style(&"#0069E1".into());
+                ctx.set_stroke_style(&"#0069E1".into());
+                ctx.set_line_width(LINE_WIDTH);
+                ctx.set_font(FONT);
+                ctx.set_text_align("center")}
+            ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
+            ctx.begin_path();
+            let r = w.min(h) - LINE_WIDTH * 1.5; // 1.5 is an arbitrary multiplier without which the
+                                            // slider would go slightly over the edge, idk why
+            if self.value != 0.0 {
+                ctx.arc(w, h + LINE_WIDTH, r,
+                    PI * 1.5, (self.value as f64 * 2.0 + 1.5) * PI)
+                    .expect_throw_val("drawing the slider");
+                ctx.stroke()}
+            ctx.set_text_baseline("middle");
+            ctx.fill_text_with_max_width(&format!("{:.*}", precision, coef * self.value),
+                w, h + LINE_WIDTH / 2.0, r)
+                .expect_throw_val("drawing the text on the slider");
+            ctx.set_text_baseline("top");
+            ctx.fill_text_with_max_width(postfix, 
+                w, h + LINE_WIDTH * 2.0 + ctx.measure_text("0")
+                    .expect_throw_val("getting the font height while rendering the slider")
+                    .font_bounding_box_ascent() * 2.0, r * 1.5)
+                .expect_throw_val("drawing the unit name below the slider's value");
+        }
     }
 }
 
@@ -210,31 +208,28 @@ impl yew::Component for Switch {
     }
 
     fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
-        use std::f64::consts::PI;
         let SwitchProps{options, ..} = ctx.props();
         if first_render {utils::sync_canvas(&self.id)}
-        let (w, h, ctx) = unsafe {utils::get_canvas_ctx(&self.id, &Default::default())
-            .unwrap_unchecked()};
-// this is safe because by the time this function is called,
-// the canvas for the slider itself is already rendered
-        let (w, h) = (w / 2.0, h / 2.0);
-        if first_render {
-            ctx.set_fill_style(&"#0069E1".into());
-            ctx.set_stroke_style(&"#0069E1".into());
-            ctx.set_line_width(LINE_WIDTH);
-            ctx.set_font(FONT);
-            ctx.set_text_align("center");
-            ctx.set_text_baseline("middle")}
-        ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
-        let r = w.min(h) - LINE_WIDTH * 1.5; // 1.5 is an arbitrary multiplier without which the
-                                        // slider would go slightly over the edge, idk why
-        let index = self.value.floor();
-        ctx.begin_path();
-        ctx.arc(w, h + LINE_WIDTH, r, (index / 2.0 + 1.5) * PI, index / 2.0 * PI)
-            .expect_throw_val("drawing the switch");
-        ctx.stroke();
-        ctx.fill_text_with_max_width(unsafe{options.get_unchecked(index as usize)},
-            w, h + LINE_WIDTH, r * 1.5)
-            .expect_throw_val("drawing the chosen option name on a switch");
+        if let Some((w, h, ctx)) = utils::get_canvas_ctx(&self.id, true, true) {
+            let (w, h) = (w / 2.0, h / 2.0);
+            if first_render {
+                ctx.set_fill_style(&"#0069E1".into());
+                ctx.set_stroke_style(&"#0069E1".into());
+                ctx.set_line_width(LINE_WIDTH);
+                ctx.set_font(FONT);
+                ctx.set_text_align("center");
+                ctx.set_text_baseline("middle")}
+            ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
+            let r = w.min(h) - LINE_WIDTH * 1.5; // 1.5 is an arbitrary multiplier without which the
+                                            // slider would go slightly over the edge, idk why
+            let index = self.value.floor();
+            ctx.begin_path();
+            ctx.arc(w, h + LINE_WIDTH, r, (index / 2.0 + 1.5) * PI, index / 2.0 * PI)
+                .expect_throw_val("drawing the switch");
+            ctx.stroke();
+            ctx.fill_text_with_max_width(unsafe{options.get_unchecked(index as usize)},
+                w, h + LINE_WIDTH, r * 1.5)
+                .expect_throw_val("drawing the chosen option name on a switch");
+        }
     }
 }

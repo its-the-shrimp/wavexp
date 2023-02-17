@@ -1,5 +1,5 @@
 use wasm_bindgen::JsCast;
-use crate::utils::{JsResult, ResultUtils, JsResultUtils, Tee, Pipe, self};
+use crate::utils::{JsResult, ResultUtils, JsResultUtils, Tee, Pipe};
 use crate::input;
 use crate::{MainCmd, sound_comps};
 use std::rc::Rc;
@@ -211,6 +211,27 @@ impl SoundFunctor {
     pub fn as_html(&self) -> yew::Html {
         yew::html!{
             <SoundBlock id={self.id} name={Rc::from(self.name())}/>}
+    }
+
+    pub fn graph(&self, width: f64, height: f64) -> JsResult<(web_sys::Path2d, f64, f64)> {
+        match &self.functor_type {
+            SoundFunctorType::Envelope {attack, decay, sustain, release, ..} => {
+                let res = (web_sys::Path2d::new()?, attack + decay);
+                let res = (res.0, res.1, res.1 + release);
+                res.0.move_to(0.0, height);
+                res.0.line_to(attack / res.2 * width, 0.0);
+                res.0.line_to(res.1 / res.2 * width, (1.0 - sustain) as f64 * height);
+                res.0.line_to(width, height);
+                Ok(res).js_log("new graph")}
+            _ => Ok((web_sys::Path2d::new()?, f64::NAN, f64::NAN))
+        }
+    }
+
+    pub fn graphable(&self) -> bool {
+        match &self.functor_type {
+            SoundFunctorType::Envelope {..} => true,
+            _ => false
+        }
     }
 }
 

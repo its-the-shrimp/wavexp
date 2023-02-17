@@ -87,22 +87,20 @@ pub fn document() -> crate::web_sys::Document {
 }
 
 
-pub fn get_canvas_ctx(name: &str, options: &wasm_bindgen::JsValue)
--> JsResult<(f64, f64, web_sys::CanvasRenderingContext2d)> {
-    let res = document().get_element_by_id(name)
-        .ok_or_else(|| js_sys::Error::new(&*format!("could not find the canvas '{}'", name)))?
+pub fn get_canvas_ctx(name: &str, antialias: bool, alpha: bool)
+-> Option<(f64, f64, web_sys::CanvasRenderingContext2d)> {
+    let res = document().get_element_by_id(name)?
         .unchecked_into::<web_sys::HtmlCanvasElement>();
-    Ok((res.width() as f64, res.height() as f64,
-        res.get_context_with_context_options("2d", options)?
-            .ok_or_else(|| js_sys::Error::new(&*format!("could not get the rendering context of the canvas '{}'", name)))?
+    Some((res.width() as f64, res.height() as f64,
+        res.get_context_with_context_options("2d", &js_obj!{bool alpha: alpha, bool antialias: antialias})
+            .ok()??
             .unchecked_into::<web_sys::CanvasRenderingContext2d>()))
 }
 
 pub fn sync_canvas(name: &str) {
-    let canvas = document().get_element_by_id(name)
-        .expect_throw_with(|| format!("could not find the canvas '{}' to adjust its size", name))
-        .unchecked_into::<web_sys::HtmlCanvasElement>();
-    canvas.set_height((canvas.client_height() as f64 / canvas.client_width() as f64 * 300.0) as u32);
+    document().get_element_by_id(name)
+        .and_then(|x| x.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        .map(|x| x.set_height((x.client_height() as f64 / x.client_width() as f64 * 300.0) as u32));
 }
 
 fn to_error_with_msg(err: wasm_bindgen::JsValue, msg: &str) -> wasm_bindgen::JsValue {
