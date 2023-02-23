@@ -78,6 +78,8 @@ macro_rules! js_log {
 }
 pub use js_log;
 
+use crate::MainCmd;
+
 pub fn window() -> crate::web_sys::Window {
 	unsafe {web_sys::window().unwrap_unchecked()}
 }
@@ -88,19 +90,26 @@ pub fn document() -> crate::web_sys::Document {
 
 
 pub fn get_canvas_ctx(name: &str, antialias: bool, alpha: bool)
--> Option<(f64, f64, web_sys::CanvasRenderingContext2d)> {
-    let res = document().get_element_by_id(name)?
+-> JsResult<(f64, f64, web_sys::CanvasRenderingContext2d)> {
+    let res = document().get_element_by_id(name)
+        .ok_or_js_error_with(|| format!("canvas #{} not found", name))?
         .unchecked_into::<web_sys::HtmlCanvasElement>();
-    Some((res.width() as f64, res.height() as f64,
-        res.get_context_with_context_options("2d", &js_obj!{bool alpha: alpha, bool antialias: antialias})
-            .ok()??
+    Ok((res.width() as f64, res.height() as f64,
+        res.get_context_with_context_options("2d", &js_obj!{bool alpha: alpha, bool antialias: antialias})?
+            .ok_or_js_error_with(|| format!("rendering context not found for canvas #{}", name))?
             .unchecked_into::<web_sys::CanvasRenderingContext2d>()))
 }
 
-pub fn sync_canvas(name: &str) {
-    document().get_element_by_id(name)
-        .and_then(|x| x.dyn_into::<web_sys::HtmlCanvasElement>().ok())
-        .map(|x| x.set_height((x.client_height() as f64 / x.client_width() as f64 * 300.0) as u32));
+pub fn sync_canvas(name: &str) -> JsResult<()> {
+    let err: JsResult<!> = try {
+        let comp = document().get_element_by_id(name)
+            .ok_or_js_error("element not found")?;
+        let comp = comp.dyn_into::<web_sys::HtmlCanvasElement>().ok()
+            .ok_or_js_error("the element is not a <canvas>")?;
+        comp.set_height((comp.client_height() as f64 / comp.client_width() as f64 * 300.0) as u32);
+        return Ok(())
+    };
+    Err(err.explain_err_with(|| format!("syncing the dimensions of the element #{}", name)).into_err())
 }
 
 fn to_error_with_msg(err: wasm_bindgen::JsValue, msg: &str) -> wasm_bindgen::JsValue {
@@ -111,67 +120,70 @@ fn to_error_with_msg(err: wasm_bindgen::JsValue, msg: &str) -> wasm_bindgen::JsV
     js_sys::Error::new(&s).into()
 }
 
-pub trait ResultUtils<T>: Sized {
-    fn expect_throw_with<F>(self, f: F) -> T
-    where F: FnOnce() -> String;
-    fn expect_throw(self, msg: &str) -> T;
-}
-
 pub type JsResult<T> = Result<T, wasm_bindgen::JsValue>;
 
-impl<T, E> ResultUtils<T> for Result<T, E> {
-    fn expect_throw_with<F>(self, f: F) -> T
-    where F: FnOnce() -> String {
-        match self {
-            Ok(val) => val,
-            Err(_) => wasm_bindgen::throw_str(&f())}
+pub trait OkOrJsError<T>: Sized {
+    fn ok_or_js_error_with(self, f: impl FnOnce() -> String) -> JsResult<T>;
+    fn ok_or_js_error(self, msg: &str) -> JsResult<T>;
+}
+
+impl<T> OkOrJsError<T> for Option<T> {
+    #[inline] fn ok_or_js_error_with(self, f: impl FnOnce() -> String) -> JsResult<T> {
+        self.ok_or_else(|| js_sys::Error::new(&f()).into())
     }
 
-    fn expect_throw(self, msg: &str) -> T {
-        match self {
-            Ok(val) => val,
-            Err(_) => wasm_bindgen::throw_str(msg)}
+    #[inline] fn ok_or_js_error(self, msg: &str) -> JsResult<T> {
+        self.ok_or_else(|| js_sys::Error::new(msg).into())
     }
 }
 
-impl<T> ResultUtils<T> for Option<T> {
-    fn expect_throw_with<F>(self, f: F) -> T
-    where F: FnOnce() -> String {
-        match self {
-            Some(val) => val,
-            None => wasm_bindgen::throw_str(&f())}
-    }
+pub trait ToJsResult<T> {
+    fn to_js_result(self) -> JsResult<T>;
+}
 
-    fn expect_throw(self, msg: &str) -> T {
-        match self {
-            Some(val) => val,
-            None => wasm_bindgen::throw_str(msg)}
+impl<T, E: std::fmt::Display> ToJsResult<T> for Result<T, E> {
+    fn to_js_result(self) -> JsResult<T> {
+        self.map_err(|e| e.to_string().into())
     }
 }
 
 pub trait JsResultUtils<T>: Sized {
-    fn add_msg_to_err(self, msg: &str) -> Self;
-    fn expect_throw_val_with<F>(self, f: F) -> T
-    where F: FnOnce() -> String;
-	fn expect_throw_val(self, msg: &str) -> T;
+    fn explain_err_with(self, f: impl FnOnce() -> String) -> Self;
+    fn explain_err(self, msg: &str) -> Self;
+    fn expect_throw_with(self, f: impl FnOnce() -> String) -> T;
+	fn expect_throw(self, msg: &str) -> T;
+    fn report_err_with(self, f: impl FnOnce() -> String) -> Self;
+	fn report_err(self, msg: &str) -> Self;
 }
 
 impl<T> JsResultUtils<T> for Result<T, wasm_bindgen::JsValue> {
-    #[inline] fn add_msg_to_err(self, msg: &str) -> Self {
+    #[inline] fn explain_err_with(self, f: impl FnOnce() -> String) -> Self {
+        self.map_err(|err| to_error_with_msg(err, &f()))
+    }
+    #[inline] fn explain_err(self, msg: &str) -> Self {
         self.map_err(|err| to_error_with_msg(err, msg))
     }
 
-    fn expect_throw_val_with<F>(self, f: F) -> T
-    where F: FnOnce() -> String {
+    #[inline] fn expect_throw_with(self, f: impl FnOnce() -> String) -> T {
 		match self {
 			Ok(val)  => val,
 			Err(err) => wasm_bindgen::throw_val(to_error_with_msg(err, &f()))}
 	}
 
-    fn expect_throw_val(self, msg: &str) -> T {
+    #[inline] fn expect_throw(self, msg: &str) -> T {
         match self {
             Ok(val) => val,
             Err(err) => wasm_bindgen::throw_val(to_error_with_msg(err, msg))}
+    }
+
+    #[inline] fn report_err_with(self, f: impl FnOnce() -> String) -> Self {
+        self.inspect_err(|err|
+            MainCmd::ReportError(to_error_with_msg(err.clone(), &f())).send())
+    }
+
+    #[inline] fn report_err(self, msg: &str) -> Self {
+        self.inspect_err(|err|
+            MainCmd::ReportError(to_error_with_msg(err.clone(), msg)).send())
     }
 }
 
@@ -218,10 +230,50 @@ pub trait ToEveryNth<T> {
 }
 
 impl<T> ToEveryNth<T> for [T] {
-    fn every_nth<'a>(&'a self, n: usize) -> EveryNth<'a, T> {
+    #[inline] fn every_nth<'a>(&'a self, n: usize) -> EveryNth<'a, T> {
         EveryNth {iter: self, n, state: 0}
     }
-    fn every_nth_mut<'a>(&'a mut self, n: usize) -> EveryNthMut<'a, T> {
+    #[inline] fn every_nth_mut<'a>(&'a mut self, n: usize) -> EveryNthMut<'a, T> {
         EveryNthMut {iter: self, n, state: 0}
+    }
+}
+
+// this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
+// them from containing types that don't implement `Sync`. On any other architecture this
+// limitation makes sense, but in Webassembly, which doesn't support threading, this limitation is meaningless.
+pub struct WasmCell<T>(T);
+
+unsafe impl<T> Sync for WasmCell<T> {}
+
+impl<T> std::ops::Deref for WasmCell<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {&self.0}
+}
+
+impl<T> WasmCell<T> {
+    pub const fn new(val: T) -> Self {Self(val)}
+}
+
+pub struct MaybeCell<T>(std::cell::RefCell<Option<T>>);
+
+impl<T> MaybeCell<T> {
+    #[inline] pub const fn new() -> Self {
+        Self(std::cell::RefCell::new(None))
+    }
+
+    #[inline] pub fn get<'a>(&'a self) -> JsResult<std::cell::Ref<'a, T>> {
+        std::cell::Ref::filter_map(self.0.try_borrow().to_js_result()?,
+            |x| x.as_ref()).ok().ok_or_js_error("MaybeCell object not initialised")
+    }
+
+    #[inline] pub fn get_mut<'a>(&'a self) -> JsResult<std::cell::RefMut<'a, T>> {
+        std::cell::RefMut::filter_map(self.0.try_borrow_mut().to_js_result()?,
+            |x| x.as_mut()).ok().ok_or_js_error("MaybeCell object not initialised")
+    }
+
+    #[inline] pub fn set(&self, val: T) -> JsResult<()> {
+        std::cell::RefMut::map(self.0.try_borrow_mut().to_js_result()?,
+            |x| x.insert(val));
+        Ok(())
     }
 }

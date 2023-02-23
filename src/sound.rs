@@ -1,9 +1,7 @@
-use wasm_bindgen::JsCast;
-use crate::utils::{JsResult, ResultUtils, JsResultUtils, Tee, Pipe};
-use crate::input;
-use crate::{MainCmd, sound_comps};
+use crate::utils::{self, JsResultUtils, Tee, ToJsResult, OkOrJsError};
+use crate::{input, get_sound_comp, draggable, PLANE_OFFSET};
+use crate::{SOUND_COMPS, MainCmd};
 use std::rc::Rc;
-// TODO: implement an `StrVec` as an array, optimized for holding strings
 
 pub enum SoundFunctorType {
     Wave {gen: web_sys::OscillatorNode},
@@ -19,9 +17,9 @@ pub enum SoundFunctorType {
 pub struct SoundFunctor {
     functor_type: SoundFunctorType,
     id: usize,
-    x: i32,
-    y: i32,
-    forwards: Vec<usize>
+    location: [i32; 2],
+    forwards: Vec<usize>,
+    new_conn: Option<[i32; 2]>
 }
 
 impl PartialEq for SoundFunctor {
@@ -47,55 +45,57 @@ impl SoundFunctor {
     pub const MAX_INTERVAL: f64 = 2.0;
 	pub const MAX_VOLUME: f32 = 0.2;
 	pub const MIN_VOLUME: f32 = f32::MIN_POSITIVE;
+    pub const VISUAL_SIZE: i32 = 32;
 
-    pub fn new_wave(player: &web_sys::AudioContext, id: usize, x: i32, y: i32) -> JsResult<Self> {
+    pub fn new_wave(player: &web_sys::AudioContext, id: usize, x: i32, y: i32) -> utils::JsResult<Self> {
         let gen = web_sys::OscillatorNode::new_with_options(player, 
             web_sys::OscillatorOptions::new().frequency(Self::DEF_FREQ))?;
         gen.start()?;
         Ok(Self{functor_type: SoundFunctorType::Wave{gen}, 
-            id, x, y, forwards: vec![]})
+            id, location: [x, y], forwards: vec![], new_conn: None})
     }
 
-    pub fn new_envelope(player: &web_sys::AudioContext, id: usize, x: i32, y: i32) -> JsResult<Self> {
+    pub fn new_envelope(player: &web_sys::AudioContext, id: usize, x: i32, y: i32) -> utils::JsResult<Self> {
         let gen = web_sys::GainNode::new_with_options(player, 
             web_sys::GainOptions::new().gain(Self::MIN_VOLUME))?;
         Ok(Self{functor_type: SoundFunctorType::Envelope{gen, attack: 0.0, decay: 0.0, sustain: 0.0, release: 0.0},
-            id, x, y, forwards: vec![]})
+            id, location: [x, y], forwards: vec![], new_conn: None})
     }
 
-    pub fn new_builtin_output(gen: Rc<web_sys::AnalyserNode>, id: usize, x: i32, y: i32) -> JsResult<Self> {
+    pub fn new_builtin_output(gen: Rc<web_sys::AnalyserNode>, id: usize, x: i32, y: i32) -> utils::JsResult<Self> {
         Ok(Self{functor_type: SoundFunctorType::BuiltinOutput{gen},
-            id, x, y, forwards: vec![]})
+            id, location: [x, y], forwards: vec![], new_conn: None})
     }
 
-    pub fn start(&mut self, cur_time: f64) -> JsResult<()> {
-        Ok(match &self.functor_type {
+    pub fn start(&mut self, cur_time: f64) -> utils::JsResult<()> {
+        match &self.functor_type {
             SoundFunctorType::Envelope{gen, attack, decay, sustain, ..}
                 => _ = gen.gain().cancel_scheduled_values(0.0)
-                .add_msg_to_err("resetting the volume control")?
+                .explain_err("resetting the volume control")?
                 .linear_ramp_to_value_at_time(Self::MAX_VOLUME, cur_time + attack)
-                .add_msg_to_err("setting the attack period")?
+                .explain_err("setting the attack period")?
                 .linear_ramp_to_value_at_time(Self::MAX_VOLUME * *sustain as f32,
                     cur_time + attack + decay)
-                .add_msg_to_err("setting the decay period")?,
-            _ => ()})
+                .explain_err("setting the decay period")?,
+            _ => ()};
+        Ok(())
     }
 
-    pub fn end(&mut self, cur_time: f64) -> JsResult<()> {
-        Ok(match &self.functor_type {
+    pub fn end(&mut self, cur_time: f64) -> utils::JsResult<()> {
+        match &self.functor_type {
             SoundFunctorType::Envelope{gen, release, ..}
                 => _ = gen.gain().cancel_scheduled_values(0.0)
-                .add_msg_to_err("resetting the envelope for the fade-out")?
+                .explain_err("resetting the envelope for the fade-out")?
                 .linear_ramp_to_value_at_time(Self::MIN_VOLUME, cur_time + release)
-                .add_msg_to_err("setting the volume fade-out")?,
-            _ => ()})
+                .explain_err("setting the volume fade-out")?,
+            _ => ()};
+        Ok(())
     }
 
-    pub fn set_param(&mut self, param_id: usize, value: f64, cur_time: f64) -> JsResult<()> {
+    pub fn set_param(&mut self, param_id: usize, value: f64, cur_time: f64) -> utils::JsResult<()> {
         match &mut self.functor_type {
             SoundFunctorType::Wave {gen} => match param_id {
-                0 => Ok(_ = gen.frequency().set_value_at_time(value as f32, cur_time)
-                    .expect_throw_val("setting the frequency the `Frequency` parameter of a `Wave` sound functor")
+                0 => Ok(_ = gen.frequency().set_value_at_time(value as f32, cur_time)?
                     .value().js_log("new frequency: ")),
                 1 => match value as usize {
                     0 => Ok(gen.set_type(web_sys::OscillatorType::Sine)),
@@ -126,14 +126,14 @@ impl SoundFunctor {
             _ => true}
     }
 
-    pub fn connect(&mut self, other: &SoundFunctor) -> JsResult<Option<()>> {
+    pub fn connect(&mut self, other: &SoundFunctor) -> utils::JsResult<Option<()>> {
         if !other.backwardable() || self.forwards().filter(|x| !x.contains(&other.id)).is_none() {return Ok(None)}
         self.forwards.push(other.id);
         self.connect_with_audio_node(other)?;
         Ok(Some(()))
     }
 
-    pub fn disconnect(&mut self, other: &SoundFunctor) -> JsResult<Option<()>> {
+    pub fn disconnect(&mut self, other: &SoundFunctor) -> utils::JsResult<Option<()>> {
         if !self.forwards.contains(&other.id) {return Ok(None)}
         self.disconnect_with_audio_node(other)?;
         self.forwards.retain(|&x| x != other.id);
@@ -147,11 +147,12 @@ impl SoundFunctor {
             SoundFunctorType::BuiltinOutput{..} => "Output"}
     }
 
-    #[inline] pub fn location(&self) -> [i32; 2] {[self.x, self.y]}
+    #[inline] pub fn id(&self) -> usize {self.id}
+    #[inline] pub fn location(&self) -> [i32; 2] {self.location}
 
     pub fn contains(&self, x: i32, y: i32) -> bool {
-        (self.x - SoundBlock::SIZE / 2 ..= self.x + SoundBlock::SIZE / 2).contains(&x)
-        && (self.y - SoundBlock::SIZE / 2 ..= self.y + SoundBlock::SIZE / 2).contains(&y)
+        (self.location[0] - Self::VISUAL_SIZE ..= self.location[0] + Self::VISUAL_SIZE).contains(&x)
+        && (self.location[1] - Self::VISUAL_SIZE ..= self.location[1] + Self::VISUAL_SIZE).contains(&y)
     }
 
     pub fn params(&self) -> yew::Html {
@@ -208,12 +209,40 @@ impl SoundFunctor {
             SoundFunctorType::BuiltinOutput{..} => Default::default()}
     }
 
-    pub fn as_html(&self) -> yew::Html {
-        yew::html!{
-            <SoundBlock id={self.id} name={Rc::from(self.name())}/>}
+    pub fn draw(&self, ctx: &web_sys::CanvasRenderingContext2d, offset: [i32; 2]) -> utils::JsResult<()> {
+        let x = (self.location[0] - offset[0]) as f64;
+        let y = (self.location[1] - offset[1]) as f64;
+        ctx.move_to(x, y - Self::VISUAL_SIZE as f64);
+        if let Some(fwds) = self.forwards() {
+            ctx.line_to(x + Self::VISUAL_SIZE as f64, y as f64);
+            let comps = SOUND_COMPS.try_borrow().to_js_result()?;
+            for id in fwds {
+                let comp = comps.get(*id)
+                    .ok_or_js_error_with(||
+                        format!("error while rendering connections to other components: sound functor #{} not found", id))?;
+                let [x2, y2] = comp.location();
+                ctx.line_to((x2 - offset[0]) as f64, (y2 - offset[1]) as f64);
+                ctx.move_to(x + Self::VISUAL_SIZE as f64, y as f64);
+            }
+                
+        }
+        ctx.line_to(x, y + Self::VISUAL_SIZE as f64);
+        if self.backwardable() {
+            ctx.line_to(x - Self::VISUAL_SIZE as f64, y as f64)}
+        ctx.line_to(x, y - Self::VISUAL_SIZE as f64);
+        if let Some(conn) = self.new_conn {
+            ctx.move_to(x + Self::VISUAL_SIZE as f64, y);
+            ctx.line_to(conn[0] as f64, conn[1] as f64);
+        }
+        ctx.stroke();
+        Ok(())
     }
 
-    pub fn graph(&self, width: f64, height: f64) -> JsResult<(web_sys::Path2d, f64, f64)> {
+    #[inline] pub fn handle_movement(&mut self, coords: Option<[i32; 2]>) -> utils::JsResult<()> {
+        Ok(self.new_conn = coords.filter(|_| self.forwards().is_some()))
+    }
+
+    pub fn graph(&self, width: f64, height: f64) -> utils::JsResult<(web_sys::Path2d, f64, f64)> {
         match &self.functor_type {
             SoundFunctorType::Envelope {attack, decay, sustain, release, ..} => {
                 let res = (web_sys::Path2d::new()?, attack + decay);
@@ -222,7 +251,7 @@ impl SoundFunctor {
                 res.0.line_to(attack / res.2 * width, 0.0);
                 res.0.line_to(res.1 / res.2 * width, (1.0 - sustain) as f64 * height);
                 res.0.line_to(width, height);
-                Ok(res).js_log("new graph")}
+                Ok(res)}
             _ => Ok((web_sys::Path2d::new()?, f64::NAN, f64::NAN))
         }
     }
@@ -234,132 +263,3 @@ impl SoundFunctor {
         }
     }
 }
-
-pub struct SoundBlock {
-    pending_conn_coords: Option<[i32; 2]>,
-    visual_points: Rc<str>
-}
-
-#[derive(yew::Properties)]
-pub struct SoundBlockProps {
-    id: usize,
-    name: Rc<str>,
-}
-
-impl PartialEq for SoundBlockProps {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-pub enum SoundBlockCmd {
-    Focus(web_sys::PointerEvent),
-    Unfocus(web_sys::PointerEvent),
-    DragConnection(web_sys::PointerEvent),
-    MaybeShowHelp(),
-    MaybeHideHelp()
-}
-
-// the `const_format` crate doesn't handle namespace fields
-//  (i.e. `Self::SIZE`) so I had to use this disgusting hack
-macro_rules! soundblock_impl { 
-    (SIZE: $v:literal) => {
-        impl SoundBlock {
-            const SIZE: i32 = $v;
-            const SIZE_STR: &str = stringify!($v);
-            pub fn get_polygon(comp: &SoundFunctor) -> String {
-                format!("{},{} ", comp.x, comp.y - Self::SIZE / 2)
-                    + &comp.forwards().map(|_| format!("{},{} ", comp.x + Self::SIZE / 2, comp.y))
-                        .unwrap_or_default()
-                    + &format!("{},{} ", comp.x, comp.y + Self::SIZE / 2)
-                    + &comp.backwardable().then(|| format!("{},{} ", comp.x - Self::SIZE / 2, comp.y))
-                        .unwrap_or_default()
-            }
-        }
-    };
-}
-soundblock_impl!(SIZE: 64);
-
-impl yew::Component for SoundBlock {
-    type Message = SoundBlockCmd;
-    type Properties = SoundBlockProps;
-
-    fn create(ctx: &yew::Context<Self>) -> Self {
-        let comp = sound_comps().get(ctx.props().id)
-            .expect_throw_with(|| format!("invalid component id of {} passed to a UI sound block", ctx.props().id));
-        Self{pending_conn_coords: None,
-            visual_points: Self::get_polygon(comp).into()}
-    }
-
-    fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
-        if let Some(comp) = sound_comps().get(ctx.props().id) {
-            let fwds = comp.forwards();
-            let [x1, y1] = comp.location().pipe(|[x, y]| [x + Self::SIZE / 2, y])
-                .map(|i| Rc::from(i.to_string()));
-            yew::html! {<>
-                <polygon points={self.visual_points.clone()}
-                    width={Self::SIZE_STR} height={Self::SIZE_STR}
-                    class="component"
-                    onpointerenter={ctx.link().callback(|_| SoundBlockCmd::MaybeShowHelp())}
-                    onpointerleave={ctx.link().callback(|_| SoundBlockCmd::MaybeHideHelp())}
-                    onpointerdown={fwds.map(|_| ctx.link().callback(SoundBlockCmd::Focus))}
-                    onpointerup={ctx.link().callback(SoundBlockCmd::Unfocus)}
-                    onpointermove={self.pending_conn_coords.is_some()
-                        .then(|| ctx.link().callback(SoundBlockCmd::DragConnection))}/>
-                if let Some(fwds) = fwds {
-                    if let Some([x2, y2]) = self.pending_conn_coords {
-                        <line class="component"
-                            x1={Rc::clone(&x1)} y1={Rc::clone(&y1)}
-                            x2={x2.to_string()} y2={y2.to_string()}/>
-                    }
-                    {for fwds.iter()
-                        .flat_map(|i| sound_comps().get(*i))
-                        .map(|c| c.location())
-                        .map(|[x2, y2]| yew::html!{
-                            <line class="component"
-                                x1={x1.clone()}     y1={y1.clone()}
-                                x2={x2.to_string()} y2={y2.to_string()}/>})}
-                }
-            </>}
-        } else {Default::default()}
-    }
-
-    fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
-        let SoundBlockProps {id, name, ..} = ctx.props();
-        match msg {
-            SoundBlockCmd::Focus(e) => {
-                let target = e.target()
-                    .expect_throw("fetching the input element in the `pointerdown` event")
-                    .unchecked_into::<web_sys::HtmlElement>();
-                target.set_pointer_capture(e.pointer_id())
-                    .expect_throw_val("setting the cursor focus on the sound component");
-                self.pending_conn_coords = Some([e.x(), e.y()]);
-                true}
-            SoundBlockCmd::Unfocus(e) => {
-                let [x, y] = [e.x(), e.y()];
-                match sound_comps().iter().find(|c| c.contains(x, y)) {
-                    Some(c) => MainCmd::Select(Some(c.id)),
-                    None    => MainCmd::RemoveDesc()
-                }.send();
-                if sound_comps().get(*id).and_then(|c| c.forwards()).is_none() {return false}
-                let target = e.target()
-                    .expect_throw("fetching the input element in the `pointerup` event")
-                    .unchecked_into::<web_sys::HtmlElement>();
-                target.release_pointer_capture(e.pointer_id())
-                    .expect_throw_val("releasing the cursor focus from the sound component");
-                self.pending_conn_coords = None;
-                MainCmd::TryConnect(*id, x, y).send();
-                true}
-            SoundBlockCmd::DragConnection(e) => {
-                self.pending_conn_coords = Some([e.x(), e.y()]);
-                true}
-            SoundBlockCmd::MaybeShowHelp() => {
-                MainCmd::SetDesc(name.clone()).send();
-                false}
-            SoundBlockCmd::MaybeHideHelp() => {
-                MainCmd::RemoveDesc().send();
-                false}
-        }
-    }
-}
-

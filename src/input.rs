@@ -1,8 +1,7 @@
 use std::rc::Rc;
 use std::f64::consts::PI;
-use wasm_bindgen::JsCast;
 use yew::TargetCast;
-use crate::{utils::{self, ResultUtils, JsResultUtils}, MainCmd};
+use crate::{utils::{self, OkOrJsError, JsResultUtils}, MainCmd, draggable};
 
 pub struct Slider {
     value: f64,
@@ -26,19 +25,11 @@ pub struct SliderProps {
     pub initial: f64
 }
 
-pub enum InputCmd {
-    ChangeValue(web_sys::PointerEvent),
-    Focus(web_sys::PointerEvent),
-    Unfocus(web_sys::PointerEvent),
-    MaybeShowHelp(),
-    MaybeHideHelp()
-}
-
 const LINE_WIDTH: f64 = 10.0;
 const FONT: &'static str = "4em consolas";
 
 impl yew::Component for Slider {
-    type Message = InputCmd;
+    type Message = draggable::Cmd;
     type Properties = SliderProps;
 
     fn create(ctx: &yew::Context<Self>) -> Self {
@@ -48,59 +39,42 @@ impl yew::Component for Slider {
     }
 
     fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
-        match msg {
-            InputCmd::ChangeValue(e) => {
-                self.value = match e.target_unchecked_into::<web_sys::Element>().client_height() {
-                    0 => self.value,
-                    h => (self.value + e.movement_y() as f64 / (h * -2) as f64).clamp(0.0, 1.0)};
-                let SliderProps {component_id, id, coef, ..} = ctx.props();
-                MainCmd::SetParam(*component_id, *id, self.value * coef).send();
-                true}
-            InputCmd::Focus(e) => {
-                let target = e.target()
-                    .expect_throw("fetching the input element in the `pointerdown` event")
-                    .unchecked_into::<web_sys::HtmlElement>();
-                target.set_pointer_capture(e.pointer_id())
-                    .expect_throw_val("setting the cursor focus on the input switch");
-                self.focused = true;
-                MainCmd::SetDesc(ctx.props().name.clone()).send();
-                true}
-            InputCmd::Unfocus(e) => {
-                let target = e.target()
-                    .expect_throw("fetching the input element in the `pointerup` event")
-                    .unchecked_into::<web_sys::HtmlElement>();
-                target.release_pointer_capture(e.pointer_id())
-                    .expect_throw_val("releasing the cursor focus from the input switch");
-                self.focused = false;
-                MainCmd::RemoveDesc().send();
-                true}
-            InputCmd::MaybeShowHelp() => {
-                if !self.focused {
-                    MainCmd::SetDesc(ctx.props().name.clone()).send()}
-                false}
-            InputCmd::MaybeHideHelp() => {
-                if !self.focused {
-                    MainCmd::RemoveDesc().send()}
-                false}
-        }
+        let err: utils::JsResult<!> = try {
+            let SliderProps {component_id, id, coef, name, ..} = ctx.props();
+            return msg.handle_hover(name.clone())
+                .handle_focus(|_| Ok(self.focused = true))?
+                .handle_unfocus(|_| Ok(self.focused = false))?
+                .handle_drag(|e| {
+                    let target = e.target_dyn_into::<web_sys::Element>()
+                        .ok_or_js_error("no target on a pointer event")?;
+                    self.value = (self.value + e.movement_y() as f64 / (target.client_height() * -2) as f64)
+                        .clamp(0.0, 1.0);
+                    MainCmd::SetParam(*component_id, *id, self.value * coef).send();
+                    Ok(())})?
+                .needs_rerender()
+        };
+        _ = err.report_err("handling a message received by the slider");
+        false
     }
 
 	fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
         yew::html! {
             <canvas id={self.id.clone()} class={ctx.props().class.clone()}
-            onpointerdown={ctx.link().callback(InputCmd::Focus)}
-            onpointerup={ctx.link().callback(InputCmd::Unfocus)}
-            onpointercancel={ctx.link().callback(InputCmd::Unfocus)}
-            onpointerenter={ctx.link().callback(|_| InputCmd::MaybeShowHelp())}
-            onpointerleave={ctx.link().callback(|_| InputCmd::MaybeHideHelp())}
-            onpointermove={self.focused.then(|| ctx.link().callback(InputCmd::ChangeValue))}/>}
+            onpointerdown={ctx.link().callback(draggable::Cmd::Focus)}
+            onpointerup={ctx.link().callback(draggable::Cmd::Unfocus)}
+            onpointerenter={ctx.link().callback(draggable::Cmd::HoverIn)}
+            onpointerleave={ctx.link().callback(draggable::Cmd::HoverOut)}
+            onpointermove={self.focused.then(|| ctx.link().callback(draggable::Cmd::Drag))}/>}
     }
 
     fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
-        let SliderProps{coef, precision, postfix, ..} = ctx.props();
-        if first_render {utils::sync_canvas(&self.id)}
-        if let Some((w, h, ctx)) = utils::get_canvas_ctx(&self.id, true, true) {
+        let err: utils::JsResult<()> = try {
+            let SliderProps{coef, precision, postfix, ..} = ctx.props();
+            if first_render {utils::sync_canvas(&self.id)?}
+            let (w, h, ctx) = utils::get_canvas_ctx(&self.id, true, true)?;
             let (w, h) = (w / 2.0, h / 2.0);
+            const CORRECTION_COEF: f64 = 1.5;
+            let r = w.min(h) - LINE_WIDTH * CORRECTION_COEF; 
             if first_render {
                 ctx.set_fill_style(&"#0069E1".into());
                 ctx.set_stroke_style(&"#0069E1".into());
@@ -109,24 +83,19 @@ impl yew::Component for Slider {
                 ctx.set_text_align("center")}
             ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
             ctx.begin_path();
-            let r = w.min(h) - LINE_WIDTH * 1.5; // 1.5 is an arbitrary multiplier without which the
-                                            // slider would go slightly over the edge, idk why
             if self.value != 0.0 {
                 ctx.arc(w, h + LINE_WIDTH, r,
-                    PI * 1.5, (self.value as f64 * 2.0 + 1.5) * PI)
-                    .expect_throw_val("drawing the slider");
+                    PI * 1.5, (self.value * 2.0 + 1.5) * PI)?;
                 ctx.stroke()}
             ctx.set_text_baseline("middle");
             ctx.fill_text_with_max_width(&format!("{:.*}", precision, coef * self.value),
-                w, h + LINE_WIDTH / 2.0, r)
-                .expect_throw_val("drawing the text on the slider");
+                w, h + LINE_WIDTH / 2.0, r)?;
             ctx.set_text_baseline("top");
-            ctx.fill_text_with_max_width(postfix, 
-                w, h + LINE_WIDTH * 2.0 + ctx.measure_text("0")
-                    .expect_throw_val("getting the font height while rendering the slider")
-                    .font_bounding_box_ascent() * 2.0, r * 1.5)
-                .expect_throw_val("drawing the unit name below the slider's value");
-        }
+            return ctx.fill_text_with_max_width(postfix, 
+                w, h + LINE_WIDTH * 2.0 + ctx.measure_text("0")?
+                    .font_bounding_box_ascent() * 2.0, r * 1.5)?;
+        };
+        _ = err.report_err("rendering the slider");
     }
 }
 
@@ -148,7 +117,7 @@ pub struct SwitchProps {
 }
 
 impl yew::Component for Switch {
-    type Message = InputCmd;
+    type Message = draggable::Cmd;
     type Properties = SwitchProps;
 
     fn create(ctx: &yew::Context<Self>) -> Self {
@@ -157,61 +126,44 @@ impl yew::Component for Switch {
     }
 
     fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
-        let SwitchProps {options, component_id, id, name, ..} = ctx.props();
-        match msg {
-            InputCmd::ChangeValue(e) => {
-                let old_value = self.value as usize;
-                self.value = match e.target_dyn_into::<web_sys::Element>() {
-                    None => return false,
-                    Some(t) => (self.value + e.movement_y() as f64 / t.client_height() as f64 / -0.5)
-                        .rem_euclid(options.len() as f64)
-                };
-                if old_value == self.value as usize {return false}
-                MainCmd::SetParam(*component_id, *id, self.value).send();
-                true}
-            InputCmd::Focus(e) => {
-                e.target()
-                    .expect_throw("fetching the input element in the `pointerdown` event")
-                    .unchecked_into::<web_sys::HtmlElement>()
-                    .set_pointer_capture(e.pointer_id())
-                    .expect_throw_val("setting the cursor focus on the input switch");
-                self.focused = true;
-                MainCmd::SetDesc(name.clone()).send();
-                true}
-            InputCmd::Unfocus(e) => {
-                e.target()
-                    .expect_throw("fetching the input element in the `pointerup` event")
-                    .unchecked_into::<web_sys::HtmlElement>()
-                    .release_pointer_capture(e.pointer_id())
-                    .expect_throw_val("releasing the cursor focus from the input switch");
-                self.focused = false;
-                MainCmd::RemoveDesc().send();
-                true}
-            InputCmd::MaybeShowHelp() => {
-                MainCmd::SetDesc(name.clone()).send();
-                false}
-            InputCmd::MaybeHideHelp() => {
-                MainCmd::RemoveDesc().send();
-                false}
-        }
+        let err: utils::JsResult<!> = try {
+            let SwitchProps {options, component_id, id, name, ..} = ctx.props();
+            return msg.handle_hover(name.clone())
+                .handle_focus(|_| Ok(self.focused = true))?
+                .handle_unfocus(|_| Ok(self.focused = false))?
+                .handle_drag(|e| {
+                    let old_value = self.value as usize;
+                    let target = e.target_dyn_into::<web_sys::Element>()
+                        .ok_or_js_error("no target on a pointer event")?;
+                    self.value = (self.value + e.movement_y() as f64 / target.client_height() as f64 / -0.5)
+                        .rem_euclid(options.len() as f64);
+                    if old_value != self.value as usize {
+                        MainCmd::SetParam(*component_id, *id, self.value).send()}
+                    Ok(())})?
+                .needs_rerender()
+        };
+        _ = err.report_err("handling a message received by the slider");
+        false
     }
 
 	fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
         yew::html! {
             <canvas id={self.id.clone()} class={ctx.props().class.clone()}
-            onpointerdown={ctx.link().callback(InputCmd::Focus)}
-            onpointerup={ctx.link().callback(InputCmd::Unfocus)}
-            onpointercancel={ctx.link().callback(InputCmd::Unfocus)}
-            onpointerenter={ctx.link().callback(|_| InputCmd::MaybeShowHelp())}
-            onpointerleave={ctx.link().callback(|_| InputCmd::MaybeHideHelp())}
-            onpointermove={self.focused.then(|| ctx.link().callback(InputCmd::ChangeValue))}/>}
+            onpointerdown={ctx.link().callback(draggable::Cmd::Focus)}
+            onpointerup={ctx.link().callback(draggable::Cmd::Unfocus)}
+            onpointerenter={ctx.link().callback(draggable::Cmd::HoverIn)}
+            onpointerleave={ctx.link().callback(draggable::Cmd::HoverOut)}
+            onpointermove={self.focused.then(|| ctx.link().callback(draggable::Cmd::Drag))}/>}
     }
 
     fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
-        let SwitchProps{options, ..} = ctx.props();
-        if first_render {utils::sync_canvas(&self.id)}
-        if let Some((w, h, ctx)) = utils::get_canvas_ctx(&self.id, true, true) {
+        let err: utils::JsResult<()> = try {
+            let SwitchProps{options, ..} = ctx.props();
+            if first_render {utils::sync_canvas(&self.id)?}
+            let (w, h, ctx) = utils::get_canvas_ctx(&self.id, true, true)?;
             let (w, h) = (w / 2.0, h / 2.0);
+            const CORRECTION_COEF: f64 = 1.5;
+            let r = w.min(h) - LINE_WIDTH * CORRECTION_COEF;
             if first_render {
                 ctx.set_fill_style(&"#0069E1".into());
                 ctx.set_stroke_style(&"#0069E1".into());
@@ -220,16 +172,13 @@ impl yew::Component for Switch {
                 ctx.set_text_align("center");
                 ctx.set_text_baseline("middle")}
             ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
-            let r = w.min(h) - LINE_WIDTH * 1.5; // 1.5 is an arbitrary multiplier without which the
-                                            // slider would go slightly over the edge, idk why
             let index = self.value.floor();
             ctx.begin_path();
-            ctx.arc(w, h + LINE_WIDTH, r, (index / 2.0 + 1.5) * PI, index / 2.0 * PI)
-                .expect_throw_val("drawing the switch");
+            ctx.arc(w, h + LINE_WIDTH, r, (index / 2.0 + 1.5) * PI, index / 2.0 * PI)?;
             ctx.stroke();
-            ctx.fill_text_with_max_width(unsafe{options.get_unchecked(index as usize)},
-                w, h + LINE_WIDTH, r * 1.5)
-                .expect_throw_val("drawing the chosen option name on a switch");
-        }
+            return ctx.fill_text_with_max_width(unsafe{options.get_unchecked(index as usize)},
+                w, h + LINE_WIDTH, r * 1.5)?;
+        };
+        _ = err.report_err("rendering the switch");
     }
 }
