@@ -1,4 +1,58 @@
-use crate::utils::ToEveryNth;
+use crate::utils::{Check, SliceExt};
+
+pub struct EveryNth<'a, T> {
+    iter: &'a [T],
+    n: usize,
+    state: usize
+}
+
+impl<'a, T> std::iter::Iterator for EveryNth<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<<Self as std::iter::Iterator>::Item> {
+		let len = self.iter.len();
+		let res = self.iter.get(self.state);
+        self.state = (self.state + self.n)
+            .not_in(len .. (len + self.n).saturating_sub(1))
+            .unwrap_or_else(|x| x - len + 1);
+        res
+    }
+}
+
+pub struct EveryNthMut<'a, T> {
+    iter: &'a mut [T],
+    n: usize,
+    state: usize
+}
+
+impl<'a, T> std::iter::Iterator for EveryNthMut<'a, T> {
+    type Item = &'a mut T;
+    fn next(&mut self) -> Option<&'a mut T> {
+		let len = self.iter.len();
+		let res = self.iter.get_mut(self.state)
+            .map(|x| unsafe{(x as *mut T).as_mut().unwrap_unchecked()});
+        // the abomination above is there solely because such a trivial task as
+        // a lending iterator over mutable data can't be done any other way
+        self.state = (self.state + self.n)
+            .not_in(len .. (len + self.n).saturating_sub(1))
+            .unwrap_or_else(|x| x - len + 1);
+        res
+    }
+}
+
+pub trait ToEveryNth<T> {
+    fn every_nth<'a>(&'a self, n: usize) -> EveryNth<'a, T>;
+    fn every_nth_mut<'a>(&'a mut self, n: usize) -> EveryNthMut<'a, T>;
+}
+
+impl<T> ToEveryNth<T> for [T] {
+    #[inline] fn every_nth<'a>(&'a self, n: usize) -> EveryNth<'a, T> {
+        EveryNth {iter: self, n, state: 0}
+    }
+    #[inline] fn every_nth_mut<'a>(&'a mut self, n: usize) -> EveryNthMut<'a, T> {
+        EveryNthMut {iter: self, n, state: 0}
+    }
+}
+
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct RGBA {
@@ -33,11 +87,11 @@ impl std::fmt::Display for RGBA {
 	}
 }
 
-fn interp(colours: &[RGBA], index: u8) -> RGBA {
-	let index = (index as usize * (colours.len() - 1)) as f32 / 255.0;
-	let lower = unsafe {colours.get_unchecked(index.floor() as usize)};
-	let upper = unsafe {colours.get_unchecked(index.ceil() as usize)};
-	let weight = (index / (colours.len() - 1) as f32).fract();
+fn interp<const N: usize>(colours: &[RGBA; N], index: u8) -> RGBA {
+	let index = (index as usize * (N - 1)) as f32 / 255.0;
+	let lower = colours.get_saturating(index.floor() as usize);
+	let upper = colours.get_saturating(index.ceil() as usize);
+	let weight = (index / (N - 1) as f32).fract();
 	let weight_recip = 1.0 - weight;
 	RGBA {
 		r: (lower.r as f32 * weight_recip + upper.r as f32 * weight) as u8,
@@ -61,6 +115,7 @@ impl Renderer {
 			in_data: Vec::new(),
 			width: 0, height: 0}
 	}
+
 	pub fn set_size(&mut self, width: usize, height: usize) -> &mut Self {
 		// TODO: correctly readjust the graph when shrinked in the UI
 		self.width = width;
@@ -69,24 +124,26 @@ impl Renderer {
 		self.in_data.resize(width * height, 0);
 		self
 	}
-	pub fn graph<'a>(&'a mut self) -> &'a mut Self {
+
+	pub fn graph(&mut self) -> &mut Self {
 		static mut GRADIENT: Vec<RGBA> = Vec::new();
 		static mut INITIALISER: std::sync::Once = std::sync::Once::new();
 		unsafe {INITIALISER.call_once(||
 			GRADIENT = (0 ..= u8::MAX)
 				.map(|i| interp(&[Self::BG, Self::FG], i))
 				.collect())}
-		self.in_data.iter()
-			.zip(self.out_data.every_nth_mut(self.width))
-			.for_each(|(&src, dest)|
-				*dest = unsafe {*GRADIENT.get_unchecked(src as usize)});
+		for (&src, dst) in self.in_data.iter().zip(self.out_data.every_nth_mut(self.width)) {
+            *dst = unsafe {*GRADIENT.get_unchecked(src as usize)};
+        }
 		self
 	}
+
 	#[inline] pub fn get_out_bytes<'a>(&'a self) -> &'a [u8] {
 		unsafe {std::slice::from_raw_parts(
 			self.out_data.as_ptr().cast::<u8>(),
 			self.out_data.len() * 4)}
 	}
+
 	#[inline] pub fn get_in_buffer(&mut self) -> &mut [u8] {
 		let len = self.in_data.len();
 		self.in_data.copy_within(0 .. len - self.height, self.height);

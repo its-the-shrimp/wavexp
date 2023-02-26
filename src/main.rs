@@ -9,13 +9,13 @@ mod utils;
 mod input;
 mod sound;
 mod draggable;
-use utils::{JsResultUtils, OkOrJsError, ToJsResult, Tee};
+use utils::{JsResultUtils, OkOrJsError, HtmlCanvasExt, HtmlDocumentExt, SliceExt};
 use web_sys;
 use js_sys;
 use wasm_bindgen;
 use wasm_bindgen::JsCast;
+use yew::TargetCast;
 use std::rc::Rc;
-use std::cell::{Cell, RefCell};
 
 struct AnimationCtx {
     analyser: Rc<web_sys::AnalyserNode>,
@@ -94,35 +94,27 @@ fn start_animation_loop() -> utils::JsResult<()> {
     Ok(())
 }
 
-pub static SOUND_COMPS: utils::WasmCell<RefCell<Vec<sound::SoundFunctor>>> = utils::WasmCell::new(RefCell::new(Vec::new()));
-pub static PLANE_OFFSET: utils::WasmCell<Cell<[i32; 2]>> = utils::WasmCell::new(Cell::new([0, 0]));
-
-pub fn get_sound_comp(id: usize) -> utils::JsResult<std::cell::Ref<'static, sound::SoundFunctor>> {
-    std::cell::Ref::filter_map(SOUND_COMPS.try_borrow().to_js_result()?, |x| x.get(id)).ok()
-        .ok_or_js_error_with(|| format!("sound functor #{} not found", id))
-}
-
-pub fn get_sound_comp_mut(id: usize) -> utils::JsResult<std::cell::RefMut<'static, sound::SoundFunctor>> {
-    std::cell::RefMut::filter_map(SOUND_COMPS.try_borrow_mut().to_js_result()?, |x| x.get_mut(id)).ok()
-        .ok_or_js_error_with(|| format!("sound functor #{} not found", id))
-}
-
 struct Main {
     player: web_sys::AudioContext,
     help_msg: Rc<str>,
     selected_comp: Option<usize>,
     focused_comp: Option<usize>,
     error_count: usize,
-    initial: Option<[i32; 2]>
+    dragging: bool,
+    plane_offset: utils::Point,
+    sound_comps: Vec<sound::SoundFunctor>
 }
 
 #[derive(Debug)]
 pub enum MainCmd {
-    ModifyPlane(draggable::Cmd),
+    Drag(web_sys::PointerEvent),
+    Focus(web_sys::PointerEvent),
+    Unfocus(web_sys::PointerEvent),
     SetDesc(Rc<str>),
     RemoveDesc(),
-    Select(Option<usize>),
     SetParam(usize, usize, f64),
+    TryConnect(usize, utils::Point),
+    Select(usize),
     Start(), 
     End(),
     ReportError(wasm_bindgen::JsValue)
@@ -150,10 +142,10 @@ impl yew::Component for Main {
             let player = web_sys::AudioContext::new()?;
             let analyser = Rc::new(web_sys::AnalyserNode::new(&player)?);
             analyser.connect_with_audio_node(&player.destination())?;
-            *SOUND_COMPS.try_borrow_mut().to_js_result()? = vec![
-                sound::SoundFunctor::new_wave(&player, 0, 300, 350)?,
-                sound::SoundFunctor::new_envelope(&player, 1, 500, 350)?,
-                sound::SoundFunctor::new_builtin_output(analyser.clone(), 2, 750, 350)?];
+            let sound_comps = vec![
+                sound::SoundFunctor::new_wave(&player, 0, utils::Point{x:300, y:350})?,
+                sound::SoundFunctor::new_envelope(&player, 1, utils::Point{x:500, y:350})?,
+                sound::SoundFunctor::new_builtin_output(analyser.clone(), 2, utils::Point{x:750, y:350})?];
 
             ANIMATION_CTX.set(AnimationCtx {
                 analyser,
@@ -168,8 +160,10 @@ impl yew::Component for Main {
             })?;
 
             return Self {help_msg: Self::DEF_DESC.into(),
-                player, error_count: 0, initial: None,
-                selected_comp: None, focused_comp: None}
+                sound_comps, player,
+                error_count: 0, dragging: false,
+                selected_comp: None, focused_comp: None,
+                plane_offset: utils::Point::ZERO}
         };
         err.expect_throw("initialising the main component");
     }
@@ -182,83 +176,60 @@ impl yew::Component for Main {
         };
         let err: utils::JsResult<!> = try {
             let cur_time = self.player.current_time();
+            let mut editor_plane_ctx: Option<(f64, f64, web_sys::CanvasRenderingContext2d)> = None;
+            let mut needs_html_rerender = false;
             match msg {
-                MainCmd::ModifyPlane(cmd) => {
-                    let (w, h, ctx) = utils::get_canvas_ctx("plane", true, false)?;
-                    let [w, h] = [w as i32, h as i32];
-                    let mut offset = PLANE_OFFSET.get();
+                MainCmd::Drag(e) => {
+                    if let Some(id) = self.focused_comp {
+                        let target = e.target_dyn_into::<web_sys::HtmlCanvasElement>()
+                            .ok_or_js_error("while handling cursor moving across the edtior plane: the event has no target")?;
+                        editor_plane_ctx = Some((target.width().into(), target.height().into(), target.get_2d_context()?));
+                        let comp = self.sound_comps.get_mut_or_js_error(id, "sound functor #", " not found")?;
+                        comp.handle_movement(Some(utils::Point{x: e.x(), y: e.y()} + self.plane_offset))?;
+                    } else if self.dragging {
+                        let target = e.target_dyn_into::<web_sys::HtmlCanvasElement>()
+                            .ok_or_js_error("while handling cursor moving across the edtior plane: the event has no target")?;
+                        let [w, h] = [target.width() as i32, target.height() as i32];
+                        editor_plane_ctx = Some((w as f64, h as f64, target.get_2d_context()?));
+                        self.plane_offset -= utils::Point{x: e.movement_x(), y: e.movement_y()};
+                    }
+                }
 
-                    let mut needs_redraw: bool = true;
-                    cmd.handle_drag(|e| Ok({
-                            if let Some(id) = self.focused_comp {
-                                let mut comp = get_sound_comp_mut(id)?;
-                                comp.handle_movement(Some([e.x(), e.y()]))?;
-                            } else if let Some(initial) = self.initial {
-                                PLANE_OFFSET.set([
-                                    (initial[0] - e.x()).clamp(-w, w),
-                                    (initial[1] - e.y()).clamp(-h, h)])
-                            } else {needs_redraw = false}
-                        }))?
-                        .handle_focus(|e| Ok({
-                            let [x, y] = [e.x() + offset[0], e.y() + offset[1]];
-                            self.focused_comp = SOUND_COMPS.try_borrow().to_js_result()?
-                                .iter().find(|c| c.contains(x, y)).map(|c| c.id());
-                            if self.focused_comp.is_none() {
-                                self.initial = Some([x, y])}
-                        }))?
-                        .handle_unfocus(|e| Ok({
-                            let [x, y] = [e.x() + offset[0], e.y() + offset[1]];
-                            self.initial = None;
-                            if let Some(src_id) = self.focused_comp.take() {
-                                let mut comps = SOUND_COMPS.try_borrow_mut().to_js_result()?;
-                                if let Some(dst_id) = comps.iter().position(|dst| dst.contains(x, y)) {
-                                    MainCmd::Select(Some(dst_id)).send();
-                                    if let Ok([src, dst]) = comps.get_many_mut([src_id, dst_id]) {
-                                        src.connect(dst)?;
-                                        src.handle_movement(None)?;
-                                    }
-                                } else {
-                                    self.help_msg = Self::DEF_DESC.into();
-                                }
-                                comps.get_mut(src_id)
-                                    .ok_or_js_error_with(||
-                                        format!("while processing mouse focus release: sound functor #{} not found", src_id))?
-                                    .handle_movement(None)?;
-                            }
-                        }))?;
+                MainCmd::Focus(e) => {
+                    let target = e.target_dyn_into::<web_sys::HtmlCanvasElement>()
+                        .ok_or_js_error("while handling mouse focus capture: the event has no target")?;
+                    editor_plane_ctx = Some((target.width().into(), target.height().into(), target.get_2d_context()?));
+                    let point = utils::Point{x: e.x(), y: e.y()} + self.plane_offset;
+                    self.focused_comp = self.sound_comps.iter()
+                        .find(|c| c.contains(point)).map(|c| c.id());
+                    self.dragging = self.focused_comp.is_none();
+                }
 
-                    if needs_redraw {
-                        ctx.fill_rect(0.0, 0.0, w.into(), h.into());
-                        ctx.begin_path();
-                        offset = PLANE_OFFSET.get();
-                        SOUND_COMPS.try_borrow().to_js_result()?
-                            .iter().try_for_each(|c| c.draw(&ctx, offset))?;
+                MainCmd::Unfocus(e) => {
+                    let target = e.target_dyn_into::<web_sys::HtmlCanvasElement>()
+                        .ok_or_js_error("while processing mouse focus release: the event has no target")?;
+                    editor_plane_ctx = Some((target.width().into(), target.height().into(), target.get_2d_context()?));
+                    if self.dragging {
+                        self.plane_offset -= utils::Point{x: e.movement_x(), y: e.movement_y()};
+                        self.dragging = false
+                    }
+                    if let Some(id) = self.focused_comp.take() {
+                        let comp = self.sound_comps.get_mut_or_js_error(id, "sound functor #", " not found")?;
+                        comp.handle_movement(Some(utils::Point{x:e.x(), y:e.y()} + self.plane_offset))?;
+                        comp.handle_movement(None)?;
                     }
                 }
 
                 MainCmd::SetDesc(value) => {
                     self.help_msg = format!("{:1$}", value, Self::DEF_DESC.len()).into();
-                    return true}
+                    needs_html_rerender = true}
 
                 MainCmd::RemoveDesc() => {
                     self.help_msg = Self::DEF_DESC.into();
-                    return true}
+                    needs_html_rerender = true}
 
-                MainCmd::Select(id) => {
-                    self.selected_comp = id.filter(|&x| Some(x) != self.selected_comp);
-                    if let Some(id) = self.selected_comp {
-                        let (w, h, _) = utils::get_canvas_ctx("graph", false, false)?;
-                        let (graph, graph_in_span, graph_span) = get_sound_comp(id)?
-                            .graph(w, h)?;
-                        let mut ctx = ANIMATION_CTX.get_mut()?;
-                        ctx.graph = graph;
-                        ctx.graph_in_span = graph_in_span;
-                        ctx.graph_span = graph_span;
-                    }
-                    return true}
-
-                MainCmd::SetParam(component_id, param_id, value) => {
-                    let mut comp = get_sound_comp_mut(component_id)?;
+                MainCmd::SetParam(comp_id, param_id, value) => {
+                    let comp = self.sound_comps.get_mut_or_js_error(comp_id, "sound functor #", " not found")?;
                     comp.set_param(param_id, value, cur_time)?;
                     let (w, h, _) = utils::get_canvas_ctx("graph", false, false)?;
                     let (graph, graph_in_span, graph_span) = comp.graph(w, h)?;
@@ -268,11 +239,38 @@ impl yew::Component for Main {
                     ctx.graph_span = graph_span;
                 }
 
+                MainCmd::TryConnect(src_id, dst_pos) => {
+                    if let Some(dst_id) = self.sound_comps.iter().position(|x| x.contains(dst_pos)) {
+                        if let Ok([src, dst]) = self.sound_comps.get_many_mut([src_id, dst_id]) {
+                            src.connect(dst)?;
+                        }
+                    } else {
+                        self.help_msg = Self::DEF_DESC.into();
+                    }
+                    let target = utils::document().element_dyn_into::<web_sys::HtmlCanvasElement>("plane")
+                        .explain_err("handling an event connecting sound functors")?;
+                    editor_plane_ctx = Some((target.width().into(), target.height().into(), target.get_2d_context()?));
+                }
+
+                MainCmd::Select(id) => {
+                    self.selected_comp = (Some(id) != self.selected_comp).then_some(id);
+                    if let Some(id) = self.selected_comp {
+                        let (w, h, _) = utils::get_canvas_ctx("graph", false, false)?;
+                        let (graph, graph_in_span, graph_span) = self.sound_comps
+                            .get_or_js_error(id, "sound functor #", " not found")?
+                            .graph(w, h)?;
+                        let mut ctx = ANIMATION_CTX.get_mut()?;
+                        ctx.graph = graph;
+                        ctx.graph_in_span = graph_in_span;
+                        ctx.graph_span = graph_span;
+                    }
+                needs_html_rerender = true}
+
                 MainCmd::Start() => {
                     ANIMATION_CTX.get_mut()?
                         .pbar_start = f64::INFINITY;
 
-                    SOUND_COMPS.try_borrow_mut().to_js_result()?.iter_mut()
+                    self.sound_comps.iter_mut()
                         .try_for_each(|comp| comp.start(cur_time))?
                 }
 
@@ -280,50 +278,52 @@ impl yew::Component for Main {
                     ANIMATION_CTX.get_mut()?
                         .pbar_start = f64::NEG_INFINITY;
 
-                    SOUND_COMPS.try_borrow_mut().to_js_result()?.iter_mut()
+                    self.sound_comps.iter_mut()
                         .try_for_each(|comp| comp.end(cur_time))?
                 }
 
                 MainCmd::ReportError(err) => return on_new_error(self, err)
             };
-            return false
+
+            if let Some((w, h, ctx)) = editor_plane_ctx {
+                ctx.fill_rect(0.0, 0.0, w.into(), h.into());
+                ctx.begin_path();
+                self.sound_comps.iter()
+                    .try_for_each(|c| c.draw(&ctx, self.plane_offset, &self.sound_comps))?;
+            }
+            return needs_html_rerender
         };
         on_new_error(self, err.explain_err("handling a message to the main component").into_err())
     }
 
     fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
-        let err: utils::JsResult<!> = try {
-            let comps = SOUND_COMPS.try_borrow().to_js_result()?;
-            let comp = self.selected_comp.and_then(|i| comps.get(i));
+        let comp = self.selected_comp.and_then(|i| self.sound_comps.get(i));
 
-            return yew::html! {<>
-                <canvas width="100%" height="100%" id="plane"
-                onpointerdown={ctx.link().callback(|e| MainCmd::ModifyPlane(draggable::Cmd::Focus(e)))}
-                onpointerup={ctx.link().callback(|e| MainCmd::ModifyPlane(draggable::Cmd::Unfocus(e)))}
-                onpointermove={ctx.link().callback(|e| MainCmd::ModifyPlane(draggable::Cmd::Drag(e)))}/>
-                <div id="ctrl-panel">
-                    <div id="help-msg">{self.help_msg.clone()}</div>
-                    <div id="inputs">
-                        {comp.map(sound::SoundFunctor::params)}
-                    </div>
-                    <canvas id="graph" class="visual"
-                    hidden={!comp.is_some_and(|comp| comp.graphable())}/>
+        return yew::html! {<>
+            <canvas width="100%" height="100%" id="plane"
+            onpointerdown={ctx.link().callback(MainCmd::Focus)}
+            onpointerup={ctx.link().callback(MainCmd::Unfocus)}
+            onpointermove={ctx.link().callback(MainCmd::Drag)}/>
+            <div id="ctrl-panel">
+                <div id="help-msg">{self.help_msg.clone()}</div>
+                <div id="inputs">
+                    {comp.map(sound::SoundFunctor::params)}
                 </div>
-                <div id="visuals">
-                    <canvas id="main" class="visual"/>
-                    <button
-                    onmousedown={ctx.link().callback(|_| MainCmd::Start())}
-                    onmouseup={ctx.link().callback(|_| MainCmd::End())}>
-                        {"Play"}
-                    </button>
-                </div>
-                if self.error_count > 0 {
-                    <div id="error-count">{format!("Errors: {}", self.error_count)}</div>
-                }
-            </>}
-        };
-        _ = err.report_err("building the main element");
-        Default::default()
+                <canvas id="graph" class="visual"
+                hidden={!comp.is_some_and(|comp| comp.graphable())}/>
+            </div>
+            <div id="visuals">
+                <canvas id="main" class="visual"/>
+                <button
+                onmousedown={ctx.link().callback(|_| MainCmd::Start())}
+                onmouseup={ctx.link().callback(|_| MainCmd::End())}>
+                    {"Play"}
+                </button>
+            </div>
+            if self.error_count > 0 {
+                <div id="error-count">{format!("Errors: {}", self.error_count)}</div>
+            }
+        </>}
     }
 
     fn rendered(&mut self, _: &yew::Context<Self>, first_render: bool) {
@@ -331,22 +331,16 @@ impl yew::Component for Main {
             return if first_render {
                 start_animation_loop()?;
                 utils::sync_canvas("main")?;
-                let graph = utils::document().get_element_by_id("graph")
-                    .ok_or_js_error("element #graph not found")?
-                    .unchecked_into::<web_sys::HtmlElement>();
+                let graph: web_sys::HtmlElement = utils::document().element_dyn_into("graph")?;
                 graph.set_hidden(false);
                 utils::sync_canvas("graph")?;
                 graph.set_hidden(true);
                 let body = utils::document().body().ok_or_js_error("<body> not found")?;
                 let [width, height] = [body.client_width(), body.client_height()];
-                let plane = utils::document().get_element_by_id("plane")
-                    .ok_or_js_error("element #plane not found")?
-                    .unchecked_into::<web_sys::HtmlCanvasElement>();
+                let plane: web_sys::HtmlCanvasElement = utils::document().element_dyn_into("plane")?;
                 plane.set_width(width as u32);
                 plane.set_height(height as u32);
-                let plane = plane.get_context("2d")?
-                    .ok_or_js_error("rendering context for #plane not found")?
-                    .unchecked_into::<web_sys::CanvasRenderingContext2d>();
+                let plane = plane.get_2d_context()?;
                 plane.set_stroke_style(&"#0069E1".into());
                 plane.set_fill_style(&"#232328".into());
                 plane.set_line_width(2.0);

@@ -1,5 +1,5 @@
-use crate::{MainCmd, SOUND_COMPS, PLANE_OFFSET};
-use crate::utils::{self, ToJsResult};
+use crate::MainCmd;
+use crate::utils;
 use yew::TargetCast;
 use std::rc::Rc;
 
@@ -13,22 +13,6 @@ pub enum Cmd {
 }
 
 impl Cmd {
-    pub fn event(&self) -> &web_sys::PointerEvent {
-        match self {
-            Cmd::Drag(ref e) => e,
-            Cmd::Focus(ref e) => e,
-            Cmd::Unfocus(ref e) => e,
-            Cmd::HoverIn(ref e) => e,
-            Cmd::HoverOut(ref e) => e}
-    }
-
-    pub fn discard_repeated(self) -> Option<Self> {
-        static mut LAST_EVENT: wasm_bindgen::JsValue = wasm_bindgen::JsValue::NULL;
-        let event = self.event();
-        if unsafe{&LAST_EVENT} == &******event {utils::js_log!("discarded"); return None}
-        *unsafe{&mut LAST_EVENT} = event.into();
-        Some(self)
-    }
 
     pub fn handle_focus(self, f: impl FnOnce(&web_sys::PointerEvent) -> utils::JsResult<()>) -> utils::JsResult<Self> {
         if let Cmd::Focus(ref e) = self {

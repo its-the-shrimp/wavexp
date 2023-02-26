@@ -41,11 +41,14 @@ pub trait Drop: Sized {
 }
 impl<T> Drop for T {}
 
-pub trait Choose: Sized + Copy + Into<bool> {
-	#[inline]
-	fn choose<T: Sized>(self, on_true: T, on_false: T) -> T {
+pub trait Choose: Sized + Into<bool> {
+	#[inline] fn choose<T: Sized>(self, on_true: T, on_false: T) -> T {
 		if self.into() {on_true} else {on_false}
 	}
+
+    #[inline] fn then_invert<T: std::ops::Not<Output=T>>(self, val: T) -> T {
+        if self.into() {std::ops::Not::not(val)} else {val}
+    }
 }
 impl Choose for bool {}
 
@@ -91,9 +94,7 @@ pub fn document() -> crate::web_sys::Document {
 
 pub fn get_canvas_ctx(name: &str, antialias: bool, alpha: bool)
 -> JsResult<(f64, f64, web_sys::CanvasRenderingContext2d)> {
-    let res = document().get_element_by_id(name)
-        .ok_or_js_error_with(|| format!("canvas #{} not found", name))?
-        .unchecked_into::<web_sys::HtmlCanvasElement>();
+    let res: web_sys::HtmlCanvasElement = document().element_dyn_into(name)?;
     Ok((res.width() as f64, res.height() as f64,
         res.get_context_with_context_options("2d", &js_obj!{bool alpha: alpha, bool antialias: antialias})?
             .ok_or_js_error_with(|| format!("rendering context not found for canvas #{}", name))?
@@ -187,54 +188,52 @@ impl<T> JsResultUtils<T> for Result<T, wasm_bindgen::JsValue> {
     }
 }
 
-pub struct EveryNth<'a, T> {
-    iter: &'a [T],
-    n: usize,
-    state: usize
+pub trait HtmlCanvasExt {
+    fn get_2d_context(&self) -> JsResult<web_sys::CanvasRenderingContext2d>;
 }
 
-impl<'a, T> std::iter::Iterator for EveryNth<'a, T> {
-    type Item = &'a T;
-    fn next(&mut self) -> Option<<Self as std::iter::Iterator>::Item> {
-		let len = self.iter.len();
-		self.iter.get(self.state)
-			.tee(|_| self.state = (self.state + self.n)
-				.not_in(len .. (len + self.n).saturating_sub(1))
-				.unwrap_or_else(|x| x - len + 1))
+impl HtmlCanvasExt for web_sys::HtmlCanvasElement {
+    fn get_2d_context(&self) -> JsResult<web_sys::CanvasRenderingContext2d> {
+        Ok(self.get_context("2d")?
+            .ok_or_js_error("the element has no rendering context")?
+            .unchecked_into::<web_sys::CanvasRenderingContext2d>())
     }
 }
 
-pub struct EveryNthMut<'a, T> {
-    iter: &'a mut [T],
-    n: usize,
-    state: usize
+pub trait HtmlDocumentExt {
+    fn element_dyn_into<T: wasm_bindgen::JsCast>(&self, id: &str) -> JsResult<T>;
 }
 
-impl<'a, T> std::iter::Iterator for EveryNthMut<'a, T> {
-    type Item = &'a mut T;
-    fn next(&mut self) -> Option<&'a mut T> {
-		let len = self.iter.len();
-		self.iter.get_mut(self.state)
-			.tee(|_| self.state = (self.state + self.n)
-				.not_in(len .. (len + self.n).saturating_sub(1))
-				.unwrap_or_else(|x| x - len + 1))
-				// the abomination below is there solely because such a trivial task as
-				// a lending iterator over mutable data can't be done any other way
-				.map(|x| unsafe{(x as *mut T).as_mut().unwrap_unchecked()})
+impl HtmlDocumentExt for web_sys::Document {
+    fn element_dyn_into<T: wasm_bindgen::JsCast>(&self, id: &str) -> JsResult<T> {
+        Ok(self.get_element_by_id(id).ok_or_js_error_with(|| format!("element #{} not found", id))?
+            .dyn_into::<T>().ok().ok_or_js_error_with(|| format!("element #{} is not of type `{}`", id, std::any::type_name::<T>()))?)
     }
 }
 
-pub trait ToEveryNth<T> {
-    fn every_nth<'a>(&'a self, n: usize) -> EveryNth<'a, T>;
-    fn every_nth_mut<'a>(&'a mut self, n: usize) -> EveryNthMut<'a, T>;
+pub trait SliceExt<T> {
+    fn get_saturating<'a>(&'a self, id: usize) -> &'a T;
+    fn get_saturating_mut<'a>(&'a mut self, id: usize) -> &'a mut T;
+    // the format of the error message would be: <prefix><id><postifx>
+    fn get_or_js_error<'a>(&'a self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a T>;
+    fn get_mut_or_js_error<'a>(&'a mut self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a mut T>;
 }
 
-impl<T> ToEveryNth<T> for [T] {
-    #[inline] fn every_nth<'a>(&'a self, n: usize) -> EveryNth<'a, T> {
-        EveryNth {iter: self, n, state: 0}
+impl<T> SliceExt<T> for [T] {
+    #[inline] fn get_saturating<'a>(&'a self, id: usize) -> &'a T {
+        unsafe{self.get_unchecked(id.min(self.len() - 1))}
     }
-    #[inline] fn every_nth_mut<'a>(&'a mut self, n: usize) -> EveryNthMut<'a, T> {
-        EveryNthMut {iter: self, n, state: 0}
+
+    #[inline] fn get_saturating_mut<'a>(&'a mut self, id: usize) -> &'a mut T {
+        unsafe{self.get_unchecked_mut(id.min(self.len() - 1))}
+    }
+
+    #[inline] fn get_or_js_error<'a>(&'a self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a T> {
+        self.get(id).ok_or_js_error_with(|| format!("{}{}{}", prefix, id, postfix))
+    }
+
+    #[inline] fn get_mut_or_js_error<'a>(&'a mut self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a mut T> {
+        self.get_mut (id).ok_or_js_error_with(|| format!("{}{}{}", prefix, id, postfix))
     }
 }
 
@@ -275,5 +274,199 @@ impl<T> MaybeCell<T> {
         std::cell::RefMut::map(self.0.try_borrow_mut().to_js_result()?,
             |x| x.insert(val));
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Point {pub x: i32, pub y: i32}
+
+impl From<Point> for [i32; 2] {
+    fn from(value: Point) -> Self {[value.x, value.y]}
+}
+
+impl std::ops::Add for Point {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        Self{x: self.x + rhs.x, y: self.y + rhs.y}
+    }
+}
+
+impl std::ops::AddAssign for Point {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs
+    }
+}
+
+impl std::ops::Sub for Point {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self{x: self.x - rhs.x, y: self.y - rhs.y}
+    }
+}
+
+impl std::ops::SubAssign for Point {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = *self - rhs
+    }
+}
+
+impl std::ops::Neg for Point {
+    type Output = Self;
+    fn neg(self) -> Self::Output {
+        Self{x: -self.x, y: -self.y}
+    }
+}
+
+impl Point {
+    pub const ZERO: Self = Self{x:0, y:0};
+    pub fn avg(self, p2: Self) -> Self {
+        Self{x: ((self.x as i64 + p2.x as i64) / 2) as i32,
+            y: ((self.y as i64 + p2.y as i64) / 2) as i32}
+    }
+
+    pub fn clamp_x(mut self, min: i32, max: i32) -> Self {
+        self.x = self.x.clamp(min, max);
+        self
+    }
+
+    pub fn clamp_y(mut self, min: i32, max: i32) -> Self {
+        self.y = self.y.clamp(min, max);
+        self
+    }
+}
+
+pub trait HitZone: Sized + std::fmt::Debug {
+    fn contains(&self, point: Point) -> bool;
+    fn     left(&self) -> i32;
+    fn      top(&self) -> i32;
+    fn    right(&self) -> i32;
+    fn   bottom(&self) -> i32;
+    fn   center(&self) -> Point;
+    fn    shift(self, offset: Point)  -> Self;
+    fn     draw(&self, ctx: &web_sys::CanvasRenderingContext2d);
+
+    #[inline] fn   width(&self) -> i32 {self.right() - self.left()}
+    #[inline] fn  height(&self) -> i32 {self.bottom() - self.top()}
+    #[inline] fn shift_x(self, x: i32) -> Self {self.shift(Point{x, y:0})}
+    #[inline] fn shift_y(self, y: i32) -> Self {self.shift(Point{x:0, y})}
+}
+
+#[derive(Debug)]
+pub struct Rect(Point, Point);
+
+impl HitZone for Rect {
+    #[inline] fn contains(&self, point: Point) -> bool {
+        self.0.x <= point.x && point.x <= self.1.x
+        && self.0.y <= point.y && point.y <= self.1.y
+    }
+
+    #[inline] fn   left(&self) -> i32 {self.0.x}
+    #[inline] fn    top(&self) -> i32 {self.0.y}
+    #[inline] fn  right(&self) -> i32 {self.1.x}
+    #[inline] fn bottom(&self) -> i32 {self.1.y}
+    #[inline] fn center(&self) -> Point {self.0.avg(self.1)}
+
+    #[inline] fn shift(self, offset: Point) -> Self {
+        Self(self.0 + offset, self.1 + offset)
+    }
+
+    fn draw(&self, ctx: &web_sys::CanvasRenderingContext2d) {
+        ctx.rect(self.left().into(), self.top().into(), self.width().into(), self.height().into())
+    }
+}
+
+impl Rect {
+    #[inline] pub fn square(src: Point, side: i32) -> Self {
+        Self(src, src + Point{x: side, y: side})
+    }
+
+    #[inline] pub fn square_center(src: Point, mut side: i32) -> Self {
+        side /= 2;
+        let offset = Point{x: side, y: side};
+        Self(src - offset, src + offset)
+    }
+
+    #[inline] pub fn to_rhombus(self) -> Rhombus {
+        Rhombus::new(self.center(), self.width() / 2, self.height() / 2)
+    }
+}
+
+#[derive(Debug)]
+pub struct Rhombus {
+    center: Point,
+    half_w: i32, half_h: i32
+}
+
+impl HitZone for Rhombus {
+    fn contains(&self, point: Point) -> bool {
+        let offset = self.center - point;
+        offset.x.abs() as f64 / self.half_w as f64 + offset.y.abs() as f64 / self.half_h as f64 <= 1.0
+    }
+
+    #[inline] fn   left(&self) -> i32   {self.center.x - self.half_w}
+    #[inline] fn    top(&self) -> i32   {self.center.y - self.half_h}
+    #[inline] fn  right(&self) -> i32   {self.center.x + self.half_w}
+    #[inline] fn bottom(&self) -> i32   {self.center.y + self.half_h}
+    #[inline] fn  width(&self) -> i32   {self.half_w * 2}
+    #[inline] fn height(&self) -> i32   {self.half_h * 2}
+    #[inline] fn center(&self) -> Point {self.center}
+
+    #[inline] fn shift(mut self, offset: Point) -> Self {
+        self.center += offset;
+        self
+    }
+
+    fn draw(&self, ctx: &web_sys::CanvasRenderingContext2d) {
+        ctx.move_to(self.center.x.into(), self.top().into());
+        ctx.line_to(self.right().into(), self.center.y.into());
+        ctx.line_to(self.center.x.into(), self.bottom().into());
+        ctx.line_to(self.left().into(), self.center.y.into());
+        ctx.close_path();
+    }
+}
+
+impl Rhombus {
+    #[inline] pub fn new(center: Point, half_w: i32, half_h: i32) -> Self {
+        Self{center, half_w, half_h}
+    }
+}
+
+#[derive(Debug)]
+pub struct HorizontalArrow {
+    back_center: Point,
+    w: i32, half_h: i32,
+    is_left: bool
+}
+
+impl HitZone for HorizontalArrow {
+    fn contains(&self, point: Point) -> bool {
+        let offset = self.back_center - point;
+        if self.is_left.then_invert(offset.x) > 0 {return false}
+        offset.x.abs() as f64 / self.w as f64 + offset.y.abs() as f64 / self.half_h as f64 <= 1.0
+    }
+
+    #[inline] fn   left(&self) -> i32 {self.back_center.x - self.w * self.is_left as i32}
+    #[inline] fn    top(&self) -> i32 {self.back_center.y - self.half_h}
+    #[inline] fn  right(&self) -> i32 {self.back_center.x + self.w * !self.is_left as i32}
+    #[inline] fn bottom(&self) -> i32 {self.back_center.y + self.half_h}
+    #[inline] fn center(&self) -> Point {self.back_center}
+
+    #[inline] fn shift(mut self, offset: Point) -> Self {
+        self.back_center += offset;
+        self
+    }
+
+    fn draw(&self, ctx: &web_sys::CanvasRenderingContext2d) {
+        ctx.move_to(self.back_center.x.into(), self.top().into());
+        ctx.line_to((self.back_center.x + self.is_left.then_invert(self.w)).into(),
+            self.back_center.y.into());
+        ctx.line_to(self.back_center.x.into(), self.bottom().into());
+        ctx.close_path();
+    }
+}
+
+impl HorizontalArrow {
+    #[inline] pub fn new(back_center: Point, w: i32, half_h: i32, is_left: bool) -> Self {
+        Self{back_center, w, half_h, is_left}
     }
 }

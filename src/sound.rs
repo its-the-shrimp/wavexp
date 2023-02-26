@@ -1,9 +1,8 @@
-use crate::utils::{self, JsResultUtils, Tee, ToJsResult, OkOrJsError};
-use crate::{input, get_sound_comp, draggable, PLANE_OFFSET};
-use crate::{SOUND_COMPS, MainCmd};
+use crate::utils::{self, JsResultUtils, HitZone, SliceExt};
+use crate::{input, MainCmd};
 use std::rc::Rc;
 
-pub enum SoundFunctorType {
+enum SoundFunctorType {
     Wave {gen: web_sys::OscillatorNode},
     Envelope {
         gen: web_sys::GainNode,
@@ -14,12 +13,19 @@ pub enum SoundFunctorType {
     BuiltinOutput {gen: Rc<web_sys::AnalyserNode>}
 }
 
+#[derive(Debug)]
+enum FocusType {
+    None,
+    Moving(utils::Point),
+    Connecting(utils::Point),
+}
+
 pub struct SoundFunctor {
     functor_type: SoundFunctorType,
     id: usize,
-    location: [i32; 2],
+    location: utils::Point,
     forwards: Vec<usize>,
-    new_conn: Option<[i32; 2]>
+    focus_type: FocusType
 }
 
 impl PartialEq for SoundFunctor {
@@ -47,24 +53,24 @@ impl SoundFunctor {
 	pub const MIN_VOLUME: f32 = f32::MIN_POSITIVE;
     pub const VISUAL_SIZE: i32 = 32;
 
-    pub fn new_wave(player: &web_sys::AudioContext, id: usize, x: i32, y: i32) -> utils::JsResult<Self> {
+    pub fn new_wave(player: &web_sys::AudioContext, id: usize, location: utils::Point) -> utils::JsResult<Self> {
         let gen = web_sys::OscillatorNode::new_with_options(player, 
             web_sys::OscillatorOptions::new().frequency(Self::DEF_FREQ))?;
         gen.start()?;
         Ok(Self{functor_type: SoundFunctorType::Wave{gen}, 
-            id, location: [x, y], forwards: vec![], new_conn: None})
+            id, location, forwards: vec![], focus_type: FocusType::None})
     }
 
-    pub fn new_envelope(player: &web_sys::AudioContext, id: usize, x: i32, y: i32) -> utils::JsResult<Self> {
+    pub fn new_envelope(player: &web_sys::AudioContext, id: usize, location: utils::Point) -> utils::JsResult<Self> {
         let gen = web_sys::GainNode::new_with_options(player, 
             web_sys::GainOptions::new().gain(Self::MIN_VOLUME))?;
         Ok(Self{functor_type: SoundFunctorType::Envelope{gen, attack: 0.0, decay: 0.0, sustain: 0.0, release: 0.0},
-            id, location: [x, y], forwards: vec![], new_conn: None})
+            id, location, forwards: vec![], focus_type: FocusType::None})
     }
 
-    pub fn new_builtin_output(gen: Rc<web_sys::AnalyserNode>, id: usize, x: i32, y: i32) -> utils::JsResult<Self> {
+    pub fn new_builtin_output(gen: Rc<web_sys::AnalyserNode>, id: usize, location: utils::Point) -> utils::JsResult<Self> {
         Ok(Self{functor_type: SoundFunctorType::BuiltinOutput{gen},
-            id, location: [x, y], forwards: vec![], new_conn: None})
+            id, location, forwards: vec![], focus_type: FocusType::None})
     }
 
     pub fn start(&mut self, cur_time: f64) -> utils::JsResult<()> {
@@ -96,7 +102,7 @@ impl SoundFunctor {
         match &mut self.functor_type {
             SoundFunctorType::Wave {gen} => match param_id {
                 0 => Ok(_ = gen.frequency().set_value_at_time(value as f32, cur_time)?
-                    .value().js_log("new frequency: ")),
+                    .value()),
                 1 => match value as usize {
                     0 => Ok(gen.set_type(web_sys::OscillatorType::Sine)),
                     1 => Ok(gen.set_type(web_sys::OscillatorType::Square)),
@@ -148,11 +154,16 @@ impl SoundFunctor {
     }
 
     #[inline] pub fn id(&self) -> usize {self.id}
-    #[inline] pub fn location(&self) -> [i32; 2] {self.location}
+    #[inline] pub fn location(&self) -> utils::Point {self.location}
 
-    pub fn contains(&self, x: i32, y: i32) -> bool {
-        (self.location[0] - Self::VISUAL_SIZE ..= self.location[0] + Self::VISUAL_SIZE).contains(&x)
-        && (self.location[1] - Self::VISUAL_SIZE ..= self.location[1] + Self::VISUAL_SIZE).contains(&y)
+    pub fn contains(&self, point: utils::Point) -> bool {
+        match (self.forwards().is_some(), self.backwardable()) {
+            (true,  true) => utils::Rhombus::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE)
+                .contains(point),
+            (false, false) => wasm_bindgen::throw_str("a sound functor must be either forwardable or backwardable"),
+            (_, x) => utils::HorizontalArrow::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE, x)
+                .contains(point)
+        }
     }
 
     pub fn params(&self) -> yew::Html {
@@ -209,37 +220,62 @@ impl SoundFunctor {
             SoundFunctorType::BuiltinOutput{..} => Default::default()}
     }
 
-    pub fn draw(&self, ctx: &web_sys::CanvasRenderingContext2d, offset: [i32; 2]) -> utils::JsResult<()> {
-        let x = (self.location[0] - offset[0]) as f64;
-        let y = (self.location[1] - offset[1]) as f64;
-        ctx.move_to(x, y - Self::VISUAL_SIZE as f64);
+    pub fn draw(&self, ctx: &web_sys::CanvasRenderingContext2d, offset: utils::Point, others: &[Self]) -> utils::JsResult<()> {
+        match (self.forwards().is_some(), self.backwardable()) {
+            (false, false) => return Err("a sound functor must be either forwardable or backwardable".into()),
+            (true,  true) => utils::Rhombus::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE)
+                .shift(-offset).draw(ctx),
+            (_, x) => utils::HorizontalArrow::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE, x)
+                .shift(-offset).draw(ctx)
+        }
+
         if let Some(fwds) = self.forwards() {
-            ctx.line_to(x + Self::VISUAL_SIZE as f64, y as f64);
-            let comps = SOUND_COMPS.try_borrow().to_js_result()?;
+            let hitzone = self.get_conn_creation_hitzone().shift(-offset);
+            hitzone.draw(ctx);
             for id in fwds {
-                let comp = comps.get(*id)
-                    .ok_or_js_error_with(||
-                        format!("error while rendering connections to other components: sound functor #{} not found", id))?;
-                let [x2, y2] = comp.location();
-                ctx.line_to((x2 - offset[0]) as f64, (y2 - offset[1]) as f64);
-                ctx.move_to(x + Self::VISUAL_SIZE as f64, y as f64);
+                let comp = others.get_or_js_error(*id, "sound functor #", "not found")?;
+                let dst = comp.location() - offset;
+                ctx.move_to(hitzone.right().into(), hitzone.center().y.into());
+                ctx.line_to(dst.x.into(), dst.y.into());
             }
                 
+            if let FocusType::Connecting(mut conn) = self.focus_type {
+                ctx.move_to(hitzone.right().into(), hitzone.center().y.into());
+                conn -= offset;
+                ctx.line_to(conn.x.into(), conn.y.into());
+            }
         }
-        ctx.line_to(x, y + Self::VISUAL_SIZE as f64);
-        if self.backwardable() {
-            ctx.line_to(x - Self::VISUAL_SIZE as f64, y as f64)}
-        ctx.line_to(x, y - Self::VISUAL_SIZE as f64);
-        if let Some(conn) = self.new_conn {
-            ctx.move_to(x + Self::VISUAL_SIZE as f64, y);
-            ctx.line_to(conn[0] as f64, conn[1] as f64);
-        }
-        ctx.stroke();
-        Ok(())
+        Ok(ctx.stroke())
     }
 
-    #[inline] pub fn handle_movement(&mut self, coords: Option<[i32; 2]>) -> utils::JsResult<()> {
-        Ok(self.new_conn = coords.filter(|_| self.forwards().is_some()))
+    #[inline] pub fn get_conn_creation_hitzone(&self) -> impl utils::HitZone {
+        utils::HorizontalArrow::new(self.location, Self::VISUAL_SIZE / 2, Self::VISUAL_SIZE / 2, false)
+            .shift_x(Self::VISUAL_SIZE / 2)
+    }
+
+    pub fn handle_movement(&mut self, coords: Option<utils::Point>) -> utils::JsResult<()> {
+        self.focus_type = if let Some(coords) = coords {
+            match self.focus_type {
+                FocusType::None => 
+                    (self.forwards().is_some() && self.get_conn_creation_hitzone().contains(coords))
+                        .then_some(FocusType::Connecting(coords))
+                        .unwrap_or(FocusType::Moving(self.location - coords)),
+
+                FocusType::Moving(offset) => {
+                    self.location = coords + offset;
+                    FocusType::Moving(offset)}
+
+                FocusType::Connecting(_) => FocusType::Connecting(coords)
+            }
+        } else {
+            match self.focus_type {
+                FocusType::Connecting(dst) => {
+                    MainCmd::TryConnect(self.id, dst).send();
+                    MainCmd::Select(self.id).send()}
+                FocusType::Moving(_) => MainCmd::Select(self.id).send(),
+                FocusType::None => ()};
+            FocusType::None};
+        Ok(())
     }
 
     pub fn graph(&self, width: f64, height: f64) -> utils::JsResult<(web_sys::Path2d, f64, f64)> {
