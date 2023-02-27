@@ -35,7 +35,7 @@ impl Cmd {
     pub fn handle_hover(self, help_msg: Rc<str>) -> Self {
         match &self {
             Cmd::HoverIn(_) => MainCmd::SetDesc(help_msg).send(),
-            Cmd::HoverOut(_) => MainCmd::RemoveDesc().send(),
+            Cmd::HoverOut(_) => MainCmd::RemoveDesc.send(),
             _ => ()};
         self
     }

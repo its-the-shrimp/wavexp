@@ -1,8 +1,7 @@
 use wasm_bindgen::JsCast;
 
 pub trait Check: Sized {
-	#[inline] fn check<F>(self, f: F) -> Result<Self, Self>
-    where F: FnOnce(&Self) -> bool {
+	#[inline] fn check<F>(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
 		if f(&self) {Ok(self)} else {Err(self)}
 	}
 
@@ -19,7 +18,7 @@ pub trait Check: Sized {
 impl<T> Check for T {}
 
 pub trait Tee: Sized {
-	#[inline] fn tee<F>(self, f: F) -> Self where F: FnOnce(&Self) {
+	#[inline] fn tee(self, f: impl FnOnce(&Self)) -> Self {
         f(&self); self
 	}
 
@@ -32,25 +31,29 @@ impl<T> Tee for T {}
 
 pub trait Pipe: Sized {
 	#[inline]
-	fn pipe<O, F>(self, f: F) -> O where F: FnOnce(Self) -> O { f(self) }
+	fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T { f(self) }
 }
 impl<T> Pipe for T {}
 
-pub trait Drop: Sized {
-	#[inline] fn drop(self) {}
+pub trait BoolExt {
+	fn choose<T: Sized>(self, on_true: T, on_false: T) -> T;
+    fn choose_with<T: Sized>(self, on_true: impl FnOnce() -> T, on_false: impl FnOnce() -> T) -> T;
+    fn then_negate<T: std::ops::Neg<Output=T>>(self, val: T) -> T;
 }
-impl<T> Drop for T {}
 
-pub trait Choose: Sized + Into<bool> {
-	#[inline] fn choose<T: Sized>(self, on_true: T, on_false: T) -> T {
-		if self.into() {on_true} else {on_false}
-	}
+impl BoolExt for bool {
+    #[inline] fn choose<T: Sized>(self, on_true: T, on_false: T) -> T {
+        if self {on_true} else {on_false}
+    }
 
-    #[inline] fn then_invert<T: std::ops::Not<Output=T>>(self, val: T) -> T {
-        if self.into() {std::ops::Not::not(val)} else {val}
+    #[inline] fn choose_with<T: Sized>(self, on_true: impl FnOnce() -> T, on_false: impl FnOnce() -> T) -> T {
+        if self {on_true()} else {on_false()}
+    }
+
+    #[inline] fn then_negate<T: std::ops::Neg<Output=T>>(self, val: T) -> T {
+        if self {-val} else {val}
     }
 }
-impl Choose for bool {}
 
 #[allow(non_camel_case_types)]
 #[allow(dead_code)]
@@ -80,6 +83,22 @@ macro_rules! js_log {
 	}
 }
 pub use js_log;
+
+#[macro_export]
+macro_rules! js_try {
+    (type = $r:ty : $($s:tt)*) => {
+        {let x: crate::utils::JsResult<$r> = try {
+            $($s)*
+        }; x}
+    };
+
+    ($($s:tt)*) => {
+        {let x: crate::utils::JsResult<_> = try {
+            $($s)*
+        }; x}
+    };
+}
+pub use js_try;
 
 use crate::MainCmd;
 
@@ -441,7 +460,7 @@ pub struct HorizontalArrow {
 impl HitZone for HorizontalArrow {
     fn contains(&self, point: Point) -> bool {
         let offset = self.back_center - point;
-        if self.is_left.then_invert(offset.x) > 0 {return false}
+        if self.is_left.then_negate(offset.x) > 0 {return false}
         offset.x.abs() as f64 / self.w as f64 + offset.y.abs() as f64 / self.half_h as f64 <= 1.0
     }
 
@@ -458,7 +477,7 @@ impl HitZone for HorizontalArrow {
 
     fn draw(&self, ctx: &web_sys::CanvasRenderingContext2d) {
         ctx.move_to(self.back_center.x.into(), self.top().into());
-        ctx.line_to((self.back_center.x + self.is_left.then_invert(self.w)).into(),
+        ctx.line_to((self.back_center.x + self.is_left.then_negate(self.w)).into(),
             self.back_center.y.into());
         ctx.line_to(self.back_center.x.into(), self.bottom().into());
         ctx.close_path();
