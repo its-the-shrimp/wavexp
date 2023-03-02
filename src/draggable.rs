@@ -1,7 +1,6 @@
 use crate::MainCmd;
 use crate::utils;
 use yew::TargetCast;
-use std::rc::Rc;
 
 #[derive(Debug)]
 pub enum Cmd {
@@ -32,9 +31,9 @@ impl Cmd {
         Ok(self)
     }
 
-    pub fn handle_hover(self, help_msg: Rc<str>) -> Self {
+    pub fn handle_hover(self, help_msg: &str) -> Self {
         match &self {
-            Cmd::HoverIn(_) => MainCmd::SetDesc(help_msg).send(),
+            Cmd::HoverIn(_) => MainCmd::SetDesc(help_msg.to_owned()).send(),
             Cmd::HoverOut(_) => MainCmd::RemoveDesc.send(),
             _ => ()};
         self
@@ -43,8 +42,6 @@ impl Cmd {
     pub fn handle_drag(self, f: impl FnOnce(&web_sys::PointerEvent) -> utils::JsResult<()>) -> utils::JsResult<Self> {
         if let Cmd::Drag(ref e) = self {
             f(e)?;
-            e.stop_propagation();
-            e.stop_immediate_propagation();
         };
         Ok(self)
     }

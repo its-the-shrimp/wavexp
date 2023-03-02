@@ -294,6 +294,12 @@ impl<T> MaybeCell<T> {
             |x| x.insert(val));
         Ok(())
     }
+
+    #[inline] pub fn maybe_set(&self, val: Option<T>) -> JsResult<()> {
+        let mut r = self.0.try_borrow_mut().to_js_result()?;
+        *r = val;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,7 +1,9 @@
 use std::rc::Rc;
 use std::f64::consts::PI;
 use yew::TargetCast;
-use crate::{utils::{self, OkOrJsError, JsResultUtils}, MainCmd, draggable};
+use crate::draggable;
+use crate::MainCmd;
+use crate::utils::{self, OkOrJsError, JsResultUtils};
 
 pub struct Slider {
     value: f64,
@@ -13,13 +15,12 @@ pub struct Slider {
 pub struct SliderProps {
     #[prop_or(yew::classes!("default-input"))]
     pub class: yew::html::Classes,
-    pub name: Rc<str>,
+    pub name: &'static str,
     #[prop_or(1.0)]
     pub coef: f64,
     #[prop_or(2)]
     pub precision: usize,
-    #[prop_or_default]
-    pub postfix: yew::AttrValue,
+    pub postfix: &'static str,
     pub component_id: usize,
     pub id: usize,
     pub initial: f64
@@ -39,9 +40,9 @@ impl yew::Component for Slider {
     }
 
     fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
-        let err: utils::JsResult<!> = try {
+        _ = utils::js_try!{type = !:
             let SliderProps {component_id, id, coef, name, ..} = ctx.props();
-            return msg.handle_hover(name.clone())
+            return msg.handle_hover(name)
                 .handle_focus(|_| Ok(self.focused = true))?
                 .handle_unfocus(|_| Ok(self.focused = false))?
                 .handle_drag(|e| {
@@ -52,8 +53,7 @@ impl yew::Component for Slider {
                     MainCmd::SetParam(*component_id, *id, self.value * coef).send();
                     Ok(())})?
                 .needs_rerender()
-        };
-        _ = err.report_err("handling a message received by the slider");
+        }.report_err("handling a message received by the slider");
         false
     }
 
@@ -68,7 +68,7 @@ impl yew::Component for Slider {
     }
 
     fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
-        let err: utils::JsResult<()> = try {
+        _ = utils::js_try!{type = !:
             let SliderProps{coef, precision, postfix, ..} = ctx.props();
             if first_render {utils::sync_canvas(&self.id)?}
             let (w, h, ctx) = utils::get_canvas_ctx(&self.id, true, true)?;
@@ -93,9 +93,8 @@ impl yew::Component for Slider {
             ctx.set_text_baseline("top");
             return ctx.fill_text_with_max_width(postfix, 
                 w, h + LINE_WIDTH * 2.0 + ctx.measure_text("0")?
-                    .font_bounding_box_ascent() * 2.0, r * 1.5)?;
-        };
-        _ = err.report_err("rendering the slider");
+                    .font_bounding_box_ascent() * 2.0, r * 1.5)?
+        }.report_err("rendering the slider");
     }
 }
 
@@ -109,8 +108,8 @@ pub struct Switch {
 pub struct SwitchProps {
     #[prop_or(yew::classes!("default-input"))]
     pub class: yew::Classes,
-    pub name: Rc<str>,
-    pub options: Vec<Rc<str>>,
+    pub name: &'static str,
+    pub options: Vec<&'static str>,
     pub component_id: usize,
     pub id: usize,
     pub initial: usize
@@ -128,7 +127,7 @@ impl yew::Component for Switch {
     fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
         let err: utils::JsResult<!> = try {
             let SwitchProps {options, component_id, id, name, ..} = ctx.props();
-            return msg.handle_hover(name.clone())
+            return msg.handle_hover(name)
                 .handle_focus(|_| Ok(self.focused = true))?
                 .handle_unfocus(|_| Ok(self.focused = false))?
                 .handle_drag(|e| {

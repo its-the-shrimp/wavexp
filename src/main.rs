@@ -14,7 +14,6 @@ use web_sys;
 use js_sys;
 use wasm_bindgen;
 use wasm_bindgen::JsCast;
-use yew::TargetCast;
 use std::rc::Rc;
 
 struct AnimationCtx {
@@ -29,26 +28,39 @@ struct AnimationCtx {
     js_callback: js_sys::Function
 }
 
+mod canvases {
+    use crate::utils;
+    pub static GRAPH: utils::WasmCell<utils::MaybeCell<web_sys::HtmlCanvasElement>> = utils::WasmCell::new(utils::MaybeCell::new());
+    pub static SOUND_VISUALISER: utils::WasmCell<utils::MaybeCell<web_sys::HtmlCanvasElement>> = utils::WasmCell::new(utils::MaybeCell::new());
+    pub static PLANE: utils::WasmCell<utils::MaybeCell<web_sys::HtmlCanvasElement>> = utils::WasmCell::new(utils::MaybeCell::new());
+}
+
 static ANIMATION_CTX: utils::WasmCell<utils::MaybeCell<AnimationCtx>> = utils::WasmCell::new(utils::MaybeCell::new());
 
 fn start_animation_loop() -> utils::JsResult<()> {
     fn render(time: f64) {
-        _ = utils::js_try!{
+        _ = utils::js_try!{type = !:
                 let mut handle = ANIMATION_CTX.get_mut()?;
                 let AnimationCtx{ref analyser, ref mut renderer, 
                     ref graph, ref solid_line, ref dotted_line,
                     ref graph_in_span, ref graph_span, ref mut pbar_start,
                     ref js_callback} = *handle;
                 let graph_out_span = graph_span - graph_in_span;
-                let (w, h, ctx) = utils::get_canvas_ctx("main", false, false)?;
-                let buf = renderer.set_size(w as usize, h as usize).get_in_buffer();
-                analyser.get_byte_frequency_data(buf);
-                ctx.put_image_data(
-                    &web_sys::ImageData::new_with_u8_clamped_array(
-                        wasm_bindgen::Clamped(renderer.graph().get_out_bytes()), w as u32)?,
-                    0.0, 0.0)?;
 
-                if let Ok((w, h, ctx)) = utils::get_canvas_ctx("graph", true, true) {
+                let err1 = utils::js_try!{
+                    let canvas = canvases::SOUND_VISUALISER.get()?;
+                    let buf = renderer.set_size(canvas.width() as usize, canvas.height() as usize)
+                        .get_in_buffer();
+                    analyser.get_byte_frequency_data(buf);
+                    canvas.get_2d_context()?.put_image_data(
+                        &web_sys::ImageData::new_with_u8_clamped_array(
+                            wasm_bindgen::Clamped(renderer.graph().get_out_bytes()), canvas.width())?,
+                        0.0, 0.0)?;
+                }.explain_err("re-rendering the sound visualisation");
+
+                let err2 = utils::js_try!{
+                    let canvas = canvases::GRAPH.get()?;
+                    let (w, h, ctx) = (canvas.width().into(), canvas.height().into(), canvas.get_2d_context()?);
                     ctx.set_fill_style(&"#181818".into());
                     ctx.fill_rect(0.0, 0.0, w, h);
                     if graph_span.is_finite() {
@@ -78,9 +90,12 @@ fn start_animation_loop() -> utils::JsResult<()> {
                             }
                         }
                     }
-                }
+                }.explain_err("re-rendering the graphical representation of a sound element's parameters");
                 
-                utils::window().request_animation_frame(js_callback)?;
+                let err3 = utils::window().request_animation_frame(js_callback)
+                    .explain_err("re-registering the animation callback");
+
+                err1.and(err2).and(err3)?;
                 return
         }.report_err("rendering frame-by-frame animation");
     }
@@ -93,9 +108,8 @@ fn start_animation_loop() -> utils::JsResult<()> {
     Ok(())
 }
 
-struct Main {
+pub struct Main {
     player: web_sys::AudioContext,
-    help_msg: Rc<str>,
     selected_comp: Option<usize>,
     focused_comp: Option<usize>,
     hovered_comp: Option<usize>,
@@ -111,7 +125,7 @@ pub enum MainCmd {
     Focus(web_sys::PointerEvent),
     Unfocus(web_sys::PointerEvent),
     LeavePlane,
-    SetDesc(Rc<str>),
+    SetDesc(String),
     RemoveDesc,
     SetParam(usize, usize, f64),
     TryConnect(usize, utils::Point),
@@ -130,6 +144,18 @@ impl MainCmd {
 
 impl Main {
     const DEF_HELP_MSG: &'static str = "Hover over an element to get help";
+
+    pub fn set_desc(desc: &str) -> utils::JsResult<()> {
+        utils::document().element_dyn_into::<web_sys::HtmlElement>("help-msg")?
+            .set_inner_text(&format!("{:1$}", desc, Self::DEF_HELP_MSG.len()));
+        Ok(())
+    }
+
+    pub fn remove_desc() -> utils::JsResult<()> {
+        utils::document().element_dyn_into::<web_sys::HtmlElement>("help-msg")?
+            .set_inner_text(Self::DEF_HELP_MSG);
+        Ok(())
+    }
 }
 
 impl yew::Component for Main {
@@ -160,15 +186,14 @@ impl yew::Component for Main {
                 js_callback: Default::default() // initialized later in `start_animation_loop`
             })?;
 
-            Self {help_msg: Self::DEF_HELP_MSG.into(),
-                sound_comps, player,
+            Self {sound_comps, player,
                 error_count: 0, plane_moving: false,
                 selected_comp: None, focused_comp: None, hovered_comp: None,
                 plane_offset: utils::Point::ZERO}
         }.expect_throw("initialising the main component")
     }
 
-    fn update(&mut self, _: &yew::Context<Self>, msg: Self::Message) -> bool {
+    fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
         let on_new_error = |this: &mut Self, err: wasm_bindgen::JsValue| -> bool {
             this.error_count += 1;
             web_sys::console::warn_1(&err);
@@ -177,75 +202,84 @@ impl yew::Component for Main {
         let err = utils::js_try!{type = !:
             let cur_time = self.player.current_time();
             let mut editor_plane_ctx: Option<(f64, f64, web_sys::CanvasRenderingContext2d)> = None;
-            let mut needs_html_rerender = false;
             match msg {
                 MainCmd::Drag(e) => utils::js_try!{
                     if let Some(id) = self.focused_comp {
-                        let target = e.target_dyn_into::<web_sys::HtmlCanvasElement>()
-                            .ok_or_js_error("the event has no target")?;
-                        editor_plane_ctx = Some((target.width().into(),
-                            target.height().into(),
-                            target.get_2d_context()?));
+                        let plane = canvases::PLANE.get()?;
+                        editor_plane_ctx = Some((plane.width().into(),
+                            plane.height().into(),
+                            plane.get_2d_context()?));
                         let comp = self.sound_comps.get_mut_or_js_error(id, "sound element #", " not found")?;
-                        comp.handle_movement(Some(utils::Point{x: e.x(), y: e.y()} + self.plane_offset))?;
+                        comp.handle_movement(Some(utils::Point{x: e.x(), y: e.y()} + self.plane_offset), ctx.link())?;
                     } else if self.plane_moving {
-                        let target = e.target_dyn_into::<web_sys::HtmlCanvasElement>()
-                            .ok_or_js_error("the event has no target")?;
-                        let [w, h] = [target.width() as i32, target.height() as i32];
-                        editor_plane_ctx = Some((w as f64, h as f64, target.get_2d_context()?));
+                        let plane = canvases::PLANE.get()?;
+                        let [w, h] = [plane.width() as i32, plane.height() as i32];
+                        editor_plane_ctx = Some((w as f64, h as f64, plane.get_2d_context()?));
                         self.plane_offset -= utils::Point{x: e.movement_x(), y: e.movement_y()};
-                    } else if let Some(id) = self.hovered_comp {
-                        let point = utils::Point{x: e.x(), y: e.y()} + self.plane_offset;
-                        if !self.sound_comps.get_or_js_error(id, "sound element #", " not found")?.contains(point) {
-                            self.hovered_comp = None;
-                            MainCmd::RemoveDesc.send();
-                        }
-                    } if self.hovered_comp.is_none() {
-                        let point = utils::Point{x: e.x(), y: e.y()} + self.plane_offset;
-                        if let Some(comp) = self.sound_comps.iter().find(|x| x.contains(point)) {
-                            self.hovered_comp = Some(comp.id());
-                            MainCmd::SetDesc(comp.name().into()).send();
+                    } else {
+                        if let Some(id) = self.hovered_comp {
+                            let point = utils::Point{x: e.x(), y: e.y()} + self.plane_offset;
+                            if !self.sound_comps.get_or_js_error(id, "sound element #", " not found")?.contains(point) {
+                                self.hovered_comp = None;
+                                Self::remove_desc()?;
+                            }
+                        } if self.hovered_comp.is_none() {
+                            let point = utils::Point{x: e.x(), y: e.y()} + self.plane_offset;
+                            if let Some(comp) = self.sound_comps.iter().find(|x| x.contains(point)) {
+                                self.hovered_comp = Some(comp.id());
+                                Self::set_desc(comp.name())?;
+                            }
                         }
                     }
                 }.explain_err("handling `MainCmd::Drag` message")?,
 
                 MainCmd::Focus(e) => utils::js_try!{
-                    let target = e.target_dyn_into::<web_sys::HtmlCanvasElement>()
-                        .ok_or_js_error("the event has no target")?;
-                    editor_plane_ctx = Some((target.width().into(), target.height().into(), target.get_2d_context()?));
+                    let plane = canvases::PLANE.get()?;
+                    plane.set_pointer_capture(e.pointer_id())?;
+                    editor_plane_ctx = Some((plane.width().into(), plane.height().into(), plane.get_2d_context()?));
                     let point = utils::Point{x: e.x(), y: e.y()} + self.plane_offset;
                     self.focused_comp = self.sound_comps.iter()
-                        .find(|c| c.contains(point)).map(|c| c.id());
-                    self.plane_moving = self.focused_comp.is_none();
+                        .position(|c| c.contains(point));
+                    if let Some(comp) = self.focused_comp {
+                        let comp = unsafe {self.sound_comps.get_unchecked_mut(comp)};
+                        comp.handle_movement(Some(utils::Point{x: e.x(), y: e.y()} + self.plane_offset), ctx.link())?;
+                    } else {
+                        self.plane_moving = true;
+                        Self::set_desc("Dragging the plane")?;
+                    }
                 }.explain_err("handling `MainCmd::Focus` message")?,
 
                 MainCmd::Unfocus(e) => utils::js_try!{
-                    let target = e.target_dyn_into::<web_sys::HtmlCanvasElement>()
-                        .ok_or_js_error("the event has no target")?;
-                    editor_plane_ctx = Some((target.width().into(), target.height().into(), target.get_2d_context()?));
+                    let plane = canvases::PLANE.get()?;
+                    plane.release_pointer_capture(e.pointer_id())?;
+                    editor_plane_ctx = Some((plane.width().into(), plane.height().into(), plane.get_2d_context()?));
                     self.plane_moving = false;
                     if let Some(id) = self.focused_comp.take() {
                         let comp = self.sound_comps.get_mut_or_js_error(id, "sound functor #", " not found")?;
-                        comp.handle_movement(Some(utils::Point{x:e.x(), y:e.y()} + self.plane_offset))?;
-                        comp.handle_movement(None)?;
+                        let receiver = ctx.link();
+                        comp.handle_movement(Some(utils::Point{x:e.x(), y:e.y()} + self.plane_offset), receiver)?;
+                        comp.handle_movement(None, receiver)?;
+                        Self::set_desc(comp.name())?;
                     }
                 }.explain_err("handling `MainCmd::Unfocus` message")?,
 
-                MainCmd::LeavePlane => self.hovered_comp = None,
+                MainCmd::LeavePlane => utils::js_try!{
+                    self.hovered_comp = None;
+                    Self::remove_desc()?;
+                }.explain_err("handling `MainCmd::LeavePlane` message")?,
 
-                MainCmd::SetDesc(value) => {
-                    self.help_msg = format!("{:1$}", value, Self::DEF_HELP_MSG.len()).into();
-                    needs_html_rerender = true}
+                MainCmd::SetDesc(value) => Self::set_desc(&value)
+                    .explain_err("handling `MainCmd::SetDesc` message")?,
 
-                MainCmd::RemoveDesc => {
-                    self.help_msg = Self::DEF_HELP_MSG.into();
-                    needs_html_rerender = true}
+                MainCmd::RemoveDesc => Self::remove_desc()
+                    .explain_err("handling `MainCmd::RemoveDesc` message")?,
 
                 MainCmd::SetParam(comp_id, param_id, value) => utils::js_try!{
-                    let comp = self.sound_comps.get_mut_or_js_error(comp_id, "sound functor #", " not found")?;
-                    comp.set_param(param_id, value, cur_time)?;
-                    let (w, h, _) = utils::get_canvas_ctx("graph", false, false)?;
-                    let (graph, graph_in_span, graph_span) = comp.graph(w, h)?;
+                    let plane = canvases::PLANE.get()?;
+                    let (graph, graph_in_span, graph_span) = self.sound_comps
+                        .get_mut_or_js_error(comp_id, "sound component #", " not found")?
+                        .set_param(param_id, value, cur_time)?
+                        .graph(plane.width().into(), plane.height().into())?;
                     let mut ctx = ANIMATION_CTX.get_mut()?;
                     ctx.graph = graph;
                     ctx.graph_in_span = graph_in_span;
@@ -258,15 +292,14 @@ impl yew::Component for Main {
                             src.connect(dst)?;
                         }
                     } else {
-                        self.help_msg = Self::DEF_HELP_MSG.into();
-                    }
-                    let target = utils::document().element_dyn_into::<web_sys::HtmlCanvasElement>("plane")?;
-                    editor_plane_ctx = Some((target.width().into(),
-                        target.height().into(),
-                        target.get_2d_context()?));
+                        Self::remove_desc()?}
+                    let plane = canvases::PLANE.get()?;
+                    editor_plane_ctx = Some((plane.width().into(),
+                        plane.height().into(),
+                        plane.get_2d_context()?));
                 }.explain_err("handling `MainCmd::TryConnect` message")?,
 
-                MainCmd::Select(id) => utils::js_try!{
+                MainCmd::Select(id) => utils::js_try!{type = !:
                     self.selected_comp = (Some(id) != self.selected_comp).then_some(id);
                     if let Some(id) = self.selected_comp {
                         let (w, h, _) = utils::get_canvas_ctx("graph", false, false)?;
@@ -278,7 +311,7 @@ impl yew::Component for Main {
                         ctx.graph_in_span = graph_in_span;
                         ctx.graph_span = graph_span;
                     }
-                    needs_html_rerender = true
+                    return true
                 }.explain_err("handling `MainCmd::Select` message")?,
 
                 MainCmd::Start => utils::js_try!{
@@ -307,7 +340,7 @@ impl yew::Component for Main {
                     .try_for_each(|c| c.draw(&ctx, self.plane_offset, &self.sound_comps))
                     .explain_err("redrawing the editor plane")?;
             }
-            return needs_html_rerender
+            return false
         };
         on_new_error(self, err.into_err())
     }
@@ -322,7 +355,7 @@ impl yew::Component for Main {
             onpointermove={ctx.link().callback(MainCmd::Drag)}
             onpointerleave={ctx.link().callback(|_| MainCmd::LeavePlane)}/>
             <div id="ctrl-panel">
-                <div id="help-msg">{self.help_msg.clone()}</div>
+                <div id="help-msg" style="user-select:none">{Self::DEF_HELP_MSG}</div>
                 <div id="inputs">
                     {comp.map(sound::SoundFunctor::params)}
                 </div>
@@ -330,7 +363,7 @@ impl yew::Component for Main {
                 hidden={!comp.is_some_and(|comp| comp.graphable())}/>
             </div>
             <div id="visuals">
-                <canvas id="main" class="visual"/>
+                <canvas id="sound-visualiser" class="visual"/>
                 <button
                 onmousedown={ctx.link().callback(|_| MainCmd::Start)}
                 onmouseup={ctx.link().callback(|_| MainCmd::End)}>
@@ -346,6 +379,10 @@ impl yew::Component for Main {
     fn rendered(&mut self, _: &yew::Context<Self>, first_render: bool) {
         _ = utils::js_try!{type = !:
             return if first_render {
+                let plane: web_sys::HtmlCanvasElement = utils::document().element_dyn_into("plane")?;
+                canvases::GRAPH.maybe_set(utils::document().element_dyn_into("graph").ok())?;
+                canvases::SOUND_VISUALISER.maybe_set(utils::document().element_dyn_into("sound-visualiser").ok())?;
+                canvases::PLANE.set(plane.clone())?;
                 start_animation_loop()?;
                 let (width, height, plane) = utils::js_try!{
                     utils::sync_canvas("main")?;
@@ -355,7 +392,6 @@ impl yew::Component for Main {
                     graph.set_hidden(true);
                     let body = utils::document().body().ok_or_js_error("<body> not found")?;
                     let [width, height] = [body.client_width(), body.client_height()];
-                    let plane: web_sys::HtmlCanvasElement = utils::document().element_dyn_into("plane")?;
                     plane.set_width(width as u32);
                     plane.set_height(height as u32);
                     (width, height, plane)

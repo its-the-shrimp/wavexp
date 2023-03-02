@@ -1,5 +1,5 @@
 use crate::utils::{self, JsResultUtils, HitZone, SliceExt};
-use crate::{input, MainCmd};
+use crate::{input, MainCmd, Main};
 use std::rc::Rc;
 
 enum SoundFunctorType {
@@ -98,26 +98,29 @@ impl SoundFunctor {
         Ok(())
     }
 
-    pub fn set_param(&mut self, param_id: usize, value: f64, cur_time: f64) -> utils::JsResult<()> {
+    pub fn set_param(&mut self, param_id: usize, value: f64, cur_time: f64) -> utils::JsResult<&mut Self> {
         match &mut self.functor_type {
             SoundFunctorType::Wave {gen} => match param_id {
-                0 => Ok(_ = gen.frequency().set_value_at_time(value as f32, cur_time)?
-                    .value()),
+                0 => _ = gen.frequency().set_value_at_time(value as f32, cur_time)?.value(),
                 1 => match value as usize {
-                    0 => Ok(gen.set_type(web_sys::OscillatorType::Sine)),
-                    1 => Ok(gen.set_type(web_sys::OscillatorType::Square)),
-                    2 => Ok(gen.set_type(web_sys::OscillatorType::Sawtooth)),
-                    3 => Ok(gen.set_type(web_sys::OscillatorType::Triangle)),
-                    _ => Err(js_sys::Error::new("invalid wave type").into())}
-                _ => Err(js_sys::Error::new("invalid parameter ID of `SoundFunctor::Wave`").into())}
+                    0 => gen.set_type(web_sys::OscillatorType::Sine),
+                    1 => gen.set_type(web_sys::OscillatorType::Square),
+                    2 => gen.set_type(web_sys::OscillatorType::Sawtooth),
+                    3 => gen.set_type(web_sys::OscillatorType::Triangle),
+                    _ => return Err(js_sys::Error::new("invalid wave type").into())}
+                _ => return Err(js_sys::Error::new("invalid parameter ID of `SoundFunctor::Wave`").into())}
+
             SoundFunctorType::Envelope {attack, decay, sustain, release, ..} => match param_id {
-                0 => Ok(*attack = value),
-                1 => Ok(*decay = value),
-                2 => Ok(*sustain = value),
-                3 => Ok(*release = value),
-                _ => Err(js_sys::Error::new("invalid parameter ID of `SoundFunctor::Envelope`").into())}
+                0 => *attack = value,
+                1 => *decay = value,
+                2 => *sustain = value,
+                3 => *release = value,
+                _ => return Err(js_sys::Error::new("invalid parameter ID of `SoundFunctor::Envelope`").into())}
+
             SoundFunctorType::BuiltinOutput{..}
-                => Err(js_sys::Error::new("cannot set a parameter on `SoundFunctor::BuiltinOutput`").into())}
+                => return Err(js_sys::Error::new("cannot set a parameter on `SoundFunctor::BuiltinOutput`").into())
+        };
+        Ok(self)
     }
 
     #[inline] pub fn forwards<'a>(&'a self) -> Option<&'a [usize]> {
@@ -173,13 +176,13 @@ impl SoundFunctor {
                     id={0}
                     coef={SoundFunctor::MAX_FREQ} precision={0}
                     postfix={"Hz"}
-                    name={Rc::from("Frequency")}
+                    name={"Frequency"}
                     component_id={self.id}
                     initial={gen.frequency().value() as f64}/>
                 <input::Switch
                     id={1}
-                    options={vec!["Sine".into(), "Square".into(), "Saw".into(), "Triangle".into()]}
-                    name={Rc::from("Wave type")}
+                    options={vec!["Sine", "Square", "Saw", "Triangle"]}
+                    name={"Wave type"}
                     component_id={self.id}
                     initial={match gen.type_() {
                         web_sys::OscillatorType::Sine => 0,
@@ -193,27 +196,28 @@ impl SoundFunctor {
                     id={0}
                     coef={SoundFunctor::MAX_INTERVAL}
                     postfix={"s"}
-                    name={Rc::from("Attack time")}
+                    name={"Attack time"}
                     component_id={self.id}
                     initial={attack}/>
                 <input::Slider
                     id={1}
                     coef={SoundFunctor::MAX_INTERVAL}
                     postfix={"s"}
-                    name={Rc::from("Decay time")}
+                    name={"Decay time"}
                     component_id={self.id}
                     initial={decay}/>
                 <input::Slider
                     id={2}
                     coef={1.0}
-                    name={Rc::from("Sustain level")}
+                    postfix={""}
+                    name={"Sustain level"}
                     component_id={self.id}
                     initial={sustain}/>
                 <input::Slider
                     id={3}
                     coef={SoundFunctor::MAX_INTERVAL}
                     postfix={"s"}
-                    name={Rc::from("Release time")}
+                    name={"Release time"}
                     component_id={self.id}
                     initial={release}/>
             </>},
@@ -253,13 +257,17 @@ impl SoundFunctor {
             .shift_x(Self::VISUAL_SIZE / 2)
     }
 
-    pub fn handle_movement(&mut self, coords: Option<utils::Point>) -> utils::JsResult<()> {
+    pub fn handle_movement(&mut self, coords: Option<utils::Point>, ctx: &yew::html::Scope<Main>) -> utils::JsResult<()> {
         self.focus_type = if let Some(coords) = coords {
             match self.focus_type {
                 FocusType::None => 
-                    (self.forwards().is_some() && self.get_conn_creation_hitzone().contains(coords))
-                        .then_some(FocusType::Connecting(coords))
-                        .unwrap_or(FocusType::Moving(self.location - coords)),
+                    if self.forwards().is_some() && self.get_conn_creation_hitzone().contains(coords) {
+                        ctx.send_message(MainCmd::SetDesc(format!("{}: Connecting", self.name())));
+                        FocusType::Connecting(coords)
+                    } else {
+                        ctx.send_message(MainCmd::SetDesc(format!("{}: Moving", self.name())));
+                        FocusType::Moving(self.location - coords)
+                    }
 
                 FocusType::Moving(offset) => {
                     self.location = coords + offset;
@@ -269,10 +277,10 @@ impl SoundFunctor {
             }
         } else {
             match self.focus_type {
-                FocusType::Connecting(dst) => {
-                    MainCmd::TryConnect(self.id, dst).send();
-                    MainCmd::Select(self.id).send()}
-                FocusType::Moving(_) => MainCmd::Select(self.id).send(),
+                FocusType::Connecting(dst) => ctx.send_message_batch(vec![
+                    MainCmd::TryConnect(self.id, dst),
+                    MainCmd::Select(self.id)]),
+                FocusType::Moving(_) => ctx.send_message(MainCmd::Select(self.id)),
                 FocusType::None => ()};
             FocusType::None};
         Ok(())
