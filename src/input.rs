@@ -1,13 +1,16 @@
-use std::rc::Rc;
 use std::f64::consts::PI;
+use wasm_bindgen::JsCast;
 use yew::TargetCast;
 use crate::draggable;
 use crate::MainCmd;
-use crate::utils::{self, OkOrJsError, JsResultUtils};
+use crate::utils::HtmlCanvasExt;
+use crate::utils::HtmlDocumentExt;
+use crate::utils::OptionToJsResult;
+use crate::utils::{self, JsResultUtils};
 
 pub struct Slider {
     value: f64,
-    id: Rc<str>,
+    canvas: web_sys::HtmlCanvasElement,
     focused: bool
 }
 
@@ -36,7 +39,7 @@ impl yew::Component for Slider {
     fn create(ctx: &yew::Context<Self>) -> Self {
         let SliderProps {coef, initial, ..} = ctx.props();
         Self {focused: false, value: initial / coef,
-            id: uuid::Uuid::new_v4().to_string().into()}
+            canvas: wasm_bindgen::JsValue::UNDEFINED.unchecked_into()}
     }
 
     fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
@@ -47,7 +50,7 @@ impl yew::Component for Slider {
                 .handle_unfocus(|_| Ok(self.focused = false))?
                 .handle_drag(|e| {
                     let target = e.target_dyn_into::<web_sys::Element>()
-                        .ok_or_js_error("no target on a pointer event")?;
+                        .to_js_result("no target on a pointer event")?;
                     self.value = (self.value + e.movement_y() as f64 / (target.client_height() * -2) as f64)
                         .clamp(0.0, 1.0);
                     MainCmd::SetParam(*component_id, *id, self.value * coef).send();
@@ -58,8 +61,9 @@ impl yew::Component for Slider {
     }
 
 	fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
+        let SliderProps { class, component_id, id, .. } = ctx.props();
         yew::html! {
-            <canvas id={self.id.clone()} class={ctx.props().class.clone()}
+            <canvas id={format!("slider-{}-{}", *component_id, *id)} class={class.clone()}
             onpointerdown={ctx.link().callback(draggable::Cmd::Focus)}
             onpointerup={ctx.link().callback(draggable::Cmd::Unfocus)}
             onpointerenter={ctx.link().callback(draggable::Cmd::HoverIn)}
@@ -69,10 +73,14 @@ impl yew::Component for Slider {
 
     fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
         _ = utils::js_try!{type = !:
-            let SliderProps{coef, precision, postfix, ..} = ctx.props();
-            if first_render {utils::sync_canvas(&self.id)?}
-            let (w, h, ctx) = utils::get_canvas_ctx(&self.id, true, true)?;
-            let (w, h) = (w / 2.0, h / 2.0);
+            let SliderProps{coef, precision, postfix, component_id, id, ..} = ctx.props();
+            if first_render {
+                self.canvas = utils::document()
+                    .element_dyn_into(&format!("slider-{}-{}", *component_id, *id))?;
+                self.canvas.sync();
+            }
+            let ctx = self.canvas.get_2d_context()?;
+            let (w, h) = (self.canvas.width() as f64 / 2.0, self.canvas.height() as f64 / 2.0);
             const CORRECTION_COEF: f64 = 1.5;
             let r = w.min(h) - LINE_WIDTH * CORRECTION_COEF; 
             if first_render {
@@ -100,7 +108,7 @@ impl yew::Component for Slider {
 
 pub struct Switch {
     value: f64,
-    id: Rc<str>,
+    canvas: web_sys::HtmlCanvasElement,
     focused: bool
 }
 
@@ -121,7 +129,7 @@ impl yew::Component for Switch {
 
     fn create(ctx: &yew::Context<Self>) -> Self {
         Self {focused: false, value: ctx.props().initial as f64,
-            id: uuid::Uuid::new_v4().to_string().into()}
+            canvas: wasm_bindgen::JsValue::UNDEFINED.unchecked_into()}
     }
 
     fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
@@ -133,7 +141,7 @@ impl yew::Component for Switch {
                 .handle_drag(|e| {
                     let old_value = self.value as usize;
                     let target = e.target_dyn_into::<web_sys::Element>()
-                        .ok_or_js_error("no target on a pointer event")?;
+                        .to_js_result("no target on a pointer event")?;
                     self.value = (self.value + e.movement_y() as f64 / target.client_height() as f64 / -0.5)
                         .rem_euclid(options.len() as f64);
                     if old_value != self.value as usize {
@@ -146,8 +154,9 @@ impl yew::Component for Switch {
     }
 
 	fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
+        let SwitchProps { class, component_id, id, .. } = ctx.props();
         yew::html! {
-            <canvas id={self.id.clone()} class={ctx.props().class.clone()}
+            <canvas id={format!("switch-{}-{}", *component_id, *id)} class={class.clone()}
             onpointerdown={ctx.link().callback(draggable::Cmd::Focus)}
             onpointerup={ctx.link().callback(draggable::Cmd::Unfocus)}
             onpointerenter={ctx.link().callback(draggable::Cmd::HoverIn)}
@@ -157,10 +166,14 @@ impl yew::Component for Switch {
 
     fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
         let err: utils::JsResult<()> = try {
-            let SwitchProps{options, ..} = ctx.props();
-            if first_render {utils::sync_canvas(&self.id)?}
-            let (w, h, ctx) = utils::get_canvas_ctx(&self.id, true, true)?;
-            let (w, h) = (w / 2.0, h / 2.0);
+            let SwitchProps{options, component_id, id, ..} = ctx.props();
+            if first_render {
+                self.canvas = utils::document()
+                    .element_dyn_into(&format!("switch-{}-{}", *component_id, *id))?;
+                self.canvas.sync();
+            }
+            let ctx = self.canvas.get_2d_context()?;
+            let (w, h) = (self.canvas.width() as f64 / 2.0, self.canvas.height() as f64 / 2.0);
             const CORRECTION_COEF: f64 = 1.5;
             let r = w.min(h) - LINE_WIDTH * CORRECTION_COEF;
             if first_render {

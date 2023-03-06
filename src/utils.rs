@@ -116,20 +116,8 @@ pub fn get_canvas_ctx(name: &str, antialias: bool, alpha: bool)
     let res: web_sys::HtmlCanvasElement = document().element_dyn_into(name)?;
     Ok((res.width() as f64, res.height() as f64,
         res.get_context_with_context_options("2d", &js_obj!{bool alpha: alpha, bool antialias: antialias})?
-            .ok_or_js_error_with(|| format!("rendering context not found for canvas #{}", name))?
+            .to_js_result_with(|| format!("rendering context not found for canvas #{}", name))?
             .unchecked_into::<web_sys::CanvasRenderingContext2d>()))
-}
-
-pub fn sync_canvas(name: &str) -> JsResult<()> {
-    let err: JsResult<!> = try {
-        let comp = document().get_element_by_id(name)
-            .ok_or_js_error("element not found")?;
-        let comp = comp.dyn_into::<web_sys::HtmlCanvasElement>().ok()
-            .ok_or_js_error("the element is not a <canvas>")?;
-        comp.set_height((comp.client_height() as f64 / comp.client_width() as f64 * 300.0) as u32);
-        return Ok(())
-    };
-    Err(err.explain_err_with(|| format!("syncing the dimensions of the element #{}", name)).into_err())
 }
 
 fn to_error_with_msg(err: wasm_bindgen::JsValue, msg: &str) -> wasm_bindgen::JsValue {
@@ -142,29 +130,13 @@ fn to_error_with_msg(err: wasm_bindgen::JsValue, msg: &str) -> wasm_bindgen::JsV
 
 pub type JsResult<T> = Result<T, wasm_bindgen::JsValue>;
 
-pub trait OkOrJsError<T>: Sized {
-    fn ok_or_js_error_with(self, f: impl FnOnce() -> String) -> JsResult<T>;
-    fn ok_or_js_error(self, msg: &str) -> JsResult<T>;
+pub trait ResultToJsResult<T, E> {
+    fn to_js_result(self) -> JsResult<T> where E: std::fmt::Display;
 }
 
-impl<T> OkOrJsError<T> for Option<T> {
-    #[inline] fn ok_or_js_error_with(self, f: impl FnOnce() -> String) -> JsResult<T> {
-        self.ok_or_else(|| js_sys::Error::new(&f()).into())
-    }
-
-    #[inline] fn ok_or_js_error(self, msg: &str) -> JsResult<T> {
-        self.ok_or_else(|| js_sys::Error::new(msg).into())
-    }
-}
-
-pub trait ToJsResult<T> {
-    fn to_js_result(self) -> JsResult<T>;
-}
-
-impl<T, E: std::fmt::Display> ToJsResult<T> for Result<T, E> {
-    fn to_js_result(self) -> JsResult<T> {
-        self.map_err(|e| e.to_string().into())
-    }
+pub trait OptionToJsResult<T> {
+    fn to_js_result_with(self, f: impl FnOnce() -> String) -> JsResult<T>;
+    fn to_js_result(self, msg: &str) -> JsResult<T>;
 }
 
 pub trait JsResultUtils<T>: Sized {
@@ -176,7 +148,23 @@ pub trait JsResultUtils<T>: Sized {
 	fn report_err(self, msg: &str) -> Self;
 }
 
-impl<T> JsResultUtils<T> for Result<T, wasm_bindgen::JsValue> {
+impl<T, E> ResultToJsResult<T, E> for Result<T, E> {
+    fn to_js_result(self) -> JsResult<T> where E: std::fmt::Display {
+        self.map_err(|e| e.to_string().into())
+    }
+}
+
+impl<T> OptionToJsResult<T> for Option<T> {
+    #[inline] fn to_js_result_with(self, f: impl FnOnce() -> String) -> JsResult<T> {
+        self.ok_or_else(|| js_sys::Error::new(&f()).into())
+    }
+
+    #[inline] fn to_js_result(self, msg: &str) -> JsResult<T> {
+        self.ok_or_else(|| js_sys::Error::new(msg).into())
+    }
+}
+
+impl<T> JsResultUtils<T> for JsResult<T> {
     #[inline] fn explain_err_with(self, f: impl FnOnce() -> String) -> Self {
         self.map_err(|err| to_error_with_msg(err, &f()))
     }
@@ -209,13 +197,19 @@ impl<T> JsResultUtils<T> for Result<T, wasm_bindgen::JsValue> {
 
 pub trait HtmlCanvasExt {
     fn get_2d_context(&self) -> JsResult<web_sys::CanvasRenderingContext2d>;
+    fn sync(&self);
 }
 
 impl HtmlCanvasExt for web_sys::HtmlCanvasElement {
     fn get_2d_context(&self) -> JsResult<web_sys::CanvasRenderingContext2d> {
         Ok(self.get_context("2d")?
-            .ok_or_js_error("the element has no rendering context")?
+            .to_js_result("the element has no rendering context")?
             .unchecked_into::<web_sys::CanvasRenderingContext2d>())
+    }
+
+    fn sync(&self) {
+        self.set_width(300);
+        self.set_height((self.client_height() as f64 / self.client_width() as f64 * 300.0) as u32);
     }
 }
 
@@ -225,8 +219,8 @@ pub trait HtmlDocumentExt {
 
 impl HtmlDocumentExt for web_sys::Document {
     fn element_dyn_into<T: wasm_bindgen::JsCast>(&self, id: &str) -> JsResult<T> {
-        Ok(self.get_element_by_id(id).ok_or_js_error_with(|| format!("element #{} not found", id))?
-            .dyn_into::<T>().ok().ok_or_js_error_with(|| format!("element #{} is not of type `{}`", id, std::any::type_name::<T>()))?)
+        Ok(self.get_element_by_id(id).to_js_result_with(|| format!("element #{} not found", id))?
+            .dyn_into::<T>().ok().to_js_result_with(|| format!("element #{} is not of type `{}`", id, std::any::type_name::<T>()))?)
     }
 }
 
@@ -248,11 +242,11 @@ impl<T> SliceExt<T> for [T] {
     }
 
     #[inline] fn get_or_js_error<'a>(&'a self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a T> {
-        self.get(id).ok_or_js_error_with(|| format!("{}{}{}", prefix, id, postfix))
+        self.get(id).to_js_result_with(|| format!("{}{}{}", prefix, id, postfix))
     }
 
     #[inline] fn get_mut_or_js_error<'a>(&'a mut self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a mut T> {
-        self.get_mut (id).ok_or_js_error_with(|| format!("{}{}{}", prefix, id, postfix))
+        self.get_mut (id).to_js_result_with(|| format!("{}{}{}", prefix, id, postfix))
     }
 }
 
@@ -281,12 +275,12 @@ impl<T> MaybeCell<T> {
 
     #[inline] pub fn get<'a>(&'a self) -> JsResult<std::cell::Ref<'a, T>> {
         std::cell::Ref::filter_map(self.0.try_borrow().to_js_result()?,
-            |x| x.as_ref()).ok().ok_or_js_error("MaybeCell object not initialised")
+            |x| x.as_ref()).ok().to_js_result("MaybeCell object not initialised")
     }
 
     #[inline] pub fn get_mut<'a>(&'a self) -> JsResult<std::cell::RefMut<'a, T>> {
         std::cell::RefMut::filter_map(self.0.try_borrow_mut().to_js_result()?,
-            |x| x.as_mut()).ok().ok_or_js_error("MaybeCell object not initialised")
+            |x| x.as_mut()).ok().to_js_result("MaybeCell object not initialised")
     }
 
     #[inline] pub fn set(&self, val: T) -> JsResult<()> {
