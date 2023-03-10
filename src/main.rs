@@ -9,7 +9,7 @@ mod utils;
 mod input;
 mod sound;
 mod draggable;
-use utils::{JsResultUtils, HtmlCanvasExt, HtmlDocumentExt, SliceExt, OptionToJsResult};
+use utils::{JsResultUtils, HtmlCanvasExt, HtmlDocumentExt, SliceExt, OptionToJsResult, ResultToJsResult};
 use web_sys;
 use js_sys;
 use wasm_bindgen;
@@ -86,7 +86,7 @@ fn start_animation_loop() -> utils::JsResult<()> {
                         }
                     }
                 }.explain_err("re-rendering the graphical representation of a sound element's parameters");
-                
+
                 let err3 = utils::window().request_animation_frame(js_callback)
                     .explain_err("re-registering the animation callback");
 
@@ -116,6 +116,7 @@ pub struct Main {
     graph_canvas: web_sys::HtmlCanvasElement,
     sound_visualiser_canvas: web_sys::HtmlCanvasElement,
     editor_plane_canvas: web_sys::HtmlCanvasElement,
+    help_msg_bar: web_sys::HtmlElement,
     release_times: Vec<(usize, f64)>
 }
 
@@ -131,8 +132,6 @@ pub enum MainCmd {
     SetGlobalReleaseTime(usize, f64),
     TryConnect(usize, utils::Point),
     Select(usize),
-    Start, 
-    End,
     ReportError(wasm_bindgen::JsValue)
 }
 
@@ -146,16 +145,12 @@ impl MainCmd {
 impl Main {
     const DEF_HELP_MSG: &'static str = "Hover over an element to get help";
 
-    pub fn set_desc(desc: &str) -> utils::JsResult<()> {
-        utils::document().element_dyn_into::<web_sys::HtmlElement>("help-msg")?
-            .set_inner_text(&format!("{:1$}", desc, Self::DEF_HELP_MSG.len()));
-        Ok(())
+    fn set_desc(&self, desc: &str) {
+        self.help_msg_bar.set_inner_text(&format!("{:1$}", desc, Self::DEF_HELP_MSG.len()))
     }
 
-    pub fn remove_desc() -> utils::JsResult<()> {
-        utils::document().element_dyn_into::<web_sys::HtmlElement>("help-msg")?
-            .set_inner_text(Self::DEF_HELP_MSG);
-        Ok(())
+    fn remove_desc(&self) {
+        self.help_msg_bar.set_inner_text(Self::DEF_HELP_MSG)
     }
 }
 
@@ -174,6 +169,10 @@ impl yew::Component for Main {
                 sound::SoundFunctor::new_envelope(&player, 1, utils::Point{x:500, y:350})?,
                 sound::SoundFunctor::new_builtin_output(analyser.clone(), 2, utils::Point{x:750, y:350})?];
             analyser.connect_with_audio_node(&player.destination())?;
+            let help_msg_bar: web_sys::HtmlElement = utils::document().create_element("div")
+                .expect_throw("creating #help-msg element").unchecked_into();
+            help_msg_bar.set_id("help-msg");
+            help_msg_bar.set_inner_text(Self::DEF_HELP_MSG);
 
             Self {analyser, sound_comps, player, error_count: 0,
                 release_times: vec![(1, 0.0)],
@@ -181,7 +180,8 @@ impl yew::Component for Main {
                 plane_offset: utils::Point::ZERO, plane_moving: false,
                 graph_canvas: wasm_bindgen::JsValue::UNDEFINED.unchecked_into(),
                 sound_visualiser_canvas: wasm_bindgen::JsValue::UNDEFINED.unchecked_into(),
-                editor_plane_canvas: wasm_bindgen::JsValue::UNDEFINED.unchecked_into()}
+                editor_plane_canvas: wasm_bindgen::JsValue::UNDEFINED.unchecked_into(),
+                help_msg_bar}
         }.expect_throw("initialising the main component")
     }
 
@@ -191,9 +191,11 @@ impl yew::Component for Main {
             web_sys::console::warn_1(&err);
             true
         };
+
         let err = utils::js_try!{type = !:
             let cur_time = self.player.current_time();
             let mut editor_plane_ctx: Option<(f64, f64, web_sys::CanvasRenderingContext2d)> = None;
+            let mut needs_html_rerender = false;
             match msg {
                 MainCmd::Drag(e) => utils::js_try!{
                     if let Some(id) = self.focused_comp {
@@ -206,19 +208,19 @@ impl yew::Component for Main {
                         editor_plane_ctx = Some((self.editor_plane_canvas.width().into(),
                             self.editor_plane_canvas.height().into(),
                             self.editor_plane_canvas.get_2d_context()?));
-                        self.plane_offset -= utils::Point{x: e.movement_x(), y: e.movement_y()};
+                        self.plane_offset -= utils::Point{x: e.movement_x(), y: 0};
                     } else {
                         if let Some(id) = self.hovered_comp {
                             let point = utils::Point{x: e.x(), y: e.y()} + self.plane_offset;
                             if !self.sound_comps.get_or_js_error(id, "sound element #", " not found")?.contains(point) {
                                 self.hovered_comp = None;
-                                Self::remove_desc()?;
+                                self.remove_desc();
                             }
                         } if self.hovered_comp.is_none() {
                             let point = utils::Point{x: e.x(), y: e.y()} + self.plane_offset;
                             if let Some(comp) = self.sound_comps.iter().find(|x| x.contains(point)) {
                                 self.hovered_comp = Some(comp.id());
-                                Self::set_desc(comp.name())?;
+                                self.set_desc(comp.name());
                             }
                         }
                     }
@@ -237,7 +239,7 @@ impl yew::Component for Main {
                         comp.handle_movement(Some(utils::Point{x: e.x(), y: e.y()} + self.plane_offset), ctx.link())?;
                     } else {
                         self.plane_moving = true;
-                        Self::set_desc("Dragging the plane")?;
+                        self.set_desc("Dragging the plane");
                     }
                 }.explain_err("handling `MainCmd::Focus` message")?,
 
@@ -251,40 +253,95 @@ impl yew::Component for Main {
                         let receiver = ctx.link();
                         comp.handle_movement(Some(utils::Point{x:e.x(), y:e.y()} + self.plane_offset), receiver)?;
                         comp.handle_movement(None, receiver)?;
-                        Self::set_desc(comp.name())?;
+                        let name = comp.name();
+                        self.set_desc(name);
                     } else {
                        self.plane_moving = false;
-                       Self::remove_desc()?;
+                       self.remove_desc();
                     }
                 }.explain_err("handling `MainCmd::Unfocus` message")?,
 
                 MainCmd::LeavePlane => utils::js_try!{
                     self.hovered_comp = None;
-                    Self::remove_desc()?;
+                    self.remove_desc();
                 }.explain_err("handling `MainCmd::LeavePlane` message")?,
 
-                MainCmd::SetDesc(value) => Self::set_desc(&value)
-                    .explain_err("handling `MainCmd::SetDesc` message")?,
+                MainCmd::SetDesc(value) => self.set_desc(&value),
 
-                MainCmd::RemoveDesc => Self::remove_desc()
-                    .explain_err("handling `MainCmd::RemoveDesc` message")?,
+                MainCmd::RemoveDesc => self.remove_desc(),
 
                 MainCmd::SetParam(comp_id, param_id, value) => utils::js_try!{
-                    let (graph, graph_in_span, graph_span) = self.sound_comps
-                        .get_mut_or_js_error(comp_id, "sound component #", " not found")?
-                        .set_param(param_id, value, cur_time, ctx.link())?
-                        .graph(self.graph_canvas.width().into(), self.graph_canvas.height().into())?;
-                    let mut ctx = ANIMATION_CTX.get_mut()?;
-                    ctx.graph = graph;
-                    ctx.graph_in_span = graph_in_span;
-                    ctx.graph_span = graph_span;
+                    if comp_id == self.sound_comps.len() {
+                        utils::js_try!{
+                            match param_id {
+                                0 => {
+                                    ANIMATION_CTX.get_mut()?.pbar_start = value;
+                                    if value.is_sign_positive() {
+                                        self.sound_comps.iter_mut()
+                                            .try_for_each(|comp| comp.start(cur_time))?
+                                    } else {
+                                        let release_time = unsafe{self.release_times.last().unwrap_unchecked().1};
+                                        self.sound_comps.iter_mut()
+                                            .try_for_each(|comp| comp.end(cur_time, release_time))?}
+                                    return false
+                                }
+
+                                1 => {
+                                    let selected_comp_id = self.selected_comp
+                                        .to_js_result("no sound element selected")?;
+                                    if value.is_sign_positive() {return false}
+                                    let comp = self.sound_comps.get_or_js_error(selected_comp_id, "sound element #", " not found")?;
+                                    if let Some(mut fwds) = comp.forwards().map(ToOwned::to_owned) {
+                                        // after this, `comps` is guaranteed to be at least 1 in length 
+                                        fwds.push(selected_comp_id);
+                                        let mut comps = self.sound_comps.get_var_mut(&fwds).to_js_result()?;
+                                        let (src, dsts) = unsafe{comps.split_last_mut().unwrap_unchecked()};
+                                        for dst in dsts {
+                                            src.disconnect(dst)?;
+                                        }
+                                    }
+                                }
+
+                                2 => {
+                                    let selected_comp_id = self.selected_comp
+                                        .to_js_result("no sound element selected")?;
+                                    if value.is_sign_positive() {return false}
+                                    let mut deleted = self.sound_comps.swap_remove(selected_comp_id);
+                                    let len = self.sound_comps.len();
+                                    for comp in self.sound_comps.iter_mut() {
+                                        deleted.disconnect(comp)?;
+                                        comp.disconnect(&deleted)?;
+                                        comp.handle_id_change(len, selected_comp_id);
+                                    }
+                                }
+
+                                _ => utils::JsResult::<!>::Err(js_sys::Error::new(&format!("unknown parameter ID: {}", param_id)).into())?
+                            }
+                            needs_html_rerender = true;
+                            editor_plane_ctx = Some((self.editor_plane_canvas.width().into(),
+                                self.editor_plane_canvas.height().into(),
+                                self.editor_plane_canvas.get_2d_context()?));
+                        }.explain_err("handling commands on the selected sound component")?;
+                    } else {
+                        let comp = self.sound_comps
+                            .get_mut_or_js_error(comp_id, "sound component #", " not found")?;
+                        needs_html_rerender = comp.set_param(param_id, value, ctx.link())?;
+                        let (graph, graph_in_span, graph_span)
+                            = comp.graph(self.graph_canvas.width().into(), self.graph_canvas.height().into())?;
+                        let mut ctx = ANIMATION_CTX.get_mut()?;
+                        ctx.graph = graph;
+                        ctx.graph_in_span = graph_in_span;
+                        ctx.graph_span = graph_span;
+                    }
                 }.explain_err("handling `MainCmd::SetParam` message")?,
 
-                MainCmd::SetGlobalReleaseTime(comp_id, val) =>
-                    _ = self.release_times.iter_mut()
+                MainCmd::SetGlobalReleaseTime(comp_id, val) => {
+                    self.release_times.iter_mut()
                         .find(|(id, _time)| *id == comp_id)
                         .map( |(_id, time)| *time = val).is_none().then(||
-                            self.release_times.push((comp_id, val))),
+                            self.release_times.push((comp_id, val)));
+                    self.release_times.sort_unstable_by(|(_id1, t1), (_id2, t2)|
+                        t1.partial_cmp(t2).unwrap_or(Ordering::Equal))}
 
                 MainCmd::TryConnect(src_id, dst_pos) => utils::js_try!{
                     if let Some(dst_id) = self.sound_comps.iter().position(|x| x.contains(dst_pos)) {
@@ -292,7 +349,8 @@ impl yew::Component for Main {
                             src.connect(dst)?;
                         }
                     } else {
-                        Self::remove_desc()?}
+                        self.remove_desc()}
+
                     editor_plane_ctx = Some((self.editor_plane_canvas.width().into(),
                         self.editor_plane_canvas.height().into(),
                         self.editor_plane_canvas.get_2d_context()?));
@@ -313,24 +371,6 @@ impl yew::Component for Main {
                     return true
                 }.explain_err("handling `MainCmd::Select` message")?,
 
-                MainCmd::Start => utils::js_try!{
-                    ANIMATION_CTX.get_mut()?
-                        .pbar_start = f64::INFINITY;
-
-                    self.sound_comps.iter_mut()
-                        .try_for_each(|comp| comp.start(cur_time))?
-                }.explain_err("handling `MainCmd::Start` message")?,
-
-                MainCmd::End => utils::js_try!{
-                    ANIMATION_CTX.get_mut()?
-                        .pbar_start = f64::NEG_INFINITY;
-
-                    self.release_times.sort_unstable_by(|(_id1, t1), (_id2, t2)|
-                        t1.partial_cmp(t2).unwrap_or(Ordering::Equal));
-                    self.sound_comps.iter_mut()
-                        .try_for_each(|comp| comp.end(cur_time, self.release_times.last().copied().unwrap_or((0, 0.0)).1))?
-                }.explain_err("handling `MainCmd::End` message")?,
-
                 MainCmd::ReportError(err) => return on_new_error(self, err)
             };
 
@@ -341,7 +381,7 @@ impl yew::Component for Main {
                     .try_for_each(|c| c.draw(&ctx, self.plane_offset, &self.sound_comps))
                     .explain_err("redrawing the editor plane")?;
             }
-            return false
+            return needs_html_rerender
         };
         on_new_error(self, err.into_err())
     }
@@ -356,20 +396,40 @@ impl yew::Component for Main {
             onpointermove={ctx.link().callback(MainCmd::Drag)}
             onpointerleave={ctx.link().callback(|_| MainCmd::LeavePlane)}/>
             <div id="ctrl-panel">
-                <div id="help-msg" style="user-select:none">{Self::DEF_HELP_MSG}</div>
-                <div id="inputs">
-                    {comp.map(sound::SoundFunctor::params)}
-                </div>
+                {yew::Html::VRef(self.help_msg_bar.clone().into())}
+                {comp.map(|x| x.params())}
                 <canvas id="graph" class="visual"
-                hidden={!comp.is_some_and(|comp| comp.graphable())}/>
+                hidden={comp.map(|x| !x.graphable()).unwrap_or(true)}/>
+                if comp.is_some() {
+                    <div id="general-ctrl">
+                        <input::Button
+                        component_id={self.sound_comps.len()} id={1}
+                        desc={"Disconnect component"}>
+                            <svg viewBox="0 0 100 100">
+                                <polygon points="10,40 10,60 40,60 30,40"/>
+                                <polygon points="30,20 60,80 70,80 40,20"/>
+                                <polygon points="50,40 80,40 80,60 60,60"/>
+                            </svg>
+                        </input::Button>
+                        <input::Button
+                        component_id={self.sound_comps.len()} id={2}
+                        desc={"Remove component"}>
+                            <svg viewBox="0 0 100 100">
+                                <polygon points="27,35 35,27 50,42 65,27 73,35 58,50 73,65 65,73 50,58 35,73 27,65 42,50"/>
+                            </svg>
+                        </input::Button>
+                    </div>
+                }
             </div>
             <div id="visuals">
                 <canvas id="sound-visualiser" class="visual"/>
-                <button
-                onmousedown={ctx.link().callback(|_| MainCmd::Start)}
-                onmouseup={ctx.link().callback(|_| MainCmd::End)}>
-                    {"Play"}
-                </button>
+                <input::Button
+                component_id={self.sound_comps.len()} id={0}
+                desc={"Play"}>
+                    <svg viewBox="0 0 100 100" height="100%">
+                        <polygon points="25,25 75,50 25,75"/>
+                    </svg>
+                </input::Button>
             </div>
             if self.error_count > 0 {
                 <div id="error-count">{format!("Errors: {}", self.error_count)}</div>
@@ -386,6 +446,7 @@ impl yew::Component for Main {
                 self.graph_canvas.set_hidden(true);
                 self.sound_visualiser_canvas = utils::document().element_dyn_into("sound-visualiser")?;
                 self.sound_visualiser_canvas.sync();
+                self.help_msg_bar = utils::document().element_dyn_into("help-msg")?;
                 let (width, height) = utils::js_try!{
                     self.editor_plane_canvas = utils::document().element_dyn_into("plane")?;
                     let body = utils::document().body().to_js_result("<body> not found")?;
@@ -398,7 +459,7 @@ impl yew::Component for Main {
                     let ctx = self.editor_plane_canvas.get_2d_context()?;
                     ctx.set_stroke_style(&"#0069E1".into());
                     ctx.set_fill_style(&"#232328".into());
-                    ctx.set_line_width(2.0);
+                    ctx.set_line_width(3.0);
                     ctx.fill_rect(0.0, 0.0, width.into(), height.into());
                     ctx.begin_path();
                     self.sound_comps.iter()

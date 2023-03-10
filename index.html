@@ -20,8 +20,10 @@
 				position: fixed;
 				left: 0;
 				top: 0;
-				display: flex;
+				bottom: 0;
 				padding: 1em;
+				display: flex;
+				gap: 1em;
 				background-color: #181818;
 				flex-direction: column}
 			#help-msg {
@@ -38,21 +40,34 @@
 				position: fixed;
 				right: 0;
 				top: 0;
-				height: 90vh;
+				bottom: 0;
 				background-color: #181818;
 				padding: 1em;
 				display: flex;
 				flex-direction: column;
 				justify-content: flex-end}
+			#visuals > .button {
+				 width: auto;
+				 border-top-width: 0;
+				 height: 3em}
 			#visuals > canvas {flex: 1}
-			#visuals > button {
-				height: 3em;
-				border-style: solid;
-				border-color: #0069E1;
-				border-width: 0 3px 3px 3px}
-			.default-input {
+			.input {
 				width: 6em;
 				height: 6em}
+			.button {
+				background-color: #181818;
+				font: 1em consolas;
+				color: #0069E1;
+				border: solid 3px transparent}
+			.button:hover {
+				border-color: #0069E1}
+			.button > svg {
+				stroke: #0069E1;
+				stroke-width: 3px;
+				fill: none;
+				height: 100%}
+			.button:hover > svg {
+				fill: #0069E1}
 			.component {
 				fill: #232328;
 				stroke: #0069E1;
@@ -63,6 +78,16 @@
 				bottom: 0;
 				padding: 1em;
 				color: red}
+			#general-ctrl {
+				display: flex;
+				margin-top: auto}
+			#general-ctrl > * {
+				width: auto;
+				flex: 1}
+			#general-ctrl > .button:nth-child(2):hover {border-color: #E10000}
+			#general-ctrl > .button:nth-child(2):hover > svg {
+				fill: #E10000;
+				stroke: #E10000}
 		</style>
 	</head>
 	<body>

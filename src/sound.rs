@@ -1,9 +1,9 @@
-use crate::utils::{self, JsResultUtils, HitZone, SliceExt};
+use crate::utils::{self, JsResultUtils, HitZone, SliceExt, BoolExt};
 use crate::{input, MainCmd, Main};
 use std::rc::Rc;
 
 enum SoundFunctorType {
-    Wave {gen: web_sys::OscillatorNode, frequency: f32},
+    Wave {n_waves: usize, waves: Vec<(usize, f32, usize, web_sys::OscillatorNode)>, ctrl: web_sys::GainNode},
     Envelope {
         gen: web_sys::GainNode,
         attack: f64,
@@ -39,7 +39,7 @@ impl std::ops::Deref for SoundFunctor {
     type Target = web_sys::AudioNode;
     fn deref(&self) -> &Self::Target {
         match self.functor_type {
-            SoundFunctorType::Wave {ref gen, ..} => gen,
+            SoundFunctorType::Wave {ref ctrl, ..} => ctrl,
             SoundFunctorType::Envelope {ref gen, ..} => gen,
             SoundFunctorType::BuiltinOutput {ref gen} => gen}
     }
@@ -49,15 +49,21 @@ impl SoundFunctor {
     pub const MAX_FREQ: f64 = 5000.0;
     pub const DEF_FREQ: f32 = 440.0;
     pub const MAX_INTERVAL: f64 = 2.0;
-	pub const MAX_WAVE_VOLUME: f32 = 0.2;
 	pub const MIN_VOLUME: f32 = f32::MIN_POSITIVE;
     pub const VISUAL_SIZE: i32 = 32;
+    pub const WAVE_TYPES: [web_sys::OscillatorType; 4] = [
+        web_sys::OscillatorType::Sine,
+        web_sys::OscillatorType::Square,
+        web_sys::OscillatorType::Sawtooth,
+        web_sys::OscillatorType::Triangle];
 
     pub fn new_wave(player: &web_sys::AudioContext, id: usize, location: utils::Point) -> utils::JsResult<Self> {
-        let gen = web_sys::OscillatorNode::new_with_options(player, 
-            web_sys::OscillatorOptions::new().frequency(0.0))?;
-        gen.start()?;
-        Ok(Self{functor_type: SoundFunctorType::Wave{gen, frequency: Self::DEF_FREQ}, 
+        let wave = web_sys::OscillatorNode::new(player)?;
+        let ctrl = web_sys::GainNode::new_with_options(player, 
+            web_sys::GainOptions::new().gain(Self::MIN_VOLUME))?;
+        wave.start()?;
+        wave.connect_with_audio_node(&ctrl)?;
+        Ok(Self{functor_type: SoundFunctorType::Wave{n_waves: 1, waves: vec![(0, 440.0, 0, wave)], ctrl}, 
             id, location, forwards: vec![], focus_type: FocusType::None})
     }
 
@@ -75,10 +81,14 @@ impl SoundFunctor {
 
     pub fn start(&mut self, cur_time: f64) -> utils::JsResult<()> {
         match &self.functor_type {
-            SoundFunctorType::Wave{gen, frequency}
-                => _ = gen.frequency().cancel_scheduled_values(0.0)
+            SoundFunctorType::Wave{waves, ctrl, ..} => {
+                for (_, freq, wave_type, wave) in waves.iter() {
+                    wave.frequency().set_value_at_time(*freq, cur_time)?;
+                    wave.set_type(*Self::WAVE_TYPES.get_or_js_error(*wave_type, "invalid wave type #", "")?);
+                }
+                _ = ctrl.gain().cancel_scheduled_values(0.0)
                     .explain_err("resetting the wave generator to start it again")?
-                    .set_value_at_time(*frequency, cur_time)?,
+                    .set_value_at_time(1.0, cur_time)?}
             SoundFunctorType::Envelope{gen, attack, decay, sustain, ..}
                 => _ = gen.gain().cancel_scheduled_values(0.0)
                 .explain_err("resetting the volume control")?
@@ -93,8 +103,8 @@ impl SoundFunctor {
 
     pub fn end(&mut self, cur_time: f64, global_release_time: f64) -> utils::JsResult<()> {
         match &self.functor_type {
-            SoundFunctorType::Wave{gen, ..}
-                => _ = gen.frequency().set_value_at_time(0.0, cur_time + global_release_time)?,
+            SoundFunctorType::Wave{ctrl, ..}
+                => _ = ctrl.gain().set_value_at_time(Self::MIN_VOLUME, cur_time + global_release_time)?,
             SoundFunctorType::Envelope{gen, release, ..}
                 => _ = gen.gain().cancel_scheduled_values(0.0)
                 .explain_err("resetting the envelope for the fade-out")?
@@ -104,22 +114,32 @@ impl SoundFunctor {
         Ok(())
     }
 
-    pub fn set_param(&mut self, param_id: usize, value: f64, cur_time: f64, ctx: &yew::html::Scope<Main>) -> utils::JsResult<&mut Self> {
+    // the returned boolean signifies whether the component editor layout should be rerendered
+    pub fn set_param(&mut self, param_id: usize, value: f64, ctx: &yew::html::Scope<Main>) -> utils::JsResult<bool> {
         match &mut self.functor_type {
-            SoundFunctorType::Wave {gen, frequency} => match param_id {
-                0 => {
-                    let ctrl = gen.frequency();
-                    if ctrl.value() != 0.0 {_ = ctrl.set_value_at_time(value as f32, cur_time)?}
-                    *frequency = value as f32}
-                1 => match value as usize {
-                    0 => gen.set_type(web_sys::OscillatorType::Sine),
-                    1 => gen.set_type(web_sys::OscillatorType::Square),
-                    2 => gen.set_type(web_sys::OscillatorType::Sawtooth),
-                    3 => gen.set_type(web_sys::OscillatorType::Triangle),
-                    _ => return Err(js_sys::Error::new("invalid wave type").into())}
-                _ => return Err(js_sys::Error::new("invalid parameter ID of `SoundFunctor::Wave`").into())}
+            SoundFunctorType::Wave{n_waves, waves, ctrl} => {
+                let (wave_id, param_id) = (param_id >> 2, param_id & 2);
+                if wave_id == waves.len() {
+                    if value.is_sign_negative() /*new wave only added after releasing the button for it*/{
+                        let new_wave = web_sys::OscillatorNode::new_with_options(&ctrl.context(), 
+                            web_sys::OscillatorOptions::new().frequency(Self::DEF_FREQ))?;
+                        new_wave.connect_with_audio_node(ctrl)?;
+                        new_wave.start()?;
+                        waves.push((*n_waves, 440.0, 0, new_wave));
+                        *n_waves += 1;
+                        return Ok(true)}
+                    return Ok(false)}
 
-            SoundFunctorType::Envelope {attack, decay, sustain, release, ..} => match param_id {
+                let (_, freq, wave_type, _) = waves.get_mut_or_js_error(wave_id, "wave component #", " not found")?;
+                match param_id {
+                    0 => *freq = value as f32,
+                    1 => *wave_type = value as usize,
+                    2 => return Ok(value.is_sign_negative().then_try(|| waves.remove(wave_id).3.disconnect())?.is_some()),
+                    _ => return Err(js_sys::Error::new("invalid parameter ID of `SoundFunctor::Wave`").into())
+                }
+            }
+
+            SoundFunctorType::Envelope{attack, decay, sustain, release, ..} => match param_id {
                 0 => *attack = value,
                 1 => *decay = value,
                 2 => *sustain = value,
@@ -131,7 +151,7 @@ impl SoundFunctor {
             SoundFunctorType::BuiltinOutput{..}
                 => return Err(js_sys::Error::new("cannot set a parameter on `SoundFunctor::BuiltinOutput`").into())
         };
-        Ok(self)
+        Ok(false)
     }
 
     #[inline] pub fn forwards<'a>(&'a self) -> Option<&'a [usize]> {
@@ -161,6 +181,14 @@ impl SoundFunctor {
         Ok(true)
     }
 
+    pub fn handle_id_change(&mut self, from: usize, to: usize) {
+        if self.id == from {
+            self.id = to;
+        } else {
+            self.forwards.iter_mut().find(|x| **x == from).map(|x| *x = to);
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match &self.functor_type {
             SoundFunctorType::Wave{..} => "Wave generator",
@@ -182,27 +210,45 @@ impl SoundFunctor {
 
     pub fn params(&self) -> yew::Html {
         match &self.functor_type {
-            SoundFunctorType::Wave{gen, frequency} => yew::html!{<>
-                <input::Slider
-                    id={0}
+            SoundFunctorType::Wave{n_waves, waves, ..} => yew::html!{<div id="inputs" style="grid-template-columns:repeat(3,1fr)">
+                {for waves.iter().enumerate().map(|(i, (key, freq, wave_type, _))| yew::html!{<>
+                    <input::Slider
+                    key={key * 3}
+                    id={i * 4}
                     coef={SoundFunctor::MAX_FREQ} precision={0}
                     postfix={"Hz"}
                     name={"Frequency"}
                     component_id={self.id}
-                    initial={*frequency as f64}/>
-                <input::Switch
-                    id={1}
+                    initial={*freq as f64}/>
+                    <input::Switch
+                    key={key * 3 + 1}
+                    id={i * 4 + 1}
                     options={vec!["Sine", "Square", "Saw", "Triangle"]}
                     name={"Wave type"}
                     component_id={self.id}
-                    initial={match gen.type_() {
-                        web_sys::OscillatorType::Sine => 0,
-                        web_sys::OscillatorType::Square => 1,
-                        web_sys::OscillatorType::Sawtooth => 2,
-                        web_sys::OscillatorType::Triangle => 3,
-                        _ => wasm_bindgen::throw_str("found an invalid wave type while getting it to generate component's parameter list")}}/>
-            </>},
-            SoundFunctorType::Envelope{attack, decay, sustain, release, ..} => yew::html! {<>
+                    initial={wave_type}/>
+                    <input::Button
+                    key={key * 3 + 2}
+                    id={i * 4 + 2}
+                    desc={"Remove wave element"}
+                    component_id={self.id}>
+                        <svg viewBox="0 0 100 100">
+                            <polygon points="27,35 35,27 50,42 65,27 73,35 58,50 73,65 65,73 50,58 35,73 27,65 42,50"/>
+                        </svg>
+                    </input::Button>
+                </>})}
+                <input::Button
+                key={n_waves * 3}
+                id={waves.len() * 4}
+                desc={"Add new wave element"}
+                component_id={self.id}
+                style={"grid-column: 1 / -1; width: auto"}>
+                    <svg viewBox="0 0 100 100" style="height:100%">
+                        <polygon points="45,25 55,25 55,45 75,45 75,55 55,55 55,75 45,75 45,55 25,55 25,45 45,45"/>
+                    </svg>
+                </input::Button>
+            </div>},
+            SoundFunctorType::Envelope{attack, decay, sustain, release, ..} => yew::html! {<div id="inputs">
                 <input::Slider
                     id={0}
                     coef={SoundFunctor::MAX_INTERVAL}
@@ -231,7 +277,7 @@ impl SoundFunctor {
                     name={"Release time"}
                     component_id={self.id}
                     initial={release}/>
-            </>},
+            </div>},
             SoundFunctorType::BuiltinOutput{..} => Default::default()}
     }
 

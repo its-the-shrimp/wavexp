@@ -13,8 +13,9 @@ pub enum Cmd {
 
 impl Cmd {
 
-    pub fn handle_focus(self, f: impl FnOnce(&web_sys::PointerEvent) -> utils::JsResult<()>) -> utils::JsResult<Self> {
-        if let Cmd::Focus(ref e) = self {
+    pub fn handle_focus<F>(self, f: F) -> utils::JsResult<Self>
+    where F: FnOnce(&web_sys::PointerEvent) -> utils::JsResult<()> {
+        if let Cmd::Focus(e) = &self {
             e.target_unchecked_into::<web_sys::HtmlElement>()
                 .set_pointer_capture(e.pointer_id())?;
             f(e)?;
@@ -22,8 +23,9 @@ impl Cmd {
         Ok(self)
     }
 
-    pub fn handle_unfocus(self, f: impl FnOnce(&web_sys::PointerEvent) -> utils::JsResult<()>) -> utils::JsResult<Self> {
-        if let Cmd::Unfocus(ref e) = self {
+    pub fn handle_unfocus<F>(self, f: F) -> utils::JsResult<Self>
+    where F: FnOnce(&web_sys::PointerEvent) -> utils::JsResult<()> {
+        if let Cmd::Unfocus(e) = &self {
             e.target_unchecked_into::<web_sys::HtmlElement>()
                 .release_pointer_capture(e.pointer_id())?;
             f(e)?;
@@ -31,22 +33,25 @@ impl Cmd {
         Ok(self)
     }
 
-    pub fn handle_hover(self, help_msg: &str) -> Self {
+    // the boolean passed to `f` indicates whether the element is hovered over
+    #[inline]
+    pub fn handle_hover<F>(self, help_msg: &str, f: F) -> utils::JsResult<Self>
+    where F: FnOnce(&web_sys::PointerEvent, bool) -> utils::JsResult<()> {
         match &self {
-            Cmd::HoverIn(_) => MainCmd::SetDesc(help_msg.to_owned()).send(),
-            Cmd::HoverOut(_) => MainCmd::RemoveDesc.send(),
+            Cmd::HoverIn(e) => {
+                f(e, true)?;
+                MainCmd::SetDesc(help_msg.to_owned()).send()}
+            Cmd::HoverOut(e) => {
+                f(e, false)?;
+                MainCmd::RemoveDesc.send()}
             _ => ()};
-        self
-    }
-
-    pub fn handle_drag(self, f: impl FnOnce(&web_sys::PointerEvent) -> utils::JsResult<()>) -> utils::JsResult<Self> {
-        if let Cmd::Drag(ref e) = self {
-            f(e)?;
-        };
         Ok(self)
     }
 
-    #[inline] pub fn needs_rerender(self) -> bool {
-        std::matches!(self, Cmd::Focus(_) | Cmd::Unfocus(_) | Cmd::Drag(_))
+    pub fn handle_drag(self, f: impl FnOnce(&web_sys::PointerEvent) -> utils::JsResult<()>) -> utils::JsResult<Self> {
+        if let Cmd::Drag(e) = &self {
+            f(e)?;
+        };
+        Ok(self)
     }
 }

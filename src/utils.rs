@@ -39,6 +39,7 @@ pub trait BoolExt {
 	fn choose<T: Sized>(self, on_true: T, on_false: T) -> T;
     fn choose_with<T: Sized>(self, on_true: impl FnOnce() -> T, on_false: impl FnOnce() -> T) -> T;
     fn then_negate<T: std::ops::Neg<Output=T>>(self, val: T) -> T;
+    fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
 }
 
 impl BoolExt for bool {
@@ -53,8 +54,38 @@ impl BoolExt for bool {
     #[inline] fn then_negate<T: std::ops::Neg<Output=T>>(self, val: T) -> T {
         if self {-val} else {val}
     }
+
+    #[inline] fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E> {
+        self.then(f).transpose()
+    }
+}
+/*
+pub trait ArrayExt<T, const M: usize> {
+    fn concat<const N: usize>(self, other: [T; N]) -> [T; N + M];
+    fn split_first(self) -> (T, [T; M - 1]);
 }
 
+impl<T, const M: usize> ArrayExt<T, M> for [T; M] {
+    #[inline] fn concat<const N: usize>(self, other: [T; N]) -> [T; N + M] {
+        let mut res = std::mem::MaybeUninit::<[T; N + M]>::uninit();
+        unsafe {
+            let res_ptr = res.as_mut_ptr() as *mut T;
+            std::ptr::copy_nonoverlapping(self.as_ptr(), res_ptr, M);
+            std::ptr::copy_nonoverlapping(other.as_ptr(), res_ptr.add(M), N);
+            res.assume_init()
+        }
+    }
+
+    #[inline] fn split_first(self) -> (T, [T; M - 1]) {
+        let mut res = std::mem::MaybeUninit::<[T; M - 1]>::uninit();
+        unsafe {
+            let (first, others) = self.as_slice().split_first().unwrap_unchecked();
+            std::ptr::copy_nonoverlapping(others.as_ptr(), res.as_mut_ptr() as *mut T, M - 1);
+            ((first as *const T).read(), res.assume_init())
+        }
+    }
+}
+*/
 #[allow(non_camel_case_types)]
 #[allow(dead_code)]
 pub mod js_types {
@@ -108,16 +139,6 @@ pub fn window() -> crate::web_sys::Window {
 
 pub fn document() -> crate::web_sys::Document {
 	unsafe {web_sys::window().unwrap_unchecked().document().unwrap_unchecked()}
-}
-
-
-pub fn get_canvas_ctx(name: &str, antialias: bool, alpha: bool)
--> JsResult<(f64, f64, web_sys::CanvasRenderingContext2d)> {
-    let res: web_sys::HtmlCanvasElement = document().element_dyn_into(name)?;
-    Ok((res.width() as f64, res.height() as f64,
-        res.get_context_with_context_options("2d", &js_obj!{bool alpha: alpha, bool antialias: antialias})?
-            .to_js_result_with(|| format!("rendering context not found for canvas #{}", name))?
-            .unchecked_into::<web_sys::CanvasRenderingContext2d>()))
 }
 
 fn to_error_with_msg(err: wasm_bindgen::JsValue, msg: &str) -> wasm_bindgen::JsValue {
@@ -224,12 +245,27 @@ impl HtmlDocumentExt for web_sys::Document {
     }
 }
 
+pub enum GetVarError {
+    OutOfBounds(usize),
+    Overlap(usize)
+}
+
+impl std::fmt::Display for GetVarError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GetVarError::OutOfBounds(x) => write!(f, "index #{} is out of bounds", x),
+            GetVarError::Overlap(x) => write!(f, "index #{} appeared more than once", x)}
+    }
+}
+
 pub trait SliceExt<T> {
     fn get_saturating<'a>(&'a self, id: usize) -> &'a T;
     fn get_saturating_mut<'a>(&'a mut self, id: usize) -> &'a mut T;
     // the format of the error message would be: <prefix><id><postifx>
     fn get_or_js_error<'a>(&'a self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a T>;
     fn get_mut_or_js_error<'a>(&'a mut self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a mut T>;
+    fn get_var<'a>(&'a self, ids: &[usize]) -> Result<Vec<&'a T>, GetVarError>;
+    fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Result<Vec<&'a mut T>, GetVarError>;
 }
 
 impl<T> SliceExt<T> for [T] {
@@ -247,6 +283,30 @@ impl<T> SliceExt<T> for [T] {
 
     #[inline] fn get_mut_or_js_error<'a>(&'a mut self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a mut T> {
         self.get_mut (id).to_js_result_with(|| format!("{}{}{}", prefix, id, postfix))
+    }
+
+    #[inline] fn get_var<'a>(&'a self, ids: &[usize]) -> Result<Vec<&'a T>, GetVarError> {
+        let len = self.len();
+        for (id, rest) in std::iter::successors(ids.split_first(), |x| x.1.split_first()) {
+            if *id >= len {return Err(GetVarError::OutOfBounds(*id))}
+            if rest.contains(id) {return Err(GetVarError::Overlap(*id))}
+        }
+        Ok(unsafe { // at this point, `ids` is guaranteed to contain unique valid indices into `self`
+            let base = self.as_ptr();
+            ids.iter().map(|x| &*base.add(*x)).collect::<Vec<_>>()
+        })
+    }
+
+    #[inline] fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Result<Vec<&'a mut T>, GetVarError> {
+        let len = self.len();
+        for (id, rest) in std::iter::successors(ids.split_first(), |x| x.1.split_first()) {
+            if *id >= len {return Err(GetVarError::OutOfBounds(*id))}
+            if rest.contains(id) {return Err(GetVarError::Overlap(*id))}
+        }
+        Ok(unsafe { // at this point, `ids` is guaranteed to contain unique valid indices into `self`
+            let base = self.as_mut_ptr();
+            ids.iter().map(|x| &mut*base.add(*x)).collect::<Vec<_>>()
+        })
     }
 }
 

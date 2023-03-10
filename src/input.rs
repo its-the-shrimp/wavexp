@@ -1,23 +1,22 @@
+#![allow(non_camel_case_types)] // because derive(yew::Properties) generates them
+
 use std::f64::consts::PI;
 use wasm_bindgen::JsCast;
 use yew::TargetCast;
 use crate::draggable;
 use crate::MainCmd;
-use crate::utils::HtmlCanvasExt;
-use crate::utils::HtmlDocumentExt;
-use crate::utils::OptionToJsResult;
-use crate::utils::{self, JsResultUtils};
+use crate::utils;
+use crate::utils::{JsResultUtils, HtmlCanvasExt, HtmlDocumentExt, OptionToJsResult};
 
 pub struct Slider {
     value: f64,
     canvas: web_sys::HtmlCanvasElement,
-    focused: bool
+    focused: bool,
+    hovered: bool
 }
 
 #[derive(PartialEq, yew::Properties)]
 pub struct SliderProps {
-    #[prop_or(yew::classes!("default-input"))]
-    pub class: yew::html::Classes,
     pub name: &'static str,
     #[prop_or(1.0)]
     pub coef: f64,
@@ -38,14 +37,14 @@ impl yew::Component for Slider {
 
     fn create(ctx: &yew::Context<Self>) -> Self {
         let SliderProps {coef, initial, ..} = ctx.props();
-        Self {focused: false, value: initial / coef,
+        Self {focused: false, hovered: false, value: initial / coef,
             canvas: wasm_bindgen::JsValue::UNDEFINED.unchecked_into()}
     }
 
     fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
         _ = utils::js_try!{type = !:
             let SliderProps {component_id, id, coef, name, ..} = ctx.props();
-            return msg.handle_hover(name)
+            msg.handle_hover(name, |_, hovered| Ok(self.hovered = hovered))?
                 .handle_focus(|_| Ok(self.focused = true))?
                 .handle_unfocus(|_| Ok(self.focused = false))?
                 .handle_drag(|e| {
@@ -54,16 +53,16 @@ impl yew::Component for Slider {
                     self.value = (self.value + e.movement_y() as f64 / (target.client_height() * -2) as f64)
                         .clamp(0.0, 1.0);
                     MainCmd::SetParam(*component_id, *id, self.value * coef).send();
-                    Ok(())})?
-                .needs_rerender()
+                    Ok(())})?;
+            return true
         }.report_err("handling a message received by the slider");
         false
     }
 
 	fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
-        let SliderProps { class, component_id, id, .. } = ctx.props();
+        let SliderProps{component_id, id, .. } = ctx.props();
         yew::html! {
-            <canvas id={format!("slider-{}-{}", *component_id, *id)} class={class.clone()}
+            <canvas id={format!("slider-{}-{}", *component_id, *id)} class="input"
             onpointerdown={ctx.link().callback(draggable::Cmd::Focus)}
             onpointerup={ctx.link().callback(draggable::Cmd::Unfocus)}
             onpointerenter={ctx.link().callback(draggable::Cmd::HoverIn)}
@@ -86,13 +85,17 @@ impl yew::Component for Slider {
             if first_render {
                 ctx.set_fill_style(&"#0069E1".into());
                 ctx.set_stroke_style(&"#0069E1".into());
-                ctx.set_line_width(LINE_WIDTH);
                 ctx.set_font(FONT);
+                ctx.set_line_width(LINE_WIDTH);
                 ctx.set_text_align("center")}
             ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
             ctx.begin_path();
+            if self.hovered {
+                ctx.arc(w, h + LINE_WIDTH, r, 0.0, PI * 2.0)?;
+                ctx.stroke();
+                ctx.begin_path()}
             if self.value != 0.0 {
-                ctx.arc(w, h + LINE_WIDTH, r,
+                ctx.arc(w, h + LINE_WIDTH, r - LINE_WIDTH,
                     PI * 1.5, (self.value * 2.0 + 1.5) * PI)?;
                 ctx.stroke()}
             ctx.set_text_baseline("middle");
@@ -109,13 +112,12 @@ impl yew::Component for Slider {
 pub struct Switch {
     value: f64,
     canvas: web_sys::HtmlCanvasElement,
-    focused: bool
+    focused: bool,
+    hovered: bool
 }
 
 #[derive(PartialEq, yew::Properties)]
 pub struct SwitchProps {
-    #[prop_or(yew::classes!("default-input"))]
-    pub class: yew::Classes,
     pub name: &'static str,
     pub options: Vec<&'static str>,
     pub component_id: usize,
@@ -128,14 +130,14 @@ impl yew::Component for Switch {
     type Properties = SwitchProps;
 
     fn create(ctx: &yew::Context<Self>) -> Self {
-        Self {focused: false, value: ctx.props().initial as f64,
+        Self {focused: false, hovered: false, value: ctx.props().initial as f64,
             canvas: wasm_bindgen::JsValue::UNDEFINED.unchecked_into()}
     }
 
     fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
-        let err: utils::JsResult<!> = try {
+        _ = utils::js_try!{type = !:
             let SwitchProps {options, component_id, id, name, ..} = ctx.props();
-            return msg.handle_hover(name)
+            msg.handle_hover(name, |_, hovered| Ok(self.hovered = hovered))?
                 .handle_focus(|_| Ok(self.focused = true))?
                 .handle_unfocus(|_| Ok(self.focused = false))?
                 .handle_drag(|e| {
@@ -146,17 +148,16 @@ impl yew::Component for Switch {
                         .rem_euclid(options.len() as f64);
                     if old_value != self.value as usize {
                         MainCmd::SetParam(*component_id, *id, self.value).send()}
-                    Ok(())})?
-                .needs_rerender()
-        };
-        _ = err.report_err("handling a message received by the slider");
+                    Ok(())})?;
+            return true
+        }.report_err("handling a message received by the slider");
         false
     }
 
 	fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
-        let SwitchProps { class, component_id, id, .. } = ctx.props();
+        let SwitchProps{component_id, id, .. } = ctx.props();
         yew::html! {
-            <canvas id={format!("switch-{}-{}", *component_id, *id)} class={class.clone()}
+            <canvas id={format!("switch-{}-{}", *component_id, *id)} class="input"
             onpointerdown={ctx.link().callback(draggable::Cmd::Focus)}
             onpointerup={ctx.link().callback(draggable::Cmd::Unfocus)}
             onpointerenter={ctx.link().callback(draggable::Cmd::HoverIn)}
@@ -165,7 +166,7 @@ impl yew::Component for Switch {
     }
 
     fn rendered(&mut self, ctx: &yew::Context<Self>, first_render: bool) {
-        let err: utils::JsResult<()> = try {
+        _ = utils::js_try!{
             let SwitchProps{options, component_id, id, ..} = ctx.props();
             if first_render {
                 self.canvas = utils::document()
@@ -186,11 +187,54 @@ impl yew::Component for Switch {
             ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
             let index = self.value.floor();
             ctx.begin_path();
-            ctx.arc(w, h + LINE_WIDTH, r, (index / 2.0 + 1.5) * PI, index / 2.0 * PI)?;
+            if self.hovered {
+                ctx.arc(w, h + LINE_WIDTH, r, 0.0, PI * 2.0)?;
+                ctx.stroke();
+                ctx.begin_path()}
+            ctx.arc(w, h + LINE_WIDTH, r - LINE_WIDTH, (index / 2.0 + 1.5) * PI, index / 2.0 * PI)?;
             ctx.stroke();
             return ctx.fill_text_with_max_width(unsafe{options.get_unchecked(index as usize)},
-                w, h + LINE_WIDTH, r * 1.5)?;
-        };
-        _ = err.report_err("rendering the switch");
+                w, h + LINE_WIDTH, w)?;
+        }.report_err("rendering the switch");
+    }
+}
+
+pub struct Button;
+
+#[derive(PartialEq, yew::Properties)]
+pub struct ButtonProps {
+    #[prop_or_default]
+    pub style: &'static str,
+    pub desc: &'static str,
+    pub children: yew::html::Children,
+    pub component_id: usize,
+    pub id: usize
+}
+
+impl yew::Component for Button {
+    type Message = draggable::Cmd;
+    type Properties = ButtonProps;
+
+    fn create(_: &yew::Context<Self>) -> Self {Self}
+
+    fn update(&mut self, ctx: &yew::Context<Self>, msg: Self::Message) -> bool {
+        _ = utils::js_try!{
+            let ButtonProps{desc, component_id, id, ..} = ctx.props();
+            msg.handle_hover(desc, |_, _| Ok(()))?
+                .handle_focus(|_| Ok(MainCmd::SetParam(*component_id, *id, f64::INFINITY).send()))?
+                .handle_unfocus(|_| Ok(MainCmd::SetParam(*component_id, *id, f64::NEG_INFINITY).send()))?;
+        }.report_err("handling a message received by the button");
+        false
+    }
+
+    fn view(&self, ctx: &yew::Context<Self>) -> yew::Html {
+        let ButtonProps{style, children, ..} = ctx.props();
+        yew::html!{
+            <div class="input button" style={*style}
+            onpointerdown={ctx.link().callback(draggable::Cmd::Focus)}
+            onpointerup={ctx.link().callback(draggable::Cmd::Unfocus)}
+            onpointerenter={ctx.link().callback(draggable::Cmd::HoverIn)}
+            onpointerleave={ctx.link().callback(draggable::Cmd::HoverOut)}>{children.clone()}</div>
+        }
     }
 }
