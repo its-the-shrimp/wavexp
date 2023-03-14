@@ -131,7 +131,7 @@ pub enum MainCmd {
     SetParam(usize, usize, f64),
     SetGlobalReleaseTime(usize, f64),
     TryConnect(usize, utils::Point),
-    Select(usize),
+    Select(Option<usize>),
     ReportError(wasm_bindgen::JsValue)
 }
 
@@ -256,8 +256,9 @@ impl yew::Component for Main {
                         let name = comp.name();
                         self.set_desc(name);
                     } else {
-                       self.plane_moving = false;
-                       self.remove_desc();
+                        ctx.link().send_message(MainCmd::Select(None));
+                        self.plane_moving = false;
+                        self.remove_desc();
                     }
                 }.explain_err("handling `MainCmd::Unfocus` message")?,
 
@@ -280,7 +281,7 @@ impl yew::Component for Main {
                                         self.sound_comps.iter_mut()
                                             .try_for_each(|comp| comp.start(cur_time))?
                                     } else {
-                                        let release_time = unsafe{self.release_times.last().unwrap_unchecked().1};
+                                        let release_time = self.release_times.last().unwrap_or(&(0, 0.0)).1;
                                         self.sound_comps.iter_mut()
                                             .try_for_each(|comp| comp.end(cur_time, release_time))?}
                                     return false
@@ -357,7 +358,7 @@ impl yew::Component for Main {
                 }.explain_err("handling `MainCmd::TryConnect` message")?,
 
                 MainCmd::Select(id) => utils::js_try!{type = !:
-                    self.selected_comp = (Some(id) != self.selected_comp).then_some(id);
+                    self.selected_comp = id.filter(|id| Some(id) != self.selected_comp.as_ref());
                     if let Some(id) = self.selected_comp {
                         let (graph, graph_in_span, graph_span) = self.sound_comps
                             .get_or_js_error(id, "sound functor #", " not found")?

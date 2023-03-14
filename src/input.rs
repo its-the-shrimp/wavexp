@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)] // because derive(yew::Properties) generates them
 
-use std::f64::consts::PI;
+use std::f64::consts::{PI, TAU};
 use wasm_bindgen::JsCast;
 use yew::TargetCast;
 use crate::draggable;
@@ -22,6 +22,7 @@ pub struct SliderProps {
     pub coef: f64,
     #[prop_or(2)]
     pub precision: usize,
+    #[prop_or("")]
     pub postfix: &'static str,
     pub component_id: usize,
     pub id: usize,
@@ -144,10 +145,10 @@ impl yew::Component for Switch {
                     let old_value = self.value as usize;
                     let target = e.target_dyn_into::<web_sys::Element>()
                         .to_js_result("no target on a pointer event")?;
-                    self.value = (self.value + e.movement_y() as f64 / target.client_height() as f64 / -0.5)
+                    self.value = (self.value + e.movement_y() as f64 / target.client_height() as f64 / -2.0 * options.len() as f64)
                         .rem_euclid(options.len() as f64);
                     if old_value != self.value as usize {
-                        MainCmd::SetParam(*component_id, *id, self.value).send()}
+                        MainCmd::SetParam(*component_id, *id, self.value.floor()).send()}
                     Ok(())})?;
             return true
         }.report_err("handling a message received by the slider");
@@ -185,13 +186,13 @@ impl yew::Component for Switch {
                 ctx.set_text_align("center");
                 ctx.set_text_baseline("middle")}
             ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
-            let index = self.value.floor();
             ctx.begin_path();
             if self.hovered {
                 ctx.arc(w, h + LINE_WIDTH, r, 0.0, PI * 2.0)?;
                 ctx.stroke();
                 ctx.begin_path()}
-            ctx.arc(w, h + LINE_WIDTH, r - LINE_WIDTH, (index / 2.0 + 1.5) * PI, index / 2.0 * PI)?;
+            let (factor, index) = (options.len() as f64 / TAU, self.value.floor());
+            ctx.arc(w, h + LINE_WIDTH, r - LINE_WIDTH, index / factor, (index + 1.0) / factor)?;
             ctx.stroke();
             return ctx.fill_text_with_max_width(unsafe{options.get_unchecked(index as usize)},
                 w, h + LINE_WIDTH, w)?;

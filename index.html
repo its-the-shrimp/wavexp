@@ -30,11 +30,11 @@
 				background-color: #232328;
 				padding: 1em;
 				white-space: pre;
-				overflow: hidden}
+				overflow: hidden;
+				user-select: none}
 			.visual {border: 3px solid #0069E1}
 			#inputs {
 				display: grid;
-				grid-template-rows: repeat(3, 1fr);
 				grid-template-columns: repeat(2, 1fr)}
 			#visuals {
 				position: fixed;
@@ -68,6 +68,9 @@
 				height: 100%}
 			.button:hover > svg {
 				fill: #0069E1}
+			.button > div {
+				margin-top: 12.5%;
+				user-select: none}
 			.component {
 				fill: #232328;
 				stroke: #0069E1;
@@ -88,6 +91,10 @@
 			#general-ctrl > .button:nth-child(2):hover > svg {
 				fill: #E10000;
 				stroke: #E10000}
+			#wave-options {
+				display: flex;
+				flex-direction: column}
+			#wave-options > .button {height: auto; flex: 1}
 		</style>
 	</head>
 	<body>
