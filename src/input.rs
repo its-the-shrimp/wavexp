@@ -47,14 +47,16 @@ impl yew::Component for Slider {
             let SliderProps {component_id, id, coef, name, ..} = ctx.props();
             msg.handle_hover(name, |_, hovered| Ok(self.hovered = hovered))?
                 .handle_focus(|_| Ok(self.focused = true))?
-                .handle_unfocus(|_| Ok(self.focused = false))?
-                .handle_drag(|e| {
+                .handle_unfocus(|_| Ok({
+                    self.focused = false;
+                    MainCmd::SetParam(*component_id, *id, self.value * coef).send();
+                }))?
+                .handle_drag(|e| Ok({
                     let target = e.target_dyn_into::<web_sys::Element>()
                         .to_js_result("no target on a pointer event")?;
                     self.value = (self.value + e.movement_y() as f64 / (target.client_height() * -2) as f64)
                         .clamp(0.0, 1.0);
-                    MainCmd::SetParam(*component_id, *id, self.value * coef).send();
-                    Ok(())})?;
+                }))?;
             return true
         }.report_err("handling a message received by the slider");
         false

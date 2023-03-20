@@ -1,367 +1,319 @@
-use crate::utils::{self, JsResultUtils, HitZone, SliceExt, Tee};
-use crate::{input, MainCmd, Main};
-use std::rc::Rc;
+use std::{
+    rc::{Rc, Weak},
+    sync::Mutex, ops::Not};
+use gloo_timers::callback::Timeout;
+use wasm_bindgen::JsCast;
+use web_sys::{
+    AudioNode,
+    AudioContext,
+    GainNode, GainOptions,
+    OscillatorNode, OscillatorOptions, OscillatorType,
+    AnalyserNode,
+    CanvasRenderingContext2d, Path2d};
+use yew::html;
+use crate::{
+    utils::{
+        JsResult,
+        Point,
+        HitZone,
+        HorizontalArrow,
+        Rhombus,
+        JsResultUtils, BoolExt, ResultToJsResult, OptionToJsResult, SliceExt},
+    input::{Switch, Slider, Button},
+    MainCmd,
+    js_try};
 
-#[derive(Clone, Copy)]
-enum Tone {Freq(f32), Pitch(u32)}
+pub struct WaveDef{id: usize, freq: f32, wave_type: OscillatorType}
 
-impl Tone {
-    #[inline] fn freq(self) -> f32 {
-        match self {
-            Tone::Freq(x) => x,
-            Tone::Pitch(x) => unsafe{*Wave::NOTE_FREQS.get_unchecked(x as usize)}
-        }
-    }
-
-    #[inline] fn pitch(self) -> usize {
-        match self {
-            Tone::Freq(x) => {
-                for (index, &freq) in Wave::NOTE_FREQS.iter().enumerate() {
-                    if x < freq {return index.saturating_sub(1)}
-                }
-                Wave::NOTE_FREQS.len() - 1
-            }
-            Tone::Pitch(x) => x as usize
-        }
-    }
-
-    #[inline] fn set(&mut self, val: f64) -> bool {
-        const MAX: u32 = Wave::NOTE_FREQS.len() as u32 - 1;
-        match self {
-            Tone::Freq(x) if x.is_finite() => *x = val as f32,
-            Tone::Pitch(x @ ..=MAX)        => *x = val as u32,
-            _ => return false}
-        true
-    }
-
-    #[inline] fn toggle(&mut self) {
-        match self {
-            x@Tone::Freq(_) => *x = Tone::Pitch(x.pitch() as u32),
-            x@Tone::Pitch(_) => *x = Tone::Freq(x.freq())
-        }
+impl WaveDef {
+    fn new(id: usize) -> Self {
+        Self{id, freq: 440.0, wave_type: Sound::WAVE_TYPES[0]}
     }
 }
 
-struct Wave {
-    id: usize,
-    tone: Tone,
-    wave_type: usize,
-    gen: web_sys::OscillatorNode,
-    shift: u8,
-    shifter: web_sys::DelayNode
+#[derive(Clone)]
+pub enum Sound {
+    InputFreq(f32),
+    Wave(GainNode),
+    Envelope{attack: Option<u32>, decay: u32, sustain: f32, release: u32, ctrl: GainNode},
+    End
 }
 
-impl Drop for Wave {
-    fn drop(&mut self) {
-        _ = self.gen.disconnect();
-        _ = self.shifter.disconnect();
-    }
-}
-
-impl Wave {
-    pub const MAX_FREQ: f64 = 5000.0;
-    pub const WAVE_TYPES: [web_sys::OscillatorType; 4] = [
-        web_sys::OscillatorType::Sine,
-        web_sys::OscillatorType::Square,
-        web_sys::OscillatorType::Sawtooth,
-        web_sys::OscillatorType::Triangle];
-    pub const WAVE_TYPE_NAMES: [&'static str; 4] = [
+impl Sound {
+    const WAVE_TYPES: [OscillatorType; 4] = [
+        OscillatorType::Sine,
+        OscillatorType::Square,
+        OscillatorType::Sawtooth,
+        OscillatorType::Triangle];
+    const WAVE_TYPE_NAMES: [&'static str; 4] = [
         "Sine",
         "Square",
         "Saw",
         "Triangle"];
-    pub const NOTE_FREQS: [f32; 24] = [
-        55.00 /*A1*/, 58.27 /*A#1*/,
-        61.74 /*B1*/,
-        65.41 /*C2*/, 69.30 /*C#2*/,
-        73.42 /*D2*/, 77.78 /*D#2*/,
-        82.41 /*E2*/,
-        87.31 /*F2*/, 92.50 /*F#2*/,
-        98.00 /*G2*/, 103.83/*G#2*/,
-        110.0 /*A2*/, 116.54/*A#2*/,
-        123.47/*B2*/,
-        130.81/*C3*/, 138.59/*C#3*/,
-        146.83/*D3*/, 155.56/*D#3*/,
-        164.81/*E3*/,
-        174.61/*F3*/, 185.00/*F#3*/,
-        196.00/*G3*/, 207.65/*G#3*/];
-    pub const NOTE_NAMES: [&'static str; 24] = [
-        "A1", "A#1",
-        "B1",
-        "C2", "C#2",
-        "D2", "D#2",
-        "E2",
-        "F2", "F#2",
-        "G2", "G#2",
-        "A2", "A#2",
-        "B2",
-        "C3", "C#3",
-        "D3", "D#3",
-        "E3",
-        "F3", "F#3",
-        "G3", "G#3"];
+    const MAX_WAVE_FREQ: f64 = 5000.0;
+    const MAX_INTERVAL: f64 = 2000.0;
 
-    pub fn new(id: usize, ctrl: &web_sys::GainNode) -> utils::JsResult<Self> {
-        let ctx = ctrl.context();
-        let gen = web_sys::OscillatorNode::new(&ctx)?;
-        let shifter = web_sys::DelayNode::new(&ctx)?;
-        gen.connect_with_audio_node(&shifter)?;
-        gen.start()?;
-        shifter.connect_with_audio_node(ctrl)?;
-        Ok(Self{id, tone: Tone::Pitch(0), wave_type: 0, gen, shift: 0, shifter})
-    }
-
-    pub fn prepare(&mut self, cur_time: f64) -> utils::JsResult<()> {
-        unsafe {
-            let freq = self.tone.freq();
-            self.gen.frequency().set_value_at_time(freq, cur_time)?;
-            self.gen.set_type(*Self::WAVE_TYPES.get_unchecked(self.wave_type));
-            let shift = if freq == 0.0 {0.0} else {1.0 / freq * self.shift as f32 / 100.0};
-            self.shifter.delay_time().set_value_at_time(shift, cur_time)?;
-            Ok(())
+    pub fn wave<'a>(self, ctx: &AudioContext, waves: impl Iterator<Item = &'a WaveDef>) -> JsResult<Self> {
+        match self {
+            Self::InputFreq(freq) => {
+                let ctrl = GainNode::new_with_options(ctx, GainOptions::new().gain(f32::MIN_POSITIVE))?;
+                for wave in waves {
+                    let wave = OscillatorNode::new_with_options(ctx, OscillatorOptions::new()
+                        .frequency(wave.freq + freq)
+                        .type_(wave.wave_type))?;
+                    wave.start()?;
+                    wave.connect_with_audio_node(&ctrl)?;
+                }
+                Ok(Self::Wave(ctrl))}
+            x @Self::End => Ok(x),
+            x => Err(format!("`{}` sound cannot be turned into a `Complex Wave`", x.name()).into())
         }
     }
 
-    #[inline] pub fn id(&self) -> usize {self.id}
-    #[inline] pub fn tone(&self) -> Tone {self.tone}
-    #[inline] pub fn set_tone(&mut self, val: f64) -> utils::JsResult<()> {
-        self.tone.set(val).then_some(())
-            .ok_or_else(|| format!("invalid tone value {}", val).into())
+    // `attack`, `decay` and `release` are in microseconds, `sustain` must be in [0; 1]
+    pub fn envelope(self, ctx: &AudioContext, attack: u32, decay: u32, sustain: f32, release: u32) -> JsResult<Self> {
+        let ctrl = match self {
+            Self::InputFreq(freq) => {
+                let ctrl = GainNode::new_with_options(ctx, GainOptions::new().gain(f32::MIN_POSITIVE))?;
+                OscillatorNode::new_with_options(ctx, OscillatorOptions::new().frequency(freq))?
+                    .connect_with_audio_node(&ctrl)?;
+                ctrl}
+            Self::Wave(x) => x,
+            Self::Envelope{ctrl, ..} => ctrl,
+            x @Self::End => return Ok(x)};
+        Ok(Self::Envelope{attack: Some(attack), decay, sustain, release, ctrl})
     }
-    #[inline] pub fn toggle_tone_input_mode(&mut self) {
-        self.tone.toggle()
-    }
-    #[inline] pub fn wave_type(&self) -> usize {self.wave_type}
-    #[inline] pub fn set_wave_type(&mut self, val: usize) -> utils::JsResult<()> {
-        if val >= Self::WAVE_TYPES.len() {return Err(format!("invalid wave type #{}", val).into())}
-        Ok(self.wave_type = val)
-    }
-    #[inline] pub fn shift(&self) -> f64 {self.shift as f64 / 100.0}
-    #[inline] pub fn set_shift(&mut self, val: f64) {self.shift = (val * 100.0).min(99.9) as u8}
-}
 
-enum SoundFunctorType {
-    Wave {
-        n_waves: usize, // for unique wave ID generation
-        waves: Vec<Wave>,
-        ctrl: web_sys::GainNode},
-    Envelope {
-        gen: web_sys::GainNode,
-        attack: f64,
-        decay: f64,
-        sustain: f64,
-        release: f64},
-    BuiltinOutput {gen: Rc<web_sys::AnalyserNode>}
+    #[inline] pub fn name(&self) -> &'static str {
+        match self {
+            Self::InputFreq(_) => "Input Frequency",
+            Self::Wave(_) => "Complex Wave",
+            Self::Envelope{..} => "Envelope",
+            Self::End => "Ending Signal"}
+    }
+
+    pub fn prepare(self, dest: &AudioNode) -> JsResult<Self> {
+        match self {
+            Self::InputFreq(freq) => {
+                let ctx = dest.context();
+                let ctrl = GainNode::new_with_options(&ctx, GainOptions::new().gain(f32::MIN_POSITIVE))?;
+                OscillatorNode::new_with_options(&ctx, OscillatorOptions::new().frequency(freq))?
+                    .connect_with_audio_node(&ctrl)?
+                    .connect_with_audio_node(dest)?;
+                Ok(Self::Wave(ctrl))}
+
+            Self::Wave(ctrl) => {
+                ctrl.connect_with_audio_node(dest)?;
+                Ok(Self::Wave(ctrl))}
+
+            Self::Envelope{attack, decay, sustain, release, ctrl} => {
+                ctrl.connect_with_audio_node(dest)?;
+                Ok(Self::Envelope{attack, decay, sustain, release, ctrl})}
+
+            x => Err(format!("`{}` sound cannot be played", x.name()).into())
+        }
+    }
+
+    fn progress(&mut self) -> JsResult<Option<u32>> {
+        js_try!{
+            match self {
+                Self::Wave(ctrl) => {
+                    let ctx: AudioContext = ctrl.context().unchecked_into();
+                    ctrl.gain().set_value_at_time(1.0, ctx.current_time())?;
+                    None}
+                Self::Envelope{attack, decay, sustain, ctrl, ..} => {
+                    let ctx: AudioContext = ctrl.context().unchecked_into();
+                    if let Some(attack) = attack.take() {
+                        ctrl.gain().linear_ramp_to_value_at_time(1.0, ctx.current_time() + attack as f64 / 1000.0)?;
+                        Some(attack)
+                    } else {
+                        ctrl.gain().linear_ramp_to_value_at_time(*sustain, ctx.current_time() + *decay as f64 / 1000.0)?;
+                        None}
+                }
+                x => JsResult::<!>::Err(format!("`{}` sound cannot be played", x.name()).into())?
+            }
+        }.explain_err("polling the sound as a future")
+    }
+
+    // the returned float signifies when the object can be discarded
+    pub fn end(self) -> JsResult<u32> {
+        match self {
+            Self::Wave(ctrl) => {
+                let ctx: AudioContext = ctrl.context().unchecked_into();
+                ctrl.gain().set_value_at_time(f32::MIN_POSITIVE, ctx.current_time())?;
+                Ok(0)
+            }
+            Self::Envelope{release, ctrl, ..} => {
+                let ctx: AudioContext = ctrl.context().unchecked_into();
+                ctrl.gain().cancel_scheduled_values(0.0)?
+                    .linear_ramp_to_value_at_time(f32::MIN_POSITIVE, ctx.current_time() + release as f64 / 1000.0)?;
+                Ok(release)
+            }
+            x => Err(format!("`{}` sound cannot be played", x.name()).into())
+        }
+    }
 }
 
 #[derive(Debug)]
-enum FocusType {
+enum Focus {
     None,
-    Moving(utils::Point),
-    Connecting(utils::Point),
+    Moving(Point),
+    Connecting(Point),
 }
 
-pub struct SoundFunctor {
-    functor_type: SoundFunctorType,
-    id: usize,
-    location: utils::Point,
-    forwards: Vec<usize>,
-    focus_type: FocusType
+enum SoundGenType {
+    Input,
+    Wave{waves: Vec<WaveDef>, n_waves: usize},
+    Envelope{attack: u32, decay: u32, sustain: f32, release: u32},
+    Output{analyser: Rc<AnalyserNode>, sounds: Vec<Rc<Mutex<(Sound, Option<Timeout>)>>>}
+    // this is absolutely ugly
 }
 
-impl PartialEq for SoundFunctor {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-impl Eq for SoundFunctor {}
-
-impl std::ops::Deref for SoundFunctor {
-    type Target = web_sys::AudioNode;
-    fn deref(&self) -> &Self::Target {
-        match self.functor_type {
-            SoundFunctorType::Wave {ref ctrl, ..} => ctrl,
-            SoundFunctorType::Envelope {ref gen, ..} => gen,
-            SoundFunctorType::BuiltinOutput {ref gen} => gen}
+impl SoundGenType {
+    #[inline] pub fn name(&self) -> &'static str {
+        match &self {
+            SoundGenType::Input => "User Input",
+            SoundGenType::Wave{..} => "Wave generator",
+            SoundGenType::Envelope{..} => "Envelope",
+            SoundGenType::Output{..} => "Output"}
     }
 }
 
-impl SoundFunctor {
-    pub const MAX_INTERVAL: f64 = 2.0;
-	pub const MIN_VOLUME: f32 = f32::MIN_POSITIVE;
-    pub const VISUAL_SIZE: i32 = 32;
+pub struct SoundGen {
+    gen_type: SoundGenType,
+    location: Point,
+    focus: Focus,
+    pub id: usize
+}
 
-    pub fn new_wave(player: &web_sys::AudioContext, id: usize, location: utils::Point) -> utils::JsResult<Self> {
-        let ctrl = web_sys::GainNode::new_with_options(player, 
-            web_sys::GainOptions::new().gain(Self::MIN_VOLUME))?;
-        Ok(Self{
-            functor_type: SoundFunctorType::Wave{n_waves: 1, waves: vec![Wave::new(0, &ctrl)?], ctrl}, 
-            id, location, forwards: vec![], focus_type: FocusType::None})
+impl SoundGen {
+    const VISUAL_SIZE: i32 = 32;
+    #[inline] pub fn new_input(id: usize, location: Point) -> Self {
+        Self{gen_type: SoundGenType::Input,
+            location, focus: Focus::None, id}
     }
 
-    pub fn new_envelope(player: &web_sys::AudioContext, id: usize, location: utils::Point) -> utils::JsResult<Self> {
-        let gen = web_sys::GainNode::new_with_options(player, 
-            web_sys::GainOptions::new().gain(Self::MIN_VOLUME))?;
-        Ok(Self{functor_type: SoundFunctorType::Envelope{gen, attack: 0.0, decay: 0.0, sustain: 0.0, release: 0.0},
-            id, location, forwards: vec![], focus_type: FocusType::None})
+    #[inline] pub fn new_wave(id: usize, location: Point) -> Self {
+        Self{gen_type: SoundGenType::Wave{waves: vec![], n_waves: 0},
+            location, focus: Focus::None, id}
     }
 
-    pub fn new_builtin_output(gen: Rc<web_sys::AnalyserNode>, id: usize, location: utils::Point) -> utils::JsResult<Self> {
-        Ok(Self{functor_type: SoundFunctorType::BuiltinOutput{gen},
-            id, location, forwards: vec![], focus_type: FocusType::None})
+    #[inline] pub fn new_envelope(id: usize, location: Point) -> Self {
+        Self{gen_type: SoundGenType::Envelope{attack: 0, decay: 0, sustain: 0.0, release: 0},
+            location, focus: Focus::None, id}
     }
 
-    pub fn start(&mut self, cur_time: f64) -> utils::JsResult<()> {
-        match &mut self.functor_type {
-            SoundFunctorType::Wave{waves, ctrl, ..} => {
-                waves.len().js_log("waves: ");
-                waves.iter_mut().try_for_each(|x| x.prepare(cur_time))?;
-                _ = ctrl.gain().cancel_scheduled_values(0.0)
-                    .explain_err("resetting the wave generator to start it again")?
-                    .set_value_at_time(1.0, cur_time)?}
-            SoundFunctorType::Envelope{gen, attack, decay, sustain, ..}
-                => _ = gen.gain().cancel_scheduled_values(0.0)
-                .explain_err("resetting the volume control")?
-                .linear_ramp_to_value_at_time(1.0, cur_time + *attack)
-                .explain_err("setting the attack period")?
-                .linear_ramp_to_value_at_time(*sustain as f32,
-                    cur_time + *attack + *decay)
-                .explain_err("setting the decay period")?,
-            _ => ()};
-        Ok(())
+    #[inline] pub fn new_output(id: usize, location: Point, analyser: Rc<AnalyserNode>) -> Self {
+        Self{gen_type: SoundGenType::Output{analyser, sounds: vec![]},
+            location, focus: Focus::None, id}
     }
 
-    pub fn end(&mut self, cur_time: f64, global_release_time: f64) -> utils::JsResult<()> {
-        match &self.functor_type {
-            SoundFunctorType::Wave{ctrl, ..}
-                => _ = ctrl.gain().set_value_at_time(Self::MIN_VOLUME, cur_time + global_release_time)?,
-            SoundFunctorType::Envelope{gen, release, ..}
-                => _ = gen.gain().cancel_scheduled_values(0.0)
-                .explain_err("resetting the envelope for the fade-out")?
-                .linear_ramp_to_value_at_time(Self::MIN_VOLUME, cur_time + release)
-                .explain_err("setting the volume fade-out")?,
-            _ => ()};
-        Ok(())
+    #[inline] pub fn name(&self) -> &'static str {self.gen_type.name()}
+
+    // the outward connections of the component will visually start from the returned point
+    #[inline] pub fn forwardable(&self) -> Option<Point> {
+        matches!(self.gen_type, SoundGenType::Output{..}).not()
+            .then(|| self.location + Point{x: Self::VISUAL_SIZE, y: 0})
     }
 
-    // the returned boolean signifies whether the component editor layout should be rerendered
-    pub fn set_param(&mut self, param_id: usize, value: f64, ctx: &yew::html::Scope<Main>) -> utils::JsResult<bool> {
-        match &mut self.functor_type {
-            SoundFunctorType::Wave{n_waves, waves, ctrl} => {
-                let (wave_id, param_id) = (param_id / 5, param_id % 5);
-                if wave_id == waves.len() {
-                    if param_id != 0 {return Err("invalid parameter ID of `SoundFunctor::Wave`".into())}
-                    if value.is_sign_positive() {return Ok(false)}
-                    waves.push(Wave::new(*n_waves, ctrl)?);
-                    *n_waves += 1;
-                    return Ok(true)
-                } else {
-                    let wave = waves.get_mut_or_js_error(wave_id, "wave component #", " not found")?;
-                    match param_id {
-                        0 => wave.set_tone(value)?,
-                        1 => wave.set_wave_type(value as usize)?,
-                        2 => return Ok(value.is_sign_negative().then(||
-                            waves.remove(wave_id.js_log("id: "))).is_some()),
-                        3 => return Ok(value.is_sign_negative().then(||
-                            wave.toggle_tone_input_mode()).is_some()),
-                        4 => wave.set_shift(value),
-                        x => return Err(format!("invalid parameter ID of `SoundFunctor::Wave` {}", x).into())
-                    }
-                }
-            }
-
-            SoundFunctorType::Envelope{attack, decay, sustain, release, ..} => match param_id {
-                0 => *attack = value,
-                1 => *decay = value,
-                2 => *sustain = value,
-                3 => {
-                    ctx.send_message(MainCmd::SetGlobalReleaseTime(self.id, value));
-                    *release = value}
-                _ => return Err(js_sys::Error::new("invalid parameter ID of `SoundFunctor::Envelope`").into())}
-
-            SoundFunctorType::BuiltinOutput{..}
-                => return Err(js_sys::Error::new("cannot set a parameter on `SoundFunctor::BuiltinOutput`").into())
-        };
-        Ok(false)
+    // the inward connections of the component will visually end at the returned point
+    #[inline] pub fn backwardable(&self) -> Option<Point> {
+        matches!(self.gen_type, SoundGenType::Input{..}).not()
+            .then(|| self.location - Point{x: Self::VISUAL_SIZE, y: 0})
     }
 
-    #[inline] pub fn forwards<'a>(&'a self) -> Option<&'a [usize]> {
-        match self.functor_type {
-            SoundFunctorType::BuiltinOutput{..} => None,
-            _ => Some(&*self.forwards)}
+    #[inline] fn get_conn_creation_hitzone(&self) -> impl HitZone {
+        HorizontalArrow::new(self.location, Self::VISUAL_SIZE / 2, Self::VISUAL_SIZE / 2, false)
+            .shift_x(Self::VISUAL_SIZE / 2)
     }
 
-    #[inline] pub fn backwardable(&self) -> bool {
-        match self.functor_type {
-            SoundFunctorType::Wave {..} => false,
-            _ => true}
-    }
-
-    pub fn connect(&mut self, other: &SoundFunctor) -> utils::JsResult<bool> {
-        if !other.backwardable() || self.forwards().filter(|x| !x.contains(&other.id)).is_none() {
-            return Ok(false)}
-        self.forwards.push(other.id);
-        self.connect_with_audio_node(other)?;
-        Ok(true)
-    }
-
-    pub fn disconnect(&mut self, other: &SoundFunctor) -> utils::JsResult<bool> {
-        if !self.forwards.contains(&other.id) {return Ok(false)}
-        self.disconnect_with_audio_node(other)?;
-        self.forwards.retain(|&x| x != other.id);
-        Ok(true)
-    }
-
-    pub fn handle_id_change(&mut self, from: usize, to: usize) {
-        if self.id == from {
-            self.id = to;
-        } else {
-            self.forwards.iter_mut().find(|x| **x == from).map(|x| *x = to);
+    pub fn contains(&self, point: Point) -> bool {
+        match (self.forwardable().is_some(), self.backwardable().is_some()) {
+            (true,  true) => Rhombus::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE)
+                .contains(point),
+            (_, x) => HorizontalArrow::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE, x)
+                .contains(point) // the values may never be `(false, false)`
         }
     }
 
-    pub fn name(&self) -> &'static str {
-        match &self.functor_type {
-            SoundFunctorType::Wave{..} => "Wave generator",
-            SoundFunctorType::Envelope{..} => "Envelope",
-            SoundFunctorType::BuiltinOutput{..} => "Output"}
+    pub fn handle_movement(&mut self, coords: Point, is_last: bool) -> Option<MainCmd> {
+        let (focus, cmd) = match self.focus {
+            Focus::None =>
+                if self.forwardable().is_some() && self.get_conn_creation_hitzone().contains(coords) {
+                    (Focus::Connecting(coords),
+                        Some(MainCmd::SetDesc(format!("{}: Connecting", self.name()))))
+                } else {
+                    (Focus::Moving(self.location - coords),
+                        Some(MainCmd::SetDesc(format!("{}: Moving", self.name()))))
+                }
+            Focus::Moving(offset) => {
+                self.location = coords + offset;
+                is_last.choose(
+                    (Focus::None, Some(MainCmd::Select(Some(self.id)))),
+                    (Focus::Moving(offset), None))
+            }
+            Focus::Connecting(dst) => is_last.choose(
+                (Focus::None, Some(MainCmd::TryConnect(self.id, dst))),
+                (Focus::Connecting(coords), None))
+        };
+        self.focus = focus;
+        cmd
     }
 
-    #[inline] pub fn id(&self) -> usize {self.id}
+    pub fn transform(&mut self, ctx: &AudioContext, sound: Sound) -> JsResult<Sound> {
+        match &mut self.gen_type {
+            SoundGenType::Wave{waves, ..} => sound.wave(ctx, waves.iter()),
+            SoundGenType::Envelope{attack, decay, sustain, release} =>
+                sound.envelope(ctx, *attack, *decay, *sustain, *release),
+            SoundGenType::Output{analyser, sounds} => {
+                fn poll_sound(sound: Weak<Mutex<(Sound, Option<Timeout>)>>) {
+                    _ = js_try!{
+                        let Some(sound_owned) = sound.upgrade() else {return};
+                        let mut sound_owned = sound_owned.try_lock().to_js_result()?;
+                        let Some(after) = sound_owned.0.progress()? else {return};
+                        sound_owned.1 = Some(Timeout::new(after, move || poll_sound(sound)));
+                    }.report_err("polling the sound");
+                }
 
-    pub fn contains(&self, point: utils::Point) -> bool {
-        match (self.forwards().is_some(), self.backwardable()) {
-            (true,  true) => utils::Rhombus::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE)
-                .contains(point),
-            (false, false) => wasm_bindgen::throw_str("a sound functor must be either forwardable or backwardable"),
-            (_, x) => utils::HorizontalArrow::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE, x)
-                .contains(point)
+                if let Sound::End = sound {
+                    for sound in sounds.drain(..) {
+                        Rc::try_unwrap(sound).ok()
+                            .to_js_result("failed to get unique reference to a sound while ending it")?
+                            .into_inner().to_js_result()?.0.end()?;
+                    }
+                } else {
+                    let new = Rc::new(Mutex::new((sound.prepare(&analyser)?, None)));
+                    poll_sound(Rc::downgrade(&new));
+                    sounds.push(new);
+                }
+                Ok(Sound::End)}
+            SoundGenType::Input => Err("`User Input` sound element cannot transform sound".into())
         }
     }
 
     pub fn params(&self) -> yew::Html {
-        match &self.functor_type {
-            SoundFunctorType::Wave{n_waves, waves, ..} => yew::html!{<div id="inputs" style="grid-template-columns:repeat(4,1fr)">
-                {for waves.iter().enumerate().map(|(i, wave)| yew::html!{<>
+        match &self.gen_type {
+            SoundGenType::Wave{waves, n_waves} => html!{<div id="inputs" style="grid-template-columns:repeat(4,1fr)">
+                {for waves.iter().enumerate().map(|(i, wave)| html!{<>
                     <div id="wave-options">
-                        <input::Button
-                        key={wave.id() * 5 + 2}
+                        <Button
+                        key={wave.id * 5 + 2}
                         id={i * 5 + 2}
                         desc={"Remove wave element"}
                         component_id={self.id}>
                             <div>{"Remove"}</div>
-                        </input::Button>
-                        <input::Button
-                        key={wave.id() * 5 + 3}
+                        </Button>
+                        /*<Button
+                        key={wave.id * 5 + 3}
                         id={i * 5 + 3}
                         desc={"Toggle tone input mode"}
                         component_id={self.id}>
                             <div>
                                 {if let Tone::Freq(_) = wave.tone() {"Frequency"} else {"Pitch"}}
                             </div>
-                        </input::Button>
+                        </Button>*/
                     </div>
-                    if let Tone::Pitch(pitch) = wave.tone() {
+                    /*if let Tone::Pitch(pitch) = wave.tone() {
                         <input::Switch
                         key={wave.id() * 5}
                         id={i * 5}
@@ -378,22 +330,30 @@ impl SoundFunctor {
                         name={"Frequency"}
                         component_id={self.id}
                         initial={freq as f64}/>
-                    }
-                    <input::Switch
-                    key={wave.id() * 5 + 1}
+                    }*/
+                    <Slider
+                    key={wave.id * 5}
+                    id={i * 5}
+                    coef={Sound::MAX_WAVE_FREQ} precision={0}
+                    postfix={"Hz"}
+                    name={"Frequency"}
+                    component_id={self.id}
+                    initial={wave.freq as f64}/>
+                    <Switch
+                    key={wave.id * 5 + 1}
                     id={i * 5 + 1}
-                    options={Wave::WAVE_TYPE_NAMES.to_vec()}
+                    options={Sound::WAVE_TYPE_NAMES.to_vec()}
                     name={"Wave type"}
                     component_id={self.id}
-                    initial={wave.wave_type()}/>
-                    <input::Slider
-                    key={wave.id() * 5 + 4}
+                    initial={Sound::WAVE_TYPES.iter().position(|&x| x == wave.wave_type).unwrap_or(0)}/>
+                    /*<Slider
+                    key={wave.id * 5 + 4}
                     id={i * 5 + 4}
                     name={"Wave shift"}
                     component_id={self.id}
-                    initial={wave.shift()}/>
+                    initial={wave.shift}/>*/
                 </>})}
-                <input::Button
+                <Button
                 key={n_waves * 5}
                 id={waves.len() * 5}
                 desc={"Add new wave element"}
@@ -402,122 +362,119 @@ impl SoundFunctor {
                     <svg viewBox="0 0 100 100" style="height:100%">
                         <polygon points="45,25 55,25 55,45 75,45 75,55 55,55 55,75 45,75 45,55 25,55 25,45 45,45"/>
                     </svg>
-                </input::Button>
+                </Button>
             </div>},
 
-            SoundFunctorType::Envelope{attack, decay, sustain, release, ..} => yew::html! {<div id="inputs">
-                <input::Slider
+            SoundGenType::Envelope{attack, decay, sustain, release, ..} => html! {<div id="inputs">
+                <Slider
                     id={0}
-                    coef={SoundFunctor::MAX_INTERVAL}
-                    postfix={"s"}
+                    coef={Sound::MAX_INTERVAL}
+                    postfix={"ms"} precision={0}
                     name={"Attack time"}
                     component_id={self.id}
-                    initial={attack}/>
-                <input::Slider
+                    initial={*attack as f64}/>
+                <Slider
                     id={1}
-                    coef={SoundFunctor::MAX_INTERVAL}
-                    postfix={"s"}
+                    coef={Sound::MAX_INTERVAL}
+                    postfix={"ms"} precision={0}
                     name={"Decay time"}
                     component_id={self.id}
-                    initial={decay}/>
-                <input::Slider
+                    initial={*decay as f64}/>
+                <Slider
                     id={2}
                     coef={1.0}
                     postfix={""}
                     name={"Sustain level"}
                     component_id={self.id}
-                    initial={sustain}/>
-                <input::Slider
+                    initial={*sustain as f64}/>
+                <Slider
                     id={3}
-                    coef={SoundFunctor::MAX_INTERVAL}
-                    postfix={"s"}
+                    coef={Sound::MAX_INTERVAL}
+                    postfix={"ms"} precision={0}
                     name={"Release time"}
                     component_id={self.id}
-                    initial={release}/>
+                    initial={*release as f64}/>
             </div>},
-            SoundFunctorType::BuiltinOutput{..} => Default::default()}
+            _ => Default::default()}
     }
 
-    pub fn draw(&self, ctx: &web_sys::CanvasRenderingContext2d, offset: utils::Point, others: &[Self]) -> utils::JsResult<()> {
-        match (self.forwards().is_some(), self.backwardable()) {
-            (false, false) => return Err("a sound functor must be either forwardable or backwardable".into()),
-            (true,  true) => utils::Rhombus::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE)
-                .shift(-offset).draw(ctx),
-            (_, x) => utils::HorizontalArrow::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE, x)
-                .shift(-offset).draw(ctx)
-        }
-
-        if let Some(fwds) = self.forwards() {
-            let hitzone = self.get_conn_creation_hitzone().shift(-offset);
-            hitzone.draw(ctx);
-            for id in fwds {
-                let comp = others.get_or_js_error(*id, "sound functor #", "not found")?;
-                let dst = comp.location - offset;
-                ctx.move_to(hitzone.right().into(), hitzone.center().y.into());
-                ctx.line_to(dst.x.into(), dst.y.into());
+    pub fn set_param(&mut self, id: usize, value: f64) -> JsResult<bool> {
+        match &mut self.gen_type {
+            SoundGenType::Wave{waves, n_waves} => {
+                let (wave_id, param_id) = (id / 5, id % 5);
+                if wave_id == waves.len() {
+                    Ok(value.is_sign_negative().then(|| {
+                        waves.push(WaveDef::new(*n_waves));
+                        *n_waves += 1;
+                    }).is_some())
+                } else {
+                    let wave = waves.get_mut_or_js_error(wave_id, "wave component #", " not found")?;
+                    match param_id {
+                        0 => {
+                            wave.freq = value as f32;
+                            Ok(false)}
+                        1 => {
+                            wave.wave_type = *Sound::WAVE_TYPES
+                                .get_or_js_error(value as usize, "wave type #", " not found")?;
+                            Ok(false)}
+                        2 => Ok(value.is_sign_negative().then(||
+                            waves.remove(wave_id)).is_some()),
+                        3 => Ok(false), // TODO: tone input mode
+                        4 => Ok(false), // TODO: shift
+                        x => Err(format!("invalid parameter ID #{} of a `Wave` sound element", x).into())
+                    }
+                }
             }
-                
-            if let FocusType::Connecting(mut conn) = self.focus_type {
+
+            SoundGenType::Envelope{attack, decay, sustain, release, ..} => match id {
+                0 => {*attack  = value as u32; Ok(false)}
+                1 => {*decay   = value as u32; Ok(false)}
+                2 => {*sustain = value as f32; Ok(false)}
+                3 => {*release = value as u32; Ok(false)}
+                x => Err(format!("invalid parameter ID {} of an `Envelope` sound element", x).into())}
+
+            x => Err(format!("cannot set a parameter on a `{}` sound element", x.name()).into())
+        }
+    }
+
+    pub fn draw(&self, ctx: &CanvasRenderingContext2d, mut offset: Point) {
+        offset = -offset;
+        if self.forwardable().is_some() {
+            if self.backwardable().is_some() {
+                Rhombus::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE)
+                    .shift(offset).draw(ctx);
+            } else {
+                HorizontalArrow::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE, false)
+                    .shift(offset).draw(ctx);
+            }
+            let hitzone = self.get_conn_creation_hitzone().shift(offset);
+            hitzone.draw(ctx);
+            if let Focus::Connecting(mut conn) = self.focus {
+                conn += offset;
                 ctx.move_to(hitzone.right().into(), hitzone.center().y.into());
-                conn -= offset;
                 ctx.line_to(conn.x.into(), conn.y.into());
             }
-        }
-        Ok(ctx.stroke())
-    }
-
-    #[inline] fn get_conn_creation_hitzone(&self) -> impl utils::HitZone {
-        utils::HorizontalArrow::new(self.location, Self::VISUAL_SIZE / 2, Self::VISUAL_SIZE / 2, false)
-            .shift_x(Self::VISUAL_SIZE / 2)
-    }
-
-    pub fn handle_movement(&mut self, coords: Option<utils::Point>, ctx: &yew::html::Scope<Main>) -> utils::JsResult<()> {
-        self.focus_type = if let Some(coords) = coords {
-            match self.focus_type {
-                FocusType::None => 
-                    if self.forwards().is_some() && self.get_conn_creation_hitzone().contains(coords) {
-                        ctx.send_message(MainCmd::SetDesc(format!("{}: Connecting", self.name())));
-                        FocusType::Connecting(coords)
-                    } else {
-                        ctx.send_message(MainCmd::SetDesc(format!("{}: Moving", self.name())));
-                        FocusType::Moving(self.location - coords)
-                    }
-
-                FocusType::Moving(offset) => {
-                    self.location = coords + offset;
-                    FocusType::Moving(offset)}
-
-                FocusType::Connecting(_) => FocusType::Connecting(coords)
-            }
         } else {
-            match self.focus_type {
-                FocusType::Connecting(dst) => ctx.send_message_batch(vec![
-                    MainCmd::TryConnect(self.id, dst),
-                    MainCmd::Select(Some(self.id))]),
-                FocusType::Moving(_) => ctx.send_message(MainCmd::Select(Some(self.id))),
-                FocusType::None => ()};
-            FocusType::None};
-        Ok(())
+            HorizontalArrow::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE, true)
+                .shift(offset).draw(ctx);
+        }
     }
 
-    pub fn graph(&self, width: f64, height: f64) -> utils::JsResult<(web_sys::Path2d, f64, f64)> {
-        match &self.functor_type {
-            SoundFunctorType::Envelope {attack, decay, sustain, release, ..} => {
-                let res = (web_sys::Path2d::new()?, attack + decay);
+    pub fn graph(&self, width: f64, height: f64) -> JsResult<(Path2d, u32, u32)> {
+        match &self.gen_type {
+            SoundGenType::Envelope {attack, decay, sustain, release, ..} => {
+                let res = (Path2d::new()?, attack + decay);
                 let res = (res.0, res.1, res.1 + release);
                 res.0.move_to(0.0, height);
-                res.0.line_to(attack / res.2 * width, 0.0);
-                res.0.line_to(res.1 / res.2 * width, (1.0 - sustain) as f64 * height);
+                res.0.line_to(*attack as f64 / res.2 as f64 * width, 0.0);
+                res.0.line_to(res.1 as f64 / res.2 as f64 * width, (1.0 - sustain) as f64 * height);
                 res.0.line_to(width, height);
                 Ok(res)}
-            _ => Ok((web_sys::Path2d::new()?, f64::NAN, f64::NAN))
+            _ => Ok((Path2d::new()?, 0, 0))
         }
     }
 
     pub fn graphable(&self) -> bool {
-        match &self.functor_type {
-            SoundFunctorType::Envelope {..} => true,
-            _ => false
-        }
+        matches!(self.gen_type, SoundGenType::Envelope{..})
     }
 }

@@ -20,12 +20,12 @@
 				position: fixed;
 				left: 0;
 				top: 0;
-				bottom: 0;
 				padding: 1em;
 				display: flex;
 				gap: 1em;
 				background-color: #181818;
 				flex-direction: column}
+			#ctrl-panel:has(#general-ctrl) {bottom: 0}
 			#help-msg {
 				background-color: #232328;
 				padding: 1em;
@@ -60,7 +60,7 @@
 				color: #0069E1;
 				border: solid 3px transparent}
 			.button:hover {
-				border-color: #0069E1}
+				border: solid 3px #0069E1}
 			.button > svg {
 				stroke: #0069E1;
 				stroke-width: 3px;

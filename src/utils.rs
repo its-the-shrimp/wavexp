@@ -1,4 +1,8 @@
-use wasm_bindgen::JsCast;
+use std::{ptr, fmt::{Debug, Formatter, self, Display}, ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref}, cell::{RefMut, Ref, RefCell}, iter::successors};
+use js_sys::{Object as JsObject, Error as JsError};
+use wasm_bindgen::{JsCast, JsValue, throw_val};
+use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement};
+use crate::MainCmd;
 
 pub trait Check: Sized {
 	#[inline] fn check<F>(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
@@ -23,7 +27,7 @@ pub trait Tee: Sized {
 	}
 
     #[inline] fn js_log<'a>(self, label: &'a str) -> Self 
-    where Self: std::fmt::Debug {
+    where Self: Debug {
         js_log!("{}{:?}", label, &self); self
     }
 }
@@ -38,7 +42,7 @@ impl<T> Pipe for T {}
 pub trait BoolExt {
 	fn choose<T: Sized>(self, on_true: T, on_false: T) -> T;
     fn choose_with<T: Sized>(self, on_true: impl FnOnce() -> T, on_false: impl FnOnce() -> T) -> T;
-    fn then_negate<T: std::ops::Neg<Output=T>>(self, val: T) -> T;
+    fn then_negate<T: Neg<Output=T>>(self, val: T) -> T;
     fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
 }
 
@@ -51,7 +55,7 @@ impl BoolExt for bool {
         if self {on_true()} else {on_false()}
     }
 
-    #[inline] fn then_negate<T: std::ops::Neg<Output=T>>(self, val: T) -> T {
+    #[inline] fn then_negate<T: Neg<Output=T>>(self, val: T) -> T {
         if self {-val} else {val}
     }
 
@@ -89,9 +93,10 @@ impl<T, const M: usize> ArrayExt<T, M> for [T; M] {
 #[allow(non_camel_case_types)]
 #[allow(dead_code)]
 pub mod js_types {
-	pub type bool = js_sys::Boolean;
-	pub type number = js_sys::Number;
-	pub type str = js_sys::JsString;
+    use js_sys::{Number as JsNumber, JsString, Boolean as JsBoolean};
+	pub type bool = JsBoolean;
+	pub type number = JsNumber;
+	pub type str = JsString;
 }
 
 #[macro_export]
@@ -104,13 +109,14 @@ macro_rules! js_obj {
 }
 pub use js_obj;
 
+pub use web_sys::console::log_1;
 #[macro_export]
 macro_rules! js_log {
 	($arg:literal) => {
-		$crate::web_sys::console::log_1(&$arg.to_owned().into())
+		$crate::utils::log_1(&$arg.to_owned().into())
 	};
 	($f:literal, $($arg:expr),*) => {
-		$crate::web_sys::console::log_1(&format!($f, $($arg),*).into())
+		$crate::utils::log_1(&format!($f, $($arg),*).into())
 	}
 }
 pub use js_log;
@@ -131,28 +137,26 @@ macro_rules! js_try {
 }
 pub use js_try;
 
-use crate::MainCmd;
-
-pub fn window() -> crate::web_sys::Window {
+pub fn window() -> HtmlWindow {
 	unsafe {web_sys::window().unwrap_unchecked()}
 }
 
-pub fn document() -> crate::web_sys::Document {
+pub fn document() -> HtmlDocument {
 	unsafe {web_sys::window().unwrap_unchecked().document().unwrap_unchecked()}
 }
 
-fn to_error_with_msg(err: wasm_bindgen::JsValue, msg: &str) -> wasm_bindgen::JsValue {
+fn to_error_with_msg(err: JsValue, msg: &str) -> JsValue {
     let s = format!("error while {}: {}", msg, 
-        match err.dyn_into::<js_sys::Error>() {
+        match err.dyn_into::<JsError>() {
             Ok(val) => val.message().into(),
-            Err(val) => js_sys::Object::from(val).to_string()});
-    js_sys::Error::new(&s).into()
+            Err(val) => JsObject::from(val).to_string()});
+    JsError::new(&s).into()
 }
 
-pub type JsResult<T> = Result<T, wasm_bindgen::JsValue>;
+pub type JsResult<T> = Result<T, JsValue>;
 
 pub trait ResultToJsResult<T, E> {
-    fn to_js_result(self) -> JsResult<T> where E: std::fmt::Display;
+    fn to_js_result(self) -> JsResult<T> where E: Display;
 }
 
 pub trait OptionToJsResult<T> {
@@ -170,18 +174,18 @@ pub trait JsResultUtils<T>: Sized {
 }
 
 impl<T, E> ResultToJsResult<T, E> for Result<T, E> {
-    fn to_js_result(self) -> JsResult<T> where E: std::fmt::Display {
+    fn to_js_result(self) -> JsResult<T> where E: Display {
         self.map_err(|e| e.to_string().into())
     }
 }
 
 impl<T> OptionToJsResult<T> for Option<T> {
     #[inline] fn to_js_result_with(self, f: impl FnOnce() -> String) -> JsResult<T> {
-        self.ok_or_else(|| js_sys::Error::new(&f()).into())
+        self.ok_or_else(|| JsError::new(&f()).into())
     }
 
     #[inline] fn to_js_result(self, msg: &str) -> JsResult<T> {
-        self.ok_or_else(|| js_sys::Error::new(msg).into())
+        self.ok_or_else(|| JsError::new(msg).into())
     }
 }
 
@@ -196,13 +200,13 @@ impl<T> JsResultUtils<T> for JsResult<T> {
     #[inline] fn expect_throw_with(self, f: impl FnOnce() -> String) -> T {
 		match self {
 			Ok(val)  => val,
-			Err(err) => wasm_bindgen::throw_val(to_error_with_msg(err, &f()))}
+			Err(err) => throw_val(to_error_with_msg(err, &f()))}
 	}
 
     #[inline] fn expect_throw(self, msg: &str) -> T {
         match self {
             Ok(val) => val,
-            Err(err) => wasm_bindgen::throw_val(to_error_with_msg(err, msg))}
+            Err(err) => throw_val(to_error_with_msg(err, msg))}
     }
 
     #[inline] fn report_err_with(self, f: impl FnOnce() -> String) -> Self {
@@ -217,15 +221,15 @@ impl<T> JsResultUtils<T> for JsResult<T> {
 }
 
 pub trait HtmlCanvasExt {
-    fn get_2d_context(&self) -> JsResult<web_sys::CanvasRenderingContext2d>;
+    fn get_2d_context(&self) -> JsResult<CanvasRenderingContext2d>;
     fn sync(&self);
 }
 
-impl HtmlCanvasExt for web_sys::HtmlCanvasElement {
-    fn get_2d_context(&self) -> JsResult<web_sys::CanvasRenderingContext2d> {
+impl HtmlCanvasExt for HtmlCanvasElement {
+    fn get_2d_context(&self) -> JsResult<CanvasRenderingContext2d> {
         Ok(self.get_context("2d")?
             .to_js_result("the element has no rendering context")?
-            .unchecked_into::<web_sys::CanvasRenderingContext2d>())
+            .unchecked_into::<CanvasRenderingContext2d>())
     }
 
     fn sync(&self) {
@@ -235,11 +239,11 @@ impl HtmlCanvasExt for web_sys::HtmlCanvasElement {
 }
 
 pub trait HtmlDocumentExt {
-    fn element_dyn_into<T: wasm_bindgen::JsCast>(&self, id: &str) -> JsResult<T>;
+    fn element_dyn_into<T: JsCast>(&self, id: &str) -> JsResult<T>;
 }
 
-impl HtmlDocumentExt for web_sys::Document {
-    fn element_dyn_into<T: wasm_bindgen::JsCast>(&self, id: &str) -> JsResult<T> {
+impl HtmlDocumentExt for HtmlDocument {
+    fn element_dyn_into<T: JsCast>(&self, id: &str) -> JsResult<T> {
         Ok(self.get_element_by_id(id).to_js_result_with(|| format!("element #{} not found", id))?
             .dyn_into::<T>().ok().to_js_result_with(|| format!("element #{} is not of type `{}`", id, std::any::type_name::<T>()))?)
     }
@@ -250,8 +254,8 @@ pub enum GetVarError {
     Overlap(usize)
 }
 
-impl std::fmt::Display for GetVarError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for GetVarError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             GetVarError::OutOfBounds(x) => write!(f, "index #{} is out of bounds", x),
             GetVarError::Overlap(x) => write!(f, "index #{} appeared more than once", x)}
@@ -287,7 +291,7 @@ impl<T> SliceExt<T> for [T] {
 
     #[inline] fn get_var<'a>(&'a self, ids: &[usize]) -> Result<Vec<&'a T>, GetVarError> {
         let len = self.len();
-        for (id, rest) in std::iter::successors(ids.split_first(), |x| x.1.split_first()) {
+        for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
             if *id >= len {return Err(GetVarError::OutOfBounds(*id))}
             if rest.contains(id) {return Err(GetVarError::Overlap(*id))}
         }
@@ -299,7 +303,7 @@ impl<T> SliceExt<T> for [T] {
 
     #[inline] fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Result<Vec<&'a mut T>, GetVarError> {
         let len = self.len();
-        for (id, rest) in std::iter::successors(ids.split_first(), |x| x.1.split_first()) {
+        for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
             if *id >= len {return Err(GetVarError::OutOfBounds(*id))}
             if rest.contains(id) {return Err(GetVarError::Overlap(*id))}
         }
@@ -310,6 +314,24 @@ impl<T> SliceExt<T> for [T] {
     }
 }
 
+pub trait VecExt<T> {
+    fn try_swap_remove(&mut self, index: usize) -> Option<T>;
+}
+
+impl<T> VecExt<T> for Vec<T> {
+    fn try_swap_remove(&mut self, index: usize) -> Option<T> {
+        let len = self.len();
+        if index >= len {return None}
+        unsafe {
+            let value = ptr::read(self.as_ptr().add(index));
+            let base_ptr = self.as_mut_ptr();
+            ptr::copy(base_ptr.add(len - 1), base_ptr.add(index), 1);
+            self.set_len(len - 1);
+            Some(value)
+        }
+    }
+}
+
 // this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
 // them from containing types that don't implement `Sync`. On any other architecture this
 // limitation makes sense, but in Webassembly, which doesn't support threading, this limitation is meaningless.
@@ -317,7 +339,7 @@ pub struct WasmCell<T>(T);
 
 unsafe impl<T> Sync for WasmCell<T> {}
 
-impl<T> std::ops::Deref for WasmCell<T> {
+impl<T> Deref for WasmCell<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {&self.0}
 }
@@ -326,25 +348,25 @@ impl<T> WasmCell<T> {
     pub const fn new(val: T) -> Self {Self(val)}
 }
 
-pub struct MaybeCell<T>(std::cell::RefCell<Option<T>>);
+pub struct MaybeCell<T>(RefCell<Option<T>>);
 
 impl<T> MaybeCell<T> {
     #[inline] pub const fn new() -> Self {
-        Self(std::cell::RefCell::new(None))
+        Self(RefCell::new(None))
     }
 
-    #[inline] pub fn get<'a>(&'a self) -> JsResult<std::cell::Ref<'a, T>> {
-        std::cell::Ref::filter_map(self.0.try_borrow().to_js_result()?,
+    #[inline] pub fn get<'a>(&'a self) -> JsResult<Ref<'a, T>> {
+        Ref::filter_map(self.0.try_borrow().to_js_result()?,
             |x| x.as_ref()).ok().to_js_result("MaybeCell object not initialised")
     }
 
-    #[inline] pub fn get_mut<'a>(&'a self) -> JsResult<std::cell::RefMut<'a, T>> {
-        std::cell::RefMut::filter_map(self.0.try_borrow_mut().to_js_result()?,
+    #[inline] pub fn get_mut<'a>(&'a self) -> JsResult<RefMut<'a, T>> {
+        RefMut::filter_map(self.0.try_borrow_mut().to_js_result()?,
             |x| x.as_mut()).ok().to_js_result("MaybeCell object not initialised")
     }
 
     #[inline] pub fn set(&self, val: T) -> JsResult<()> {
-        std::cell::RefMut::map(self.0.try_borrow_mut().to_js_result()?,
+        RefMut::map(self.0.try_borrow_mut().to_js_result()?,
             |x| x.insert(val));
         Ok(())
     }
@@ -363,33 +385,33 @@ impl From<Point> for [i32; 2] {
     fn from(value: Point) -> Self {[value.x, value.y]}
 }
 
-impl std::ops::Add for Point {
+impl Add for Point {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
         Self{x: self.x + rhs.x, y: self.y + rhs.y}
     }
 }
 
-impl std::ops::AddAssign for Point {
+impl AddAssign for Point {
     fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs
     }
 }
 
-impl std::ops::Sub for Point {
+impl Sub for Point {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self::Output {
         Self{x: self.x - rhs.x, y: self.y - rhs.y}
     }
 }
 
-impl std::ops::SubAssign for Point {
+impl SubAssign for Point {
     fn sub_assign(&mut self, rhs: Self) {
         *self = *self - rhs
     }
 }
 
-impl std::ops::Neg for Point {
+impl Neg for Point {
     type Output = Self;
     fn neg(self) -> Self::Output {
         Self{x: -self.x, y: -self.y}
@@ -414,7 +436,7 @@ impl Point {
     }
 }
 
-pub trait HitZone: Sized + std::fmt::Debug {
+pub trait HitZone: Sized + Debug {
     fn contains(&self, point: Point) -> bool;
     fn     left(&self) -> i32;
     fn      top(&self) -> i32;
@@ -422,7 +444,7 @@ pub trait HitZone: Sized + std::fmt::Debug {
     fn   bottom(&self) -> i32;
     fn   center(&self) -> Point;
     fn    shift(self, offset: Point)  -> Self;
-    fn     draw(&self, ctx: &web_sys::CanvasRenderingContext2d);
+    fn     draw(&self, ctx: &CanvasRenderingContext2d);
 
     #[inline] fn   width(&self) -> i32 {self.right() - self.left()}
     #[inline] fn  height(&self) -> i32 {self.bottom() - self.top()}
@@ -449,7 +471,7 @@ impl HitZone for Rect {
         Self(self.0 + offset, self.1 + offset)
     }
 
-    fn draw(&self, ctx: &web_sys::CanvasRenderingContext2d) {
+    fn draw(&self, ctx: &CanvasRenderingContext2d) {
         ctx.rect(self.left().into(), self.top().into(), self.width().into(), self.height().into())
     }
 }
@@ -495,7 +517,7 @@ impl HitZone for Rhombus {
         self
     }
 
-    fn draw(&self, ctx: &web_sys::CanvasRenderingContext2d) {
+    fn draw(&self, ctx: &CanvasRenderingContext2d) {
         ctx.move_to(self.center.x.into(), self.top().into());
         ctx.line_to(self.right().into(), self.center.y.into());
         ctx.line_to(self.center.x.into(), self.bottom().into());
@@ -535,7 +557,7 @@ impl HitZone for HorizontalArrow {
         self
     }
 
-    fn draw(&self, ctx: &web_sys::CanvasRenderingContext2d) {
+    fn draw(&self, ctx: &CanvasRenderingContext2d) {
         ctx.move_to(self.back_center.x.into(), self.top().into());
         ctx.line_to((self.back_center.x + self.is_left.then_negate(self.w)).into(),
             self.back_center.y.into());
