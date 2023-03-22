@@ -1,4 +1,4 @@
-use std::{ptr, fmt::{Debug, Formatter, self, Display}, ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref}, cell::{RefMut, Ref, RefCell}, iter::successors};
+use std::{ptr, fmt::{Debug, Formatter, self, Display}, ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref}, cell::{RefMut, Ref, RefCell}, iter::successors, error::Error, collections::TryReserveError};
 use js_sys::{Object as JsObject, Error as JsError};
 use wasm_bindgen::{JsCast, JsValue, throw_val};
 use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement};
@@ -314,20 +314,72 @@ impl<T> SliceExt<T> for [T] {
     }
 }
 
+#[derive(Debug)]
+pub struct SwapRemoveError {
+    index: usize,
+    len: usize
+}
+
+impl Display for SwapRemoveError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "swap_remove index (is {}) should be < len (is {})", self.index, self.len)
+    }
+}
+
+impl Error for SwapRemoveError {}
+
+#[derive(Debug)]
+pub enum InsertError {
+    Index{index: usize, len: usize},
+    Alloc(TryReserveError)
+}
+
+impl Display for InsertError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Index{index, len} => write!(f, "insertion index (is {}) should be <= len (is {})", index, len),
+            Self::Alloc(err) => Debug::fmt(err, f)
+        }
+    }
+}
+
+impl Error for InsertError {}
+
 pub trait VecExt<T> {
-    fn try_swap_remove(&mut self, index: usize) -> Option<T>;
+    fn try_swap_remove(&mut self, index: usize) -> Result<T, SwapRemoveError>;
+    fn try_insert<'a>(&'a mut self, index: usize, element: T) -> Result<&'a mut T, InsertError>;
 }
 
 impl<T> VecExt<T> for Vec<T> {
-    fn try_swap_remove(&mut self, index: usize) -> Option<T> {
+    fn try_swap_remove(&mut self, index: usize) -> Result<T, SwapRemoveError> {
         let len = self.len();
-        if index >= len {return None}
+        if index >= len {
+            return Err(SwapRemoveError{index, len});
+        }
         unsafe {
             let value = ptr::read(self.as_ptr().add(index));
             let base_ptr = self.as_mut_ptr();
             ptr::copy(base_ptr.add(len - 1), base_ptr.add(index), 1);
             self.set_len(len - 1);
-            Some(value)
+            Ok(value)
+        }
+    }
+
+    fn try_insert<'a>(&'a mut self, index: usize, element: T) -> Result<&'a mut T, InsertError> {
+        let len = self.len();
+        if len == self.capacity() {
+            self.try_reserve(1).map_err(InsertError::Alloc)?;
+        }
+        unsafe {
+            let p = self.as_mut_ptr().add(index);
+            if index < len {
+                ptr::copy(p, p.add(1), len - index);
+            } else if index > len {
+                return Err(InsertError::Index{index, len})
+            }
+            ptr::write(p, element);
+            self.set_len(len + 1);
+            Ok(&mut *p)
         }
     }
 }

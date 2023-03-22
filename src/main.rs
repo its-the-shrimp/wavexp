@@ -17,7 +17,7 @@ use utils::{
     JsResultUtils, OptionToJsResult, JsResult,
     Point,
     MaybeCell, WasmCell,
-    document, window};
+    document, window, ResultToJsResult};
 use web_sys::{
     console::warn_1,
     Path2d as JsPath2d,
@@ -36,10 +36,25 @@ use yew::{
     Callback,
     Component,
     Context};
-use std::rc::Rc;
 
-struct AnimationCtx {
-    analyser: Rc<AnalyserNode>,
+#[derive(Clone, Copy, Debug)]
+enum SoundState {
+    Active(f64),
+    Ending(f64)
+}
+
+impl From<SoundState> for f64 {
+    fn from(value: SoundState) -> Self {
+        match value {
+            SoundState::Active(x) => x,
+            SoundState::Ending(x) => x}
+    }
+}
+
+// responsible for playing sounds and frame-by-frame animations
+pub struct Player {
+    audio_context: AudioContext,
+    analyser: AnalyserNode,
     graph_canvas: HtmlCanvasElement,
     sound_visualiser_canvas: HtmlCanvasElement,
     renderer: Renderer,
@@ -49,84 +64,160 @@ struct AnimationCtx {
     graph_in_span: u32,
     graph_span: u32,
     pbar_start: f64,
-    js_callback: JsFunction
+    js_callback: JsFunction,
+    sounds: Vec<(Sound, SoundState)>,
+    ending_all: bool
 }
 
-static ANIMATION_CTX: WasmCell<MaybeCell<AnimationCtx>> = WasmCell::new(MaybeCell::new());
+static GLOBAL_PLAYER: WasmCell<MaybeCell<Player>> = WasmCell::new(MaybeCell::new());
 
-fn start_animation_loop() -> JsResult<()> {
-    fn render(time: f64) {
-        _ = js_try!{type = !:
-                let mut handle = ANIMATION_CTX.get_mut()?;
-                let AnimationCtx{ref analyser, ref mut renderer, 
-                    ref graph_canvas, ref sound_visualiser_canvas,
-                    ref graph, ref solid_line, ref dotted_line,
-                    ref graph_in_span, ref graph_span, ref mut pbar_start,
-                    ref js_callback} = *handle;
-                let graph_out_span = (graph_span - graph_in_span) as f64;
+impl Player {
+    fn init_global(graph_canvas: HtmlCanvasElement, sound_visualiser_canvas: HtmlCanvasElement)
+    -> JsResult<()> {
+        fn render(time: f64) {
+            _ = js_try!{type = !:
+                    let mut handle = GLOBAL_PLAYER.get_mut()?;
+                    let Player{ref analyser, ref mut renderer, 
+                        ref graph_canvas, ref sound_visualiser_canvas,
+                        ref graph, ref solid_line, ref dotted_line,
+                        ref graph_in_span, ref graph_span, ref mut pbar_start,
+                        ref js_callback, ref mut sounds, ref mut ending_all, ..} = *handle;
+                    let graph_out_span = (graph_span - graph_in_span) as f64;
 
-                let err1 = js_try!{
-                    let buf = renderer.set_size(sound_visualiser_canvas.width() as usize, sound_visualiser_canvas.height() as usize)
-                        .get_in_buffer();
-                    analyser.get_byte_frequency_data(buf);
-                    sound_visualiser_canvas.get_2d_context()?.put_image_data(
-                        &JsImageData::new_with_u8_clamped_array(
-                            JsClamped(renderer.graph().get_out_bytes()), sound_visualiser_canvas.width())?,
-                        0.0, 0.0)?;
-                }.explain_err("re-rendering the sound visualisation");
+                    let err1 = js_try!{
+                        let buf = renderer.set_size(sound_visualiser_canvas.width() as usize, sound_visualiser_canvas.height() as usize)
+                            .get_in_buffer();
+                        analyser.get_byte_frequency_data(buf);
+                        sound_visualiser_canvas.get_2d_context()?.put_image_data(
+                            &JsImageData::new_with_u8_clamped_array(
+                                JsClamped(renderer.graph().get_out_bytes()), sound_visualiser_canvas.width())?,
+                            0.0, 0.0)?;
+                    }.explain_err("re-rendering the sound visualisation");
 
-                let err2 = js_try!{
-                    let (w, h, ctx) = (graph_canvas.width().into(), graph_canvas.height().into(), graph_canvas.get_2d_context()?);
-                    ctx.set_fill_style(&"#181818".into());
-                    ctx.fill_rect(0.0, 0.0, w, h);
-                    if *graph_span > 0 {
-                        ctx.set_line_width(3.0);
-                        ctx.set_stroke_style(&"#0069E1".into());
-                        ctx.stroke_with_path(graph);
-                        if !pbar_start.is_nan() {
-                            if pbar_start.is_infinite() {
-                                *pbar_start = time.copysign(*pbar_start);
-                            }
-                            if pbar_start.is_sign_negative() && (time + *pbar_start > graph_out_span) {
-                                *pbar_start = f64::NAN;
-                            } else {
-                                let x = if pbar_start.is_sign_positive() {
-                                    (time - *pbar_start).min(*graph_in_span as f64)
+                    let err2 = js_try!{
+                        let (w, h, ctx) = (graph_canvas.width().into(), graph_canvas.height().into(), graph_canvas.get_2d_context()?);
+                        ctx.set_fill_style(&"#181818".into());
+                        ctx.fill_rect(0.0, 0.0, w, h);
+                        if *graph_span > 0 {
+                            ctx.set_line_width(3.0);
+                            ctx.set_stroke_style(&"#0069E1".into());
+                            ctx.stroke_with_path(graph);
+                            if !pbar_start.is_nan() {
+                                if pbar_start.is_infinite() {
+                                    *pbar_start = time.copysign(*pbar_start);
+                                }
+                                if pbar_start.is_sign_negative() && (time + *pbar_start > graph_out_span) {
+                                    *pbar_start = f64::NAN;
                                 } else {
-                                    time + *pbar_start + *graph_in_span as f64
-                                } / *graph_span as f64 * w;
-                                ctx.set_line_dash(dotted_line)?;
-                                ctx.set_line_width(1.0);
-                                ctx.set_line_dash_offset(time / 100.0);
-                                ctx.begin_path();
-                                ctx.move_to(x, 0.0);
-                                ctx.line_to(x, h);
-                                ctx.stroke();
-                                ctx.set_line_dash(solid_line)?;
+                                    let x = if pbar_start.is_sign_positive() {
+                                        (time - *pbar_start).min(*graph_in_span as f64)
+                                    } else {
+                                        time + *pbar_start + *graph_in_span as f64
+                                    } / *graph_span as f64 * w;
+                                    ctx.set_line_dash(dotted_line)?;
+                                    ctx.set_line_width(1.0);
+                                    ctx.set_line_dash_offset(time / 100.0);
+                                    ctx.begin_path();
+                                    ctx.move_to(x, 0.0);
+                                    ctx.line_to(x, h);
+                                    ctx.stroke();
+                                    ctx.set_line_dash(solid_line)?;
+                                }
                             }
                         }
-                    }
-                }.explain_err("re-rendering the graphical representation of a sound element's parameters");
+                    }.explain_err("re-rendering the graphical representation of a sound element's parameters");
 
-                let err3 = window().request_animation_frame(js_callback)
-                    .explain_err("re-registering the animation callback");
+                    let err3 = js_try!{
+                        if *ending_all {
+                            *ending_all = false;
+                            for (sound, state) in sounds.iter_mut() {
+                                *state = SoundState::Ending(sound.end()? as f64 + time);
+                            }
+                            sounds.sort_unstable_by(|&(_, s1), &(_, s2)|
+                                f64::total_cmp(&s1.into(), &s2.into()));
+                        }
+                        let len = sounds.len();
+                        let start = match sounds.iter().rev().position(|&(_, state)| time < state.into()) {
+                            Some(x) => (x > 0).then(|| len - x),
+                            None => Some(0)};
+                        if let Some(start) = start {
+                            let pending: Vec<_> = sounds.drain(start..).collect();
+                            for (mut sound, mut state) in pending {
+                                match state {
+                                    SoundState::Active(_) => {
+                                        state = match sound.progress()? {
+                                            Some(after) => SoundState::Active(after as f64 + time),
+                                            None => SoundState::Active(f64::INFINITY)};
+                                        let time: f64 = state.into();
+                                        match sounds.iter().rev().position(|&(_, other)| time <= other.into()) {
+                                            Some(id) => sounds.try_insert(len - id, (sound, state)),
+                                            None => sounds.try_insert(0, (sound, state))
+                                        }.to_js_result()?;
+                                    }
+                                    SoundState::Ending(_) => sound.disconnect()?
+                                }
+                            }
+                        }
+                    }.explain_err("playing the sounds");
 
-                err1.and(err2).and(err3)?;
-                return
-        }.report_err("rendering frame-by-frame animation");
+                    err1.and(err2).and(err3)
+                        .and(window().request_animation_frame(js_callback)
+                            .explain_err("re-registering the animation callback"))?;
+                    return
+            }.report_err("rendering frame-by-frame animation");
+        }
+
+        let audio_context = AudioContext::new()?;
+        let analyser = AnalyserNode::new(&audio_context)?;
+        analyser.connect_with_audio_node(&audio_context.destination())?;
+
+        GLOBAL_PLAYER.set(Self{
+            audio_context, analyser,
+            graph_canvas, sound_visualiser_canvas,
+            renderer: Renderer::new(),
+            solid_line: JsArray::new().into(),
+            dotted_line: JsArray::of2(&(10.0).into(), &(10.0).into()).into(),
+            graph: JsPath2d::new()?,
+            graph_in_span: 0,
+            graph_span: 0,
+            pbar_start: f64::NAN,
+            js_callback: JsClosure::<dyn Fn(f64)>::new(render)
+                .into_js_value().unchecked_into(),
+            sounds: vec![], ending_all: false
+        })?;
+        Ok(render(0.0))
     }
 
-    ANIMATION_CTX.get_mut()
-        .explain_err("starting the animation loop")?
-        .js_callback = JsClosure::<dyn Fn(f64)>::new(render)
-            .into_js_value().unchecked_into::<JsFunction>();
-    render(0.0);
-    Ok(())
+    fn set_graph(&mut self, graph: JsPath2d, in_span: u32, span: u32) {
+        self.graph = graph;
+        self.graph_in_span = in_span;
+        self.graph_span = span;
+    }
+
+    fn clear_graph(&mut self) {self.graph_span = 0}
+
+    fn toggle_graph_play_animation(&mut self) {
+        self.pbar_start = (self.pbar_start > 0.0)
+            .choose(f64::NEG_INFINITY, f64::INFINITY);
+    }
+
+    fn play_sound(&mut self, sound: Sound) -> JsResult<()> {
+        if matches!(sound, Sound::End) {
+            self.ending_all = true;
+        } else {
+            self.sounds.push((sound.prepare(&self.analyser)?, SoundState::Active(0.0)));
+        }
+        Ok(())
+    }
+
+    fn audio_context(&self) -> &AudioContext {
+        &self.audio_context
+    }
 }
 
+
+
 pub struct Main {
-    analyser: Rc<AnalyserNode>,
-    player: AudioContext,
     selected_comp: Option<usize>,
     focused_comp: Option<usize>,
     hovered_comp: Option<usize>,
@@ -192,20 +283,17 @@ impl Component for Main {
         *unsafe{&mut MAINCMD_SENDER} = Some(ctx.link().callback(|msg| msg));
 
         js_try!{
-            let player = AudioContext::new()?;
-            let analyser = Rc::new(AnalyserNode::new(&player)?);
             let sound_comps = vec![
                 SoundGen::new_input(0, Point{x:300, y:500}),
                 SoundGen::new_wave(1, Point{x:300, y:350}),
                 SoundGen::new_envelope(2, Point{x:500, y:350}),
-                SoundGen::new_output(3, Point{x:750, y:350}, analyser.clone())];
-            analyser.connect_with_audio_node(&player.destination())?;
+                SoundGen::new_output(3, Point{x:750, y:350})];
             let help_msg_bar: HtmlElement = document().create_element("div")
                 .expect_throw("creating #help-msg element").unchecked_into();
             help_msg_bar.set_id("help-msg");
             help_msg_bar.set_inner_text(Self::DEF_HELP_MSG);
 
-            Self {analyser, sound_comps, player, help_msg_bar,
+            Self {sound_comps, help_msg_bar,
                 selected_comp: None, focused_comp: None, hovered_comp: None,
                 plane_offset: Point::ZERO, plane_moving: false,
                 graph_canvas: JsValue::UNDEFINED.unchecked_into(),
@@ -301,11 +389,12 @@ impl Component for Main {
                         js_try!{
                             match param_id {
                                 0 => { // starting to play the sounds
-                                    ANIMATION_CTX.get_mut()?.pbar_start = value;
+                                    let mut player = GLOBAL_PLAYER.get_mut()?;
+                                    player.toggle_graph_play_animation();
                                     let sound = value.is_sign_positive().choose(Sound::InputFreq(0.0), Sound::End);
                                     traverse(&self.connections, 0, sound, &mut |sound, _, dst_id| {
                                         self.sound_comps.get_mut_or_js_error(dst_id, "sound element #", " not found")?
-                                            .transform(&self.player, sound)
+                                            .transform(&mut player, sound)
                                     })?;
                                     return false
                                 }
@@ -322,10 +411,8 @@ impl Component for Main {
                                     if value.is_sign_positive() {return false}
                                     let selected_comp_id = self.selected_comp
                                         .to_js_result("no sound element selected")?;
-                                    self.sound_comps.try_swap_remove(selected_comp_id)
-                                        .to_js_result_with(|| format!("sound element #{} not found", selected_comp_id))?;
-                                    self.connections.try_swap_remove(selected_comp_id)
-                                        .to_js_result_with(|| format!("sound element #{} not found", selected_comp_id))?;
+                                    self.sound_comps.try_swap_remove(selected_comp_id).to_js_result()?;
+                                    self.connections.try_swap_remove(selected_comp_id).to_js_result()?;
                                     let len = self.connections.len();
                                     for conns in self.connections.iter_mut() {
                                         conns.retain_mut(|x| {
@@ -346,12 +433,9 @@ impl Component for Main {
                         let comp = self.sound_comps
                             .get_mut_or_js_error(comp_id, "sound component #", " not found")?;
                         needs_html_rerender = comp.set_param(param_id, value)?;
-                        let (graph, graph_in_span, graph_span)
+                        let (graph, in_span, span)
                             = comp.graph(self.graph_canvas.width().into(), self.graph_canvas.height().into())?;
-                        let mut ctx = ANIMATION_CTX.get_mut()?;
-                        ctx.graph = graph;
-                        ctx.graph_in_span = graph_in_span;
-                        ctx.graph_span = graph_span;
+                        GLOBAL_PLAYER.get_mut()?.set_graph(graph, in_span, span);
                     }
                 }.explain_err("handling `MainCmd::SetParam` message")?,
 
@@ -371,15 +455,12 @@ impl Component for Main {
                 MainCmd::Select(id) => js_try!{type = !:
                     self.selected_comp = id.filter(|id| Some(id) != self.selected_comp.as_ref());
                     if let Some(id) = self.selected_comp {
-                        let (graph, graph_in_span, graph_span) = self.sound_comps
+                        let (graph, in_span, span) = self.sound_comps
                             .get_or_js_error(id, "sound functor #", " not found")?
                             .graph(self.graph_canvas.width().into(), self.graph_canvas.height().into())?;
-                        let mut ctx = ANIMATION_CTX.get_mut()?;
-                        ctx.graph = graph;
-                        ctx.graph_in_span = graph_in_span;
-                        ctx.graph_span = graph_span;
+                        GLOBAL_PLAYER.get_mut()?.set_graph(graph, in_span, span);
                     } else {
-                        ANIMATION_CTX.get_mut()?.graph_span = 0}
+                        GLOBAL_PLAYER.get_mut()?.clear_graph()}
                     return true
                 }.explain_err("handling `MainCmd::Select` message")?,
 
@@ -469,19 +550,8 @@ impl Component for Main {
                     self.render_editor_plane()?;
                 }.explain_err("drawing the editor plane for the first time")?;
 
-                ANIMATION_CTX.set(AnimationCtx {
-                    analyser: self.analyser.clone(), renderer: Renderer::new(),
-                    sound_visualiser_canvas: self.sound_visualiser_canvas.clone(),
-                    graph_canvas: self.graph_canvas.clone(),
-                    solid_line: JsArray::new().into(),
-                    dotted_line: JsArray::of2(&(10.0).into(), &(10.0).into()).into(),
-                    graph: JsPath2d::new()?,
-                    graph_in_span: 0,
-                    graph_span: 0,
-                    pbar_start: f64::NAN,
-                    js_callback: Default::default() // initialized later in `start_animation_loop`
-                })?;
-                start_animation_loop()?;
+                Player::init_global(self.graph_canvas.clone(),
+                    self.sound_visualiser_canvas.clone())?;
             }
         }.expect_throw("rendering the main element");
     }

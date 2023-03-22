@@ -1,14 +1,10 @@
-use std::{
-    rc::{Rc, Weak},
-    sync::Mutex, ops::Not};
-use gloo_timers::callback::Timeout;
+use std::ops::Not;
 use wasm_bindgen::JsCast;
 use web_sys::{
     AudioNode,
     AudioContext,
     GainNode, GainOptions,
     OscillatorNode, OscillatorOptions, OscillatorType,
-    AnalyserNode,
     CanvasRenderingContext2d, Path2d};
 use yew::html;
 use crate::{
@@ -18,10 +14,10 @@ use crate::{
         HitZone,
         HorizontalArrow,
         Rhombus,
-        JsResultUtils, BoolExt, ResultToJsResult, OptionToJsResult, SliceExt},
+        JsResultUtils, BoolExt, SliceExt},
     input::{Switch, Slider, Button},
     MainCmd,
-    js_try};
+    js_try, Player};
 
 pub struct WaveDef{id: usize, freq: f32, wave_type: OscillatorType}
 
@@ -31,7 +27,7 @@ impl WaveDef {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Sound {
     InputFreq(f32),
     Wave(GainNode),
@@ -114,7 +110,7 @@ impl Sound {
         }
     }
 
-    fn progress(&mut self) -> JsResult<Option<u32>> {
+    pub fn progress(&mut self) -> JsResult<Option<u32>> {
         js_try!{
             match self {
                 Self::Wave(ctrl) => {
@@ -136,7 +132,7 @@ impl Sound {
     }
 
     // the returned float signifies when the object can be discarded
-    pub fn end(self) -> JsResult<u32> {
+    pub fn end(&mut self) -> JsResult<u32> {
         match self {
             Self::Wave(ctrl) => {
                 let ctx: AudioContext = ctrl.context().unchecked_into();
@@ -146,10 +142,18 @@ impl Sound {
             Self::Envelope{release, ctrl, ..} => {
                 let ctx: AudioContext = ctrl.context().unchecked_into();
                 ctrl.gain().cancel_scheduled_values(0.0)?
-                    .linear_ramp_to_value_at_time(f32::MIN_POSITIVE, ctx.current_time() + release as f64 / 1000.0)?;
-                Ok(release)
+                    .linear_ramp_to_value_at_time(f32::MIN_POSITIVE, ctx.current_time() + *release as f64 / 1000.0)?;
+                Ok(*release)
             }
             x => Err(format!("`{}` sound cannot be played", x.name()).into())
+        }
+    }
+
+    pub fn disconnect(self) -> JsResult<()> {
+        match self {
+            Self::Wave(ctrl) | Self::Envelope{ctrl, ..}
+                => ctrl.disconnect(),
+            _ => Ok(())
         }
     }
 }
@@ -165,8 +169,7 @@ enum SoundGenType {
     Input,
     Wave{waves: Vec<WaveDef>, n_waves: usize},
     Envelope{attack: u32, decay: u32, sustain: f32, release: u32},
-    Output{analyser: Rc<AnalyserNode>, sounds: Vec<Rc<Mutex<(Sound, Option<Timeout>)>>>}
-    // this is absolutely ugly
+    Output,
 }
 
 impl SoundGenType {
@@ -203,8 +206,8 @@ impl SoundGen {
             location, focus: Focus::None, id}
     }
 
-    #[inline] pub fn new_output(id: usize, location: Point, analyser: Rc<AnalyserNode>) -> Self {
-        Self{gen_type: SoundGenType::Output{analyser, sounds: vec![]},
+    #[inline] pub fn new_output(id: usize, location: Point) -> Self {
+        Self{gen_type: SoundGenType::Output,
             location, focus: Focus::None, id}
     }
 
@@ -260,32 +263,14 @@ impl SoundGen {
         cmd
     }
 
-    pub fn transform(&mut self, ctx: &AudioContext, sound: Sound) -> JsResult<Sound> {
-        match &mut self.gen_type {
+    pub fn transform(&mut self, player: &mut Player, sound: Sound) -> JsResult<Sound> {
+        let ctx = player.audio_context();
+        match &self.gen_type {
             SoundGenType::Wave{waves, ..} => sound.wave(ctx, waves.iter()),
             SoundGenType::Envelope{attack, decay, sustain, release} =>
                 sound.envelope(ctx, *attack, *decay, *sustain, *release),
-            SoundGenType::Output{analyser, sounds} => {
-                fn poll_sound(sound: Weak<Mutex<(Sound, Option<Timeout>)>>) {
-                    _ = js_try!{
-                        let Some(sound_owned) = sound.upgrade() else {return};
-                        let mut sound_owned = sound_owned.try_lock().to_js_result()?;
-                        let Some(after) = sound_owned.0.progress()? else {return};
-                        sound_owned.1 = Some(Timeout::new(after, move || poll_sound(sound)));
-                    }.report_err("polling the sound");
-                }
-
-                if let Sound::End = sound {
-                    for sound in sounds.drain(..) {
-                        Rc::try_unwrap(sound).ok()
-                            .to_js_result("failed to get unique reference to a sound while ending it")?
-                            .into_inner().to_js_result()?.0.end()?;
-                    }
-                } else {
-                    let new = Rc::new(Mutex::new((sound.prepare(&analyser)?, None)));
-                    poll_sound(Rc::downgrade(&new));
-                    sounds.push(new);
-                }
+            SoundGenType::Output => {
+                player.play_sound(sound)?;
                 Ok(Sound::End)}
             SoundGenType::Input => Err("`User Input` sound element cannot transform sound".into())
         }
