@@ -1,4 +1,12 @@
-use std::{ptr, fmt::{Debug, Formatter, self, Display}, ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref}, cell::{RefMut, Ref, RefCell}, iter::successors, error::Error, collections::TryReserveError};
+use std::{
+    ptr,
+    fmt::{self, Debug, Formatter, Display},
+    ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref},
+    cell::{RefMut, Ref, RefCell},
+    iter::successors,
+    error::Error,
+    collections::TryReserveError,
+    cmp::Ordering};
 use js_sys::{Object as JsObject, Error as JsError};
 use wasm_bindgen::{JsCast, JsValue, throw_val};
 use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement};
@@ -146,7 +154,7 @@ pub fn document() -> HtmlDocument {
 }
 
 fn to_error_with_msg(err: JsValue, msg: &str) -> JsValue {
-    let s = format!("error while {}: {}", msg, 
+    let s = format!("{}\n{}", msg, 
         match err.dyn_into::<JsError>() {
             Ok(val) => val.message().into(),
             Err(val) => JsObject::from(val).to_string()});
@@ -169,9 +177,17 @@ pub trait JsResultUtils<T>: Sized {
     fn explain_err(self, msg: &str) -> Self;
     fn expect_throw_with(self, f: impl FnOnce() -> String) -> T;
 	fn expect_throw(self, msg: &str) -> T;
-    fn report_err_with(self, f: impl FnOnce() -> String) -> Self;
-	fn report_err(self, msg: &str) -> Self;
+    fn unwrap_throw(self) -> T;
+	fn report_err(self) -> Self;
+    /// best used with the `loc!` macro
+    fn add_loc(self, loc: (&str, u32, u32)) -> Self;
 }
+
+#[macro_export]
+macro_rules! loc {
+    () => {(file!(), line!(), column!())};
+}
+pub use loc;
 
 impl<T, E> ResultToJsResult<T, E> for Result<T, E> {
     fn to_js_result(self) -> JsResult<T> where E: Display {
@@ -209,14 +225,17 @@ impl<T> JsResultUtils<T> for JsResult<T> {
             Err(err) => throw_val(to_error_with_msg(err, msg))}
     }
 
-    #[inline] fn report_err_with(self, f: impl FnOnce() -> String) -> Self {
-        self.inspect_err(|err|
-            MainCmd::ReportError(to_error_with_msg(err.clone(), &f())).send())
+    #[inline] fn unwrap_throw(self) -> T {
+        self.unwrap_or_else(|x| throw_val(x))
     }
 
-    #[inline] fn report_err(self, msg: &str) -> Self {
+    #[inline] fn report_err(self) -> Self {
         self.inspect_err(|err|
-            MainCmd::ReportError(to_error_with_msg(err.clone(), msg)).send())
+            MainCmd::ReportError(err.clone()).send())
+    }
+
+    #[inline] fn add_loc(self, loc: (&str, u32, u32)) -> Self {
+        self.map_err(|x| to_error_with_msg(x, &format!("in {}:{}:{}", loc.0, loc.1, loc.2)))
     }
 }
 
@@ -348,6 +367,8 @@ impl Error for InsertError {}
 pub trait VecExt<T> {
     fn try_swap_remove(&mut self, index: usize) -> Result<T, SwapRemoveError>;
     fn try_insert<'a>(&'a mut self, index: usize, element: T) -> Result<&'a mut T, InsertError>;
+    fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool;
+    fn push_sorted(&mut self, value: T, f: impl Fn(&T, &T) -> Ordering) -> usize;
 }
 
 impl<T> VecExt<T> for Vec<T> {
@@ -381,6 +402,18 @@ impl<T> VecExt<T> for Vec<T> {
             self.set_len(len + 1);
             Ok(&mut *p)
         }
+    }
+
+    fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool {
+        if self.iter().find(|x| f(*x, &value)).is_some() {return false}
+        self.push(value);
+        true
+    }
+
+    fn push_sorted(&mut self, value: T, f: impl Fn(&T, &T) -> Ordering) -> usize {
+        let id = self.binary_search_by(|x| f(&value, x)).unwrap_or_else(|x| x);
+        self.insert(id, value);
+        id
     }
 }
 

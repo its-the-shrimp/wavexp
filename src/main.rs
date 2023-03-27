@@ -2,28 +2,30 @@
 #![feature(try_blocks)]
 #![feature(never_type)]
 #![feature(unwrap_infallible)]
+
 mod render;
 mod utils;
 mod input;
 mod sound;
-mod draggable;
+use std::cell::{Ref, RefMut};
+use std::fmt::Debug;
+use input::{ParamId, Button};
 use render::Renderer;
-use sound::{
-    SoundGen,
-    Sound};
+use sound::{Sound, SoundGen, SoundPlayer, Graph};
 use utils::{
     HtmlCanvasExt, HtmlDocumentExt,
-    SliceExt, BoolExt, VecExt,
+    SliceExt, VecExt,
     JsResultUtils, OptionToJsResult, JsResult,
     Point,
     MaybeCell, WasmCell,
     document, window, ResultToJsResult};
+use web_sys::CanvasRenderingContext2d;
 use web_sys::{
     console::warn_1,
     Path2d as JsPath2d,
     HtmlCanvasElement,
     ImageData as JsImageData,
-    AnalyserNode, AudioContext, HtmlElement, PointerEvent};
+    HtmlElement, PointerEvent};
 use wasm_bindgen::{
     JsValue,
     Clamped as JsClamped,
@@ -35,37 +37,22 @@ use js_sys::{
 use yew::{
     Callback,
     Component,
-    Context};
+    Context, Html, html};
 
-#[derive(Clone, Copy, Debug)]
-enum SoundState {
-    Active(f64),
-    Ending(f64)
-}
-
-impl From<SoundState> for f64 {
-    fn from(value: SoundState) -> Self {
-        match value {
-            SoundState::Active(x) => x,
-            SoundState::Ending(x) => x}
-    }
-}
-
-// responsible for playing sounds and frame-by-frame animations
+/// responsible for playing sounds and frame-by-frame animations
 pub struct Player {
-    audio_context: AudioContext,
-    analyser: AnalyserNode,
     graph_canvas: HtmlCanvasElement,
     sound_visualiser_canvas: HtmlCanvasElement,
     renderer: Renderer,
-    graph: JsPath2d,
     solid_line: JsValue,
     dotted_line: JsValue,
-    graph_in_span: u32,
-    graph_span: u32,
+    graph: Graph,
     pbar_start: f64,
     js_callback: JsFunction,
-    sounds: Vec<(Sound, SoundState)>,
+    sound_comps: Vec<SoundGen>,
+    connections: Vec<Vec<usize>>,
+    sound_comp_events: Vec<(usize, f64)>,
+    sound_player: SoundPlayer,
     ending_all: bool
 }
 
@@ -76,32 +63,32 @@ impl Player {
     -> JsResult<()> {
         fn render(time: f64) {
             _ = js_try!{type = !:
-                    let mut handle = GLOBAL_PLAYER.get_mut()?;
-                    let Player{ref analyser, ref mut renderer, 
-                        ref graph_canvas, ref sound_visualiser_canvas,
-                        ref graph, ref solid_line, ref dotted_line,
-                        ref graph_in_span, ref graph_span, ref mut pbar_start,
-                        ref js_callback, ref mut sounds, ref mut ending_all, ..} = *handle;
-                    let graph_out_span = (graph_span - graph_in_span) as f64;
+                    let mut handle = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                    let Player{ref sound_visualiser_canvas, ref mut renderer,
+                        ref graph_canvas, ref solid_line, ref dotted_line,
+                        ref mut pbar_start, ref graph,
+                        ref mut sound_comps, ref mut sound_comp_events, ref mut sound_player, ref connections, ref mut ending_all,
+                        ref js_callback} = *handle;
+                    let graph_out_span = (graph.span - graph.in_span) as f64;
 
                     let err1 = js_try!{
                         let buf = renderer.set_size(sound_visualiser_canvas.width() as usize, sound_visualiser_canvas.height() as usize)
                             .get_in_buffer();
-                        analyser.get_byte_frequency_data(buf);
-                        sound_visualiser_canvas.get_2d_context()?.put_image_data(
+                        sound_player.output().get_byte_frequency_data(buf);
+                        sound_visualiser_canvas.get_2d_context().add_loc(loc!())?.put_image_data(
                             &JsImageData::new_with_u8_clamped_array(
-                                JsClamped(renderer.graph().get_out_bytes()), sound_visualiser_canvas.width())?,
-                            0.0, 0.0)?;
-                    }.explain_err("re-rendering the sound visualisation");
+                                JsClamped(renderer.graph().get_out_bytes()), sound_visualiser_canvas.width()).add_loc(loc!())?,
+                            0.0, 0.0).add_loc(loc!())?;
+                    };
 
                     let err2 = js_try!{
-                        let (w, h, ctx) = (graph_canvas.width().into(), graph_canvas.height().into(), graph_canvas.get_2d_context()?);
+                        let (w, h, ctx) = (graph_canvas.width().into(), graph_canvas.height().into(), graph_canvas.get_2d_context().add_loc(loc!())?);
                         ctx.set_fill_style(&"#181818".into());
                         ctx.fill_rect(0.0, 0.0, w, h);
-                        if *graph_span > 0 {
+                        if graph.span > 0 {
                             ctx.set_line_width(3.0);
                             ctx.set_stroke_style(&"#0069E1".into());
-                            ctx.stroke_with_path(graph);
+                            ctx.stroke_with_path(&graph.path);
                             if !pbar_start.is_nan() {
                                 if pbar_start.is_infinite() {
                                     *pbar_start = time.copysign(*pbar_start);
@@ -110,112 +97,168 @@ impl Player {
                                     *pbar_start = f64::NAN;
                                 } else {
                                     let x = if pbar_start.is_sign_positive() {
-                                        (time - *pbar_start).min(*graph_in_span as f64)
+                                        (time - *pbar_start).min(graph.in_span as f64)
                                     } else {
-                                        time + *pbar_start + *graph_in_span as f64
-                                    } / *graph_span as f64 * w;
-                                    ctx.set_line_dash(dotted_line)?;
+                                        time + *pbar_start + graph.in_span as f64
+                                    } / graph.span as f64 * w;
+                                    ctx.set_line_dash(dotted_line).add_loc(loc!())?;
                                     ctx.set_line_width(1.0);
                                     ctx.set_line_dash_offset(time / 100.0);
                                     ctx.begin_path();
                                     ctx.move_to(x, 0.0);
                                     ctx.line_to(x, h);
                                     ctx.stroke();
-                                    ctx.set_line_dash(solid_line)?;
+                                    ctx.set_line_dash(solid_line).add_loc(loc!())?;
                                 }
                             }
                         }
-                    }.explain_err("re-rendering the graphical representation of a sound element's parameters");
+                    };
 
                     let err3 = js_try!{
+                        macro_rules! apply_sound_comp {
+                            () => {|sound: Sound, _: usize, dst: usize| -> JsResult<Sound> {
+                                let (sound, after) = sound_comps.get_mut_or_js_error(dst, "sound element #", " not found").add_loc(loc!())?
+                                    .transform(sound_player, sound).add_loc(loc!())?;
+                                if let Some(after) = after {
+                                    sound_comp_events.push_sorted((dst, after as f64 + time), |x, y| x.1.total_cmp(&y.1).reverse());
+                                }
+                                Ok(sound)
+                            }};
+                        }
+
                         if *ending_all {
                             *ending_all = false;
-                            for (sound, state) in sounds.iter_mut() {
-                                *state = SoundState::Ending(sound.end()? as f64 + time);
-                            }
-                            sounds.sort_unstable_by(|&(_, s1), &(_, s2)|
-                                f64::total_cmp(&s1.into(), &s2.into()));
-                        }
-                        let len = sounds.len();
-                        let start = match sounds.iter().rev().position(|&(_, state)| time < state.into()) {
-                            Some(x) => (x > 0).then(|| len - x),
-                            None => Some(0)};
-                        if let Some(start) = start {
-                            let pending: Vec<_> = sounds.drain(start..).collect();
-                            for (mut sound, mut state) in pending {
-                                match state {
-                                    SoundState::Active(_) => {
-                                        state = match sound.progress()? {
-                                            Some(after) => SoundState::Active(after as f64 + time),
-                                            None => SoundState::Active(f64::INFINITY)};
-                                        let time: f64 = state.into();
-                                        match sounds.iter().rev().position(|&(_, other)| time <= other.into()) {
-                                            Some(id) => sounds.try_insert(len - id, (sound, state)),
-                                            None => sounds.try_insert(0, (sound, state))
-                                        }.to_js_result()?;
-                                    }
-                                    SoundState::Ending(_) => sound.disconnect()?
+                            sound_comp_events.clear();
+                            traverse(connections, 0, Sound::End, &mut apply_sound_comp!()).add_loc(loc!())?;
+                        } else {
+                            let len = sound_comp_events.len();
+                            let start = match sound_comp_events.iter().rev().position(|event| time < event.1) {
+                                Some(x) => (x > 0).then(|| len - x),
+                                None => Some(0)};
+                            if let Some(start) = start {
+                                let pending: Vec<_> = sound_comp_events.drain(start..).collect();
+                                for (index, _) in pending {
+                                    let mut apply_sound_comp = apply_sound_comp!();
+                                    let sound = apply_sound_comp(Sound::InputFreq(0.0), 0, index).add_loc(loc!())?;
+                                    traverse(connections, index, sound, &mut apply_sound_comp).add_loc(loc!())?;
                                 }
                             }
                         }
-                    }.explain_err("playing the sounds");
+                        sound_player.poll(time).add_loc(loc!())?;
+                    };
 
                     err1.and(err2).and(err3)
-                        .and(window().request_animation_frame(js_callback)
-                            .explain_err("re-registering the animation callback"))?;
+                        .and(window().request_animation_frame(js_callback).add_loc(loc!()))
+                        .add_loc(loc!())?;
                     return
-            }.report_err("rendering frame-by-frame animation");
+            }.report_err();
         }
 
-        let audio_context = AudioContext::new()?;
-        let analyser = AnalyserNode::new(&audio_context)?;
-        analyser.connect_with_audio_node(&audio_context.destination())?;
-
+        let mut sound_comps = vec![SoundGen::new_input(Point{x: 350, y: 500}),
+            SoundGen::new_output(Point{x: 550, y: 500})];
+        sound_comps[1].set_id(1);
         GLOBAL_PLAYER.set(Self{
-            audio_context, analyser,
             graph_canvas, sound_visualiser_canvas,
             renderer: Renderer::new(),
             solid_line: JsArray::new().into(),
             dotted_line: JsArray::of2(&(10.0).into(), &(10.0).into()).into(),
-            graph: JsPath2d::new()?,
-            graph_in_span: 0,
-            graph_span: 0,
+            graph: Graph{path: JsPath2d::new().add_loc(loc!())?, span: 0, in_span: 0},
             pbar_start: f64::NAN,
             js_callback: JsClosure::<dyn Fn(f64)>::new(render)
                 .into_js_value().unchecked_into(),
-            sounds: vec![], ending_all: false
-        })?;
+            sound_comp_events: vec![], ending_all: false, sound_comps,
+            connections: vec![vec![], vec![]], sound_player: SoundPlayer::new().add_loc(loc!())?
+        }).add_loc(loc!())?;
         Ok(render(0.0))
     }
 
-    fn set_graph(&mut self, graph: JsPath2d, in_span: u32, span: u32) {
-        self.graph = graph;
-        self.graph_in_span = in_span;
-        self.graph_span = span;
+    #[inline] fn set_graph(&mut self, graph: Graph) {self.graph = graph}
+
+    #[inline] fn clear_graph(&mut self) {self.graph.span = 0}
+
+    fn add_element(&mut self, mut comp: SoundGen) {
+        comp.set_id(self.sound_comps.len());
+        self.sound_comps.push(comp);
+        self.connections.push(vec![]);
     }
 
-    fn clear_graph(&mut self) {self.graph_span = 0}
-
-    fn toggle_graph_play_animation(&mut self) {
-        self.pbar_start = (self.pbar_start > 0.0)
-            .choose(f64::NEG_INFINITY, f64::INFINITY);
-    }
-
-    fn play_sound(&mut self, sound: Sound) -> JsResult<()> {
-        if matches!(sound, Sound::End) {
-            self.ending_all = true;
-        } else {
-            self.sounds.push((sound.prepare(&self.analyser)?, SoundState::Active(0.0)));
+    fn remove_element(&mut self, index: usize) -> JsResult<()> {
+        self.sound_comps.try_swap_remove(index).to_js_result().add_loc(loc!())?;
+        unsafe{self.sound_comps.get_unchecked_mut(index)}.set_id(index);
+        self.connections.try_swap_remove(index).to_js_result().add_loc(loc!())?;
+        let len = self.connections.len();
+        for conns in self.connections.iter_mut() {
+            conns.retain_mut(|x| {
+                if *x == index {return false}
+                if *x == len {*x = index}
+                true});
         }
         Ok(())
     }
 
-    fn audio_context(&self) -> &AudioContext {
-        &self.audio_context
+    fn disconnect_element(&mut self, index: usize) -> JsResult<()> {
+        self.connections
+            .get_mut_or_js_error(index, "sound element #", " not found").add_loc(loc!())
+            .map(Vec::clear)
+    }
+
+    fn get_element<'a>(&'a self, index: usize) -> JsResult<&'a SoundGen> {
+        self.sound_comps
+            .get_or_js_error(index, "sound element #", " not found").add_loc(loc!())
+    }
+
+    fn get_element_mut<'a>(&'a mut self, index: usize) -> JsResult<&'a mut SoundGen> {
+        self.sound_comps
+            .get_mut_or_js_error(index, "sound element #", " not found").add_loc(loc!())
+    }
+
+    fn get_element_by_point<'a>(&'a self, point: Point) -> Option<&'a SoundGen> {
+        self.sound_comps.iter().find(|x| x.contains(point))
+    }
+
+    fn get_element_mut_by_point<'a>(&'a mut self, point: Point) -> Option<&'a mut SoundGen> {
+        self.sound_comps.iter_mut().find(|x| x.contains(point))
+    }
+
+    fn play_sounds(&mut self) {
+        self.pbar_start = f64::INFINITY;
+        self.sound_comp_events.push((0, f64::NEG_INFINITY));
+    }
+
+    fn end_sounds(&mut self) {
+        self.pbar_start = f64::NEG_INFINITY;
+        self.ending_all = true;
+    }
+
+    fn connect(&mut self, src_id: usize, dst_id: usize) -> JsResult<bool> {
+        let src = self.sound_comps.get_or_js_error(src_id, "sound element #", " not found").add_loc(loc!())?;
+        let dst = self.sound_comps.get_or_js_error(dst_id, "sound element #", " not found").add_loc(loc!())?;
+        if !src.connectible(dst) {return Ok(false)}
+        Ok(unsafe{self.connections.get_unchecked_mut(src_id)}.push_unique(dst_id, |x, y| x == y))
+    }
+
+    fn render_editor_plane(&self, ctx: &CanvasRenderingContext2d, width: f64, height: f64, offset: Point) -> JsResult<()> {
+        ctx.fill_rect(0.0, 0.0, width, height);
+        ctx.begin_path();
+        self.sound_comps.iter()
+            .for_each(|c| c.draw(&ctx, offset));
+        for (src_id, dsts) in self.connections.iter().enumerate() {
+            let Some(mut src) = self.sound_comps
+                .get_or_js_error(src_id, "sound element #", " not found").add_loc(loc!())?
+                .output_point() else {continue};
+            src -= offset;
+            for dst_id in dsts.iter() {
+                let Some(mut dst) = self.sound_comps
+                    .get_or_js_error(*dst_id, "sound element #", " not found").add_loc(loc!())?
+                    .input_point() else {continue};
+                dst -= offset;
+                ctx.move_to(src.x as f64, src.y as f64);
+                ctx.line_to(dst.x as f64, dst.y as f64);
+            }
+        }
+        Ok(ctx.stroke())
     }
 }
-
-
 
 pub struct Main {
     selected_comp: Option<usize>,
@@ -224,20 +267,19 @@ pub struct Main {
     error_count: usize,
     plane_moving: bool,
     plane_offset: Point,
-    sound_comps: Vec<SoundGen>,
-    connections: Vec<Vec<usize>>,
     graph_canvas: HtmlCanvasElement,
     sound_visualiser_canvas: HtmlCanvasElement,
     editor_plane_canvas: HtmlCanvasElement,
     help_msg_bar: HtmlElement,
 }
 
-fn traverse<S: Clone>(conns: &[Vec<usize>], src_id: usize, state: S, f: &mut impl FnMut(S, usize, usize) -> JsResult<S>) 
+fn traverse<S: Clone + Debug>(conns: &[Vec<usize>], src_id: usize, state: S, f: &mut impl FnMut(S, usize, usize) -> JsResult<S>)
 -> JsResult<()> {
-    let dsts = conns.get_or_js_error(src_id, "element #", " not found")?;
+    let dsts = conns.get_or_js_error(src_id, "element #", " not found").add_loc(loc!())?;
     for dst_id in dsts.iter() {
-        let new_state = f(state.clone(), src_id, *dst_id)?;
-        traverse(conns, *dst_id, new_state, f)?;
+        let new_state = f(state.clone(), src_id, *dst_id).add_loc(loc!())?;
+        js_log!("{:?}, {}, {}", state, src_id, dst_id);
+        traverse(conns, *dst_id, new_state, f).add_loc(loc!())?;
     }
     Ok(())
 }
@@ -250,7 +292,7 @@ pub enum MainCmd {
     LeavePlane,
     SetDesc(String),
     RemoveDesc,
-    SetParam(usize, usize, f64),
+    SetParam(ParamId, f64),
     TryConnect(usize, Point),
     Select(Option<usize>),
     ReportError(JsValue)
@@ -282,25 +324,18 @@ impl Component for Main {
     fn create(ctx: &Context<Self>) -> Self {
         *unsafe{&mut MAINCMD_SENDER} = Some(ctx.link().callback(|msg| msg));
 
-        js_try!{
-            let sound_comps = vec![
-                SoundGen::new_input(0, Point{x:300, y:500}),
-                SoundGen::new_wave(1, Point{x:300, y:350}),
-                SoundGen::new_envelope(2, Point{x:500, y:350}),
-                SoundGen::new_output(3, Point{x:750, y:350})];
-            let help_msg_bar: HtmlElement = document().create_element("div")
-                .expect_throw("creating #help-msg element").unchecked_into();
-            help_msg_bar.set_id("help-msg");
-            help_msg_bar.set_inner_text(Self::DEF_HELP_MSG);
+        let help_msg_bar: HtmlElement = document().create_element("div").add_loc(loc!())
+            .expect_throw("creating #help-msg element").unchecked_into();
+        help_msg_bar.set_id("help-msg");
+        help_msg_bar.set_inner_text(Self::DEF_HELP_MSG);
 
-            Self {sound_comps, help_msg_bar,
-                selected_comp: None, focused_comp: None, hovered_comp: None,
-                plane_offset: Point::ZERO, plane_moving: false,
-                graph_canvas: JsValue::UNDEFINED.unchecked_into(),
-                sound_visualiser_canvas: JsValue::UNDEFINED.unchecked_into(),
-                editor_plane_canvas: JsValue::UNDEFINED.unchecked_into(),
-                error_count: 0, connections: vec![vec![], vec![], vec![], vec![]]}
-        }.expect_throw("initialising the main component")
+        Self {help_msg_bar,
+            selected_comp: None, focused_comp: None, hovered_comp: None,
+            plane_offset: Point::ZERO, plane_moving: false,
+            graph_canvas: JsValue::UNDEFINED.unchecked_into(),
+            sound_visualiser_canvas: JsValue::UNDEFINED.unchecked_into(),
+            editor_plane_canvas: JsValue::UNDEFINED.unchecked_into(),
+            error_count: 0}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -311,209 +346,183 @@ impl Component for Main {
         };
 
         let err = js_try!{type = !:
-            let mut needs_plane_rerender = false;
             let mut needs_html_rerender = false;
+            let mut player: Option<RefMut<Player>> = None;
             match msg {
-                MainCmd::Drag(e) => js_try!{
-                    if let Some(id) = self.focused_comp {
-                        needs_plane_rerender = true;
-                        let comp = self.sound_comps.get_mut_or_js_error(id, "sound element #", " not found")?;
-                        if let Some(msg) = comp.handle_movement(Point{x: e.x(), y: e.y()} + self.plane_offset, false) {
-                            needs_html_rerender = self.update(ctx, msg)
-                        }
-                    } else if self.plane_moving {
-                        needs_plane_rerender = true;
+                MainCmd::Drag(e) => {
+                    let player = player.insert(GLOBAL_PLAYER.get_mut().add_loc(loc!())?);
+                    if self.plane_moving {
                         self.plane_offset -= Point{x: e.movement_x(), y: 0};
                     } else {
-                        if let Some(id) = self.hovered_comp {
-                            let point = Point{x: e.x(), y: e.y()} + self.plane_offset;
-                            if !self.sound_comps.get_or_js_error(id, "sound element #", " not found")?.contains(point) {
-                                self.hovered_comp = None;
-                                self.remove_desc();
+                        let point = Point{x: e.x(), y: e.y()} + self.plane_offset;
+                        if let Some(id) = self.focused_comp {
+                            if let Some(msg) = player.get_element_mut(id).add_loc(loc!())?.handle_movement(point, false) {
+                                needs_html_rerender = self.update(ctx, msg)
                             }
-                        } if self.hovered_comp.is_none() {
-                            let point = Point{x: e.x(), y: e.y()} + self.plane_offset;
-                            if let Some(comp) = self.sound_comps.iter().find(|x| x.contains(point)) {
-                                self.hovered_comp = Some(comp.id);
-                                self.set_desc(comp.name());
+                        } else {
+                            if let Some(id) = self.hovered_comp {
+                                if !player.get_element(id).add_loc(loc!())?.contains(point) {
+                                    self.hovered_comp = None;
+                                    self.remove_desc();
+                                }
+                            }
+                            if self.hovered_comp.is_none() {
+                                if let Some(comp) = player.get_element_by_point(point) {
+                                    self.hovered_comp = Some(comp.id());
+                                    self.set_desc(comp.name());
+                                }
                             }
                         }
                     }
-                }.explain_err("handling `MainCmd::Drag` message")?,
+                }
 
-                MainCmd::Focus(e) => js_try!{
-                    self.editor_plane_canvas.set_pointer_capture(e.pointer_id())?;
-                    needs_plane_rerender = true;
+                MainCmd::Focus(e) => {
+                    self.editor_plane_canvas.set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
                     let point = Point{x: e.x(), y: e.y()} + self.plane_offset;
-                    self.focused_comp = self.sound_comps.iter()
-                        .position(|c| c.contains(point));
-                    if let Some(comp) = self.focused_comp {
-                        let comp = unsafe {self.sound_comps.get_unchecked_mut(comp)};
-                        if let Some(msg) = comp.handle_movement(Point{x: e.x(), y: e.y()} + self.plane_offset, false) {
-                            needs_html_rerender = self.update(ctx, msg);
+                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                    if let Some(comp) = player.get_element_mut_by_point(point) {
+                        self.focused_comp = Some(comp.id());
+                        if let Some(msg) = comp.handle_movement(point, false) {
+                            ctx.link().send_message(msg);
                         }
                     } else {
                         self.plane_moving = true;
                         self.set_desc("Dragging the plane");
                     }
-                }.explain_err("handling `MainCmd::Focus` message")?,
+                }
 
-                MainCmd::Unfocus(e) => js_try!{
-                    self.editor_plane_canvas.release_pointer_capture(e.pointer_id())?;
-                    needs_plane_rerender = true;
+                MainCmd::Unfocus(e) => {
+                    self.editor_plane_canvas.release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
                     if let Some(id) = self.focused_comp.take() {
-                        let comp = self.sound_comps.get_mut_or_js_error(id, "sound functor #", " not found")?;
-                        let name = comp.name();
-                        if let Some(msg) = comp.handle_movement(Point{x:e.x(), y:e.y()} + self.plane_offset, true) {
-                            needs_html_rerender = self.update(ctx, msg);
+                        let point = Point{x: e.x(), y: e.y()} + self.plane_offset;
+                        let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                        let comp = player.get_element_mut(id).add_loc(loc!())?;
+                        self.set_desc(comp.name());
+                        if let Some(msg) = comp.handle_movement(point, true) {
+                            ctx.link().send_message(msg);
                         }
-                        self.set_desc(name);
                     } else {
                         ctx.link().send_message(MainCmd::Select(None));
                         self.plane_moving = false;
                         self.remove_desc();
                     }
-                }.explain_err("handling `MainCmd::Unfocus` message")?,
+                }
 
-                MainCmd::LeavePlane => js_try!{
+                MainCmd::LeavePlane => {
                     self.hovered_comp = None;
                     self.remove_desc();
-                }.explain_err("handling `MainCmd::LeavePlane` message")?,
+                }
 
                 MainCmd::SetDesc(value) => self.set_desc(&value),
 
                 MainCmd::RemoveDesc => self.remove_desc(),
 
-                MainCmd::SetParam(comp_id, param_id, value) => js_try!{
-                    if comp_id == self.sound_comps.len() {
-                        js_try!{
-                            match param_id {
-                                0 => { // starting to play the sounds
-                                    let mut player = GLOBAL_PLAYER.get_mut()?;
-                                    player.toggle_graph_play_animation();
-                                    let sound = value.is_sign_positive().choose(Sound::InputFreq(0.0), Sound::End);
-                                    traverse(&self.connections, 0, sound, &mut |sound, _, dst_id| {
-                                        self.sound_comps.get_mut_or_js_error(dst_id, "sound element #", " not found")?
-                                            .transform(&mut player, sound)
-                                    })?;
-                                    return false
-                                }
-
-                                1 => { // removing all outward connections of the selected component
-                                    if value.is_sign_positive() {return false}
-                                    let selected_comp_id = self.selected_comp
-                                        .to_js_result("no sound element selected")?;
-                                    self.connections.get_mut_or_js_error(selected_comp_id, "sound element #", " not found")?
-                                        .clear();
-                                }
-
-                                2 => { // removing the selected component
-                                    if value.is_sign_positive() {return false}
-                                    let selected_comp_id = self.selected_comp
-                                        .to_js_result("no sound element selected")?;
-                                    self.sound_comps.try_swap_remove(selected_comp_id).to_js_result()?;
-                                    self.connections.try_swap_remove(selected_comp_id).to_js_result()?;
-                                    let len = self.connections.len();
-                                    for conns in self.connections.iter_mut() {
-                                        conns.retain_mut(|x| {
-                                            if *x == selected_comp_id {return false}
-                                            if *x == len {*x = selected_comp_id}
-                                            true
-                                        });
-                                    }
-                                    unsafe{self.sound_comps.get_unchecked_mut(selected_comp_id)}.id = selected_comp_id;
-                                }
-
-                                _ => JsResult::<!>::Err(format!("unknown parameter ID: {}", param_id).into())?
-                            }
-                            needs_html_rerender = true;
-                            needs_plane_rerender = true;
-                        }.explain_err("handling commands on the selected sound component")?;
+                MainCmd::SetParam(id, value) => {
+                    if let Some(element_id) = id.element_id() {
+                        let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                        let element = player.get_element_mut(element_id).add_loc(loc!())?;
+                        needs_html_rerender = element.set_param(id, value).add_loc(loc!())?;
+                        let graph = element.graph(self.graph_canvas.width() as f64, self.graph_canvas.height() as f64).add_loc(loc!())?;
+                        player.set_graph(graph);
                     } else {
-                        let comp = self.sound_comps
-                            .get_mut_or_js_error(comp_id, "sound component #", " not found")?;
-                        needs_html_rerender = comp.set_param(param_id, value)?;
-                        let (graph, in_span, span)
-                            = comp.graph(self.graph_canvas.width().into(), self.graph_canvas.height().into())?;
-                        GLOBAL_PLAYER.get_mut()?.set_graph(graph, in_span, span);
+                        let player = player.insert(GLOBAL_PLAYER.get_mut().add_loc(loc!())?);
+                        match id {
+                            ParamId::Play => if value.is_sign_positive() {
+                                player.play_sounds()
+                            } else {
+                                player.end_sounds()
+                            }
+                            ParamId::Disconnect(id) =>
+                                player.disconnect_element(id).add_loc(loc!())?,
+                            ParamId::Remove(id) => {
+                                player.remove_element(id).add_loc(loc!())?;
+                                needs_html_rerender = true;
+                            }
+                            id => JsResult::<!>::Err(format!("invalid parameter ID: `{:?}`", id).into()).add_loc(loc!())?
+                        }
                     }
-                }.explain_err("handling `MainCmd::SetParam` message")?,
+                }
 
-                MainCmd::TryConnect(src_id, dst_pos) => js_try!{
-                    if let Some(dst) = self.sound_comps.iter().find(|x| x.contains(dst_pos)) {
-                        if dst.id != src_id && dst.backwardable().is_some() {
-                            let src_conns = self.connections
-                                .get_mut_or_js_error(src_id, "sound element #", " not found")?;
-                            if !src_conns.contains(&dst.id) {src_conns.push(dst.id)}
+                MainCmd::TryConnect(src, dst_pos) => {
+                    let player = player.insert(GLOBAL_PLAYER.get_mut().add_loc(loc!())?);
+                    if let Some(dst) = player.get_element_by_point(dst_pos).map(|x| x.id()) {
+                        if player.connect(src, dst).add_loc(loc!())? {
+                            ctx.link().send_message(MainCmd::Select(Some(dst)));
                         }
                     } else {
                         self.remove_desc()
                     }
-                    needs_plane_rerender = true;
-                }.explain_err("handling `MainCmd::TryConnect` message")?,
+                }
 
-                MainCmd::Select(id) => js_try!{type = !:
-                    self.selected_comp = id.filter(|id| Some(id) != self.selected_comp.as_ref());
+                MainCmd::Select(id) => {
+                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                    self.selected_comp = id.filter(|id| Some(*id) != self.selected_comp);
                     if let Some(id) = self.selected_comp {
-                        let (graph, in_span, span) = self.sound_comps
-                            .get_or_js_error(id, "sound functor #", " not found")?
-                            .graph(self.graph_canvas.width().into(), self.graph_canvas.height().into())?;
-                        GLOBAL_PLAYER.get_mut()?.set_graph(graph, in_span, span);
+                        let graph = player.get_element(id).add_loc(loc!())?
+                            .graph(self.graph_canvas.width().into(), self.graph_canvas.height().into()).add_loc(loc!())?;
+                        player.set_graph(graph);
                     } else {
-                        GLOBAL_PLAYER.get_mut()?.clear_graph()}
-                    return true
-                }.explain_err("handling `MainCmd::Select` message")?,
+                        player.clear_graph()}
+                    needs_html_rerender = true;
+                }
 
                 MainCmd::ReportError(err) => return on_new_error(self, err)
             };
 
-            if needs_plane_rerender {
-                self.render_editor_plane()?;
+            if let Some(player) = player {
+                player.render_editor_plane(
+                    &self.editor_plane_canvas.get_2d_context().add_loc(loc!())?,
+                    self.editor_plane_canvas.width() as f64,
+                    self.editor_plane_canvas.height() as f64,
+                    self.plane_offset).add_loc(loc!())?;
             }
             return needs_html_rerender
         };
         on_new_error(self, err.into_err())
     }
 
-    fn view(&self, ctx: &Context<Self>) -> yew::Html {
-        let comp = self.selected_comp.and_then(|i| self.sound_comps.get(i));
+    fn view(&self, ctx: &Context<Self>) -> Html {
+        let comp = self.selected_comp.map(|id|
+            Ref::filter_map(GLOBAL_PLAYER.get().expect_throw("building the app view"), |x| x.get_element(id).ok())
+                .ok().to_js_result_with(|| format!("sound element #{} not found", id)).add_loc(loc!())
+                .expect_throw("building the app view"));
 
-        return yew::html! {<>
+        return html! {<>
             <canvas width="100%" height="100%" id="plane"
             onpointerdown={ctx.link().callback(MainCmd::Focus)}
             onpointerup={ctx.link().callback(MainCmd::Unfocus)}
             onpointermove={ctx.link().callback(MainCmd::Drag)}
             onpointerleave={ctx.link().callback(|_| MainCmd::LeavePlane)}/>
             <div id="ctrl-panel">
-                {yew::Html::VRef(self.help_msg_bar.clone().into())}
-                {comp.map(|x| x.params())}
+                {Html::VRef(self.help_msg_bar.clone().into())}
+                {comp.as_ref().map(|x| x.params())}
                 <canvas id="graph" class="visual"
                 hidden={comp.map(|x| !x.graphable()).unwrap_or(true)}/>
-                if comp.is_some() {
+                if let Some(comp_id) = self.selected_comp {
                     <div id="general-ctrl">
-                        <input::Button
-                        component_id={self.sound_comps.len()} id={1}
+                        <Button
+                        id={ParamId::Disconnect(comp_id)}
                         desc={"Disconnect component"}>
                             <svg viewBox="0 0 100 100">
                                 <polygon points="10,40 10,60 40,60 30,40"/>
                                 <polygon points="30,20 60,80 70,80 40,20"/>
                                 <polygon points="50,40 80,40 80,60 60,60"/>
                             </svg>
-                        </input::Button>
-                        <input::Button
-                        component_id={self.sound_comps.len()} id={2}
+                        </Button>
+                        <Button
+                        id={ParamId::Remove(comp_id)}
                         desc={"Remove component"}>
                             <svg viewBox="0 0 100 100">
                                 <polygon points="27,35 35,27 50,42 65,27 73,35 58,50 73,65 65,73 50,58 35,73 27,65 42,50"/>
                             </svg>
-                        </input::Button>
+                        </Button>
                     </div>
                 }
             </div>
             <div id="visuals">
                 <canvas id="sound-visualiser" class="visual"/>
                 <input::Button
-                component_id={self.sound_comps.len()} id={0}
+                id={ParamId::Play}
                 desc={"Play"}>
                     <svg viewBox="0 0 100 100" height="100%">
                         <polygon points="25,25 75,50 25,75"/>
@@ -529,57 +538,32 @@ impl Component for Main {
     fn rendered(&mut self, _: &Context<Self>, first_render: bool) {
         _ = js_try!{type = !:
             return if first_render {
-                self.graph_canvas = document().element_dyn_into("graph")?;
+                self.graph_canvas = document().element_dyn_into("graph").add_loc(loc!())?;
                 self.graph_canvas.set_hidden(false);
                 self.graph_canvas.sync();
                 self.graph_canvas.set_hidden(true);
-                self.sound_visualiser_canvas = document().element_dyn_into("sound-visualiser")?;
+                self.sound_visualiser_canvas = document().element_dyn_into("sound-visualiser").add_loc(loc!())?;
                 self.sound_visualiser_canvas.sync();
-                self.help_msg_bar = document().element_dyn_into("help-msg")?;
-                js_try!{
-                    self.editor_plane_canvas = document().element_dyn_into("plane")?;
-                    let body = document().body().to_js_result("<body> not found")?;
-                    self.editor_plane_canvas.set_width(body.client_width() as u32);
-                    self.editor_plane_canvas.set_height(body.client_height() as u32);
-                }.explain_err("initialising the editor plane")?;
-                js_try!{
-                    let ctx = self.editor_plane_canvas.get_2d_context()?;
-                    ctx.set_stroke_style(&"#0069E1".into());
-                    ctx.set_fill_style(&"#232328".into());
-                    ctx.set_line_width(3.0);
-                    self.render_editor_plane()?;
-                }.explain_err("drawing the editor plane for the first time")?;
+                self.help_msg_bar = document().element_dyn_into("help-msg").add_loc(loc!())?;
 
+                self.editor_plane_canvas = document().element_dyn_into("plane").add_loc(loc!())?;
+                let body = document().body().to_js_result("<body> not found").add_loc(loc!())?;
+                let (w, h) = (body.client_width(), body.client_height());
+                self.editor_plane_canvas.set_width(w as u32);
+                self.editor_plane_canvas.set_height(h as u32);
+
+                let ctx = self.editor_plane_canvas.get_2d_context().add_loc(loc!())?;
+                ctx.set_stroke_style(&"#0069E1".into());
+                ctx.set_fill_style(&"#232328".into());
+                ctx.set_line_width(3.0);
                 Player::init_global(self.graph_canvas.clone(),
-                    self.sound_visualiser_canvas.clone())?;
+                    self.sound_visualiser_canvas.clone()).add_loc(loc!())?;
+                let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                player.add_element(SoundGen::new_wave(Point{x: 350, y: 441}));
+                player.add_element(SoundGen::new_envelope(Point{x: 550, y: 441}));
+                player.render_editor_plane(&ctx, w as f64, h as f64, Point::ZERO).add_loc(loc!())?;
             }
         }.expect_throw("rendering the main element");
-    }
-}
-
-impl Main {
-    fn render_editor_plane(&self) -> JsResult<()> {
-        let ctx = self.editor_plane_canvas.get_2d_context()?;
-        ctx.fill_rect(0.0, 0.0,
-            self.editor_plane_canvas.width().into(),
-            self.editor_plane_canvas.height().into());
-        ctx.begin_path();
-        self.sound_comps.iter()
-            .for_each(|c| c.draw(&ctx, self.plane_offset));
-        for (src_id, dsts) in self.connections.iter().enumerate() {
-            let Some(src) = self.sound_comps
-                .get_or_js_error(src_id, "sound element #", " not found")?
-                .forwardable().map(|x| x - self.plane_offset) else {continue};
-            for &dst_id in dsts.iter() {
-                let dst = self.sound_comps
-                    .get_or_js_error(dst_id, "sound element #", " not found")?
-                    .backwardable().to_js_result("un-backwardable sound element was forwarded to")?
-                    - self.plane_offset;
-                ctx.move_to(src.x as f64, src.y as f64);
-                ctx.line_to(dst.x as f64, dst.y as f64);
-            }
-        }
-        Ok(ctx.stroke())
     }
 }
 
