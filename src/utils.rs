@@ -161,10 +161,17 @@ fn to_error_with_msg(err: JsValue, msg: &str) -> JsValue {
     JsError::new(&s).into()
 }
 
+/// returns a Result for easier handling in `try` blocks
+/// the second argument is recommended to be passed from the `loc!` macro
+#[inline] pub fn js_error(msg: impl AsRef<str>, loc: (&str, u32, u32)) -> JsResult<!> {
+    Err(JsError::new(msg.as_ref()).into()).add_loc(loc)
+}
+
 pub type JsResult<T> = Result<T, JsValue>;
 
 pub trait ResultToJsResult<T, E> {
     fn to_js_result(self) -> JsResult<T> where E: Display;
+    fn to_js_result_with<R: AsRef<str>>(self, f: impl FnOnce(E) -> R) -> JsResult<T>;
 }
 
 pub trait OptionToJsResult<T> {
@@ -192,6 +199,10 @@ pub use loc;
 impl<T, E> ResultToJsResult<T, E> for Result<T, E> {
     fn to_js_result(self) -> JsResult<T> where E: Display {
         self.map_err(|e| e.to_string().into())
+    }
+
+    fn to_js_result_with<R: AsRef<str>>(self, f: impl FnOnce(E) -> R) -> JsResult<T> {
+        self.map_err(|e| JsError::new(f(e).as_ref()).into())
     }
 }
 
@@ -230,8 +241,10 @@ impl<T> JsResultUtils<T> for JsResult<T> {
     }
 
     #[inline] fn report_err(self) -> Self {
-        self.inspect_err(|err|
-            MainCmd::ReportError(err.clone()).send())
+        if let Err(err) = &self {
+            MainCmd::ReportError(err.clone()).send()
+        }
+        self
     }
 
     #[inline] fn add_loc(self, loc: (&str, u32, u32)) -> Self {
@@ -456,11 +469,11 @@ impl<T> MaybeCell<T> {
         Ok(())
     }
 
-    #[inline] pub fn maybe_set(&self, val: Option<T>) -> JsResult<()> {
+    /*#[inline] pub fn maybe_set(&self, val: Option<T>) -> JsResult<()> {
         let mut r = self.0.try_borrow_mut().to_js_result()?;
         *r = val;
         Ok(())
-    }
+    }*/
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -537,6 +550,7 @@ pub trait HitZone: Sized + Debug {
     #[inline] fn shift_y(self, y: i32) -> Self {self.shift(Point{x:0, y})}
 }
 
+/*
 #[derive(Debug)]
 pub struct Rect(Point, Point);
 
@@ -575,7 +589,7 @@ impl Rect {
     #[inline] pub fn to_rhombus(self) -> Rhombus {
         Rhombus::new(self.center(), self.width() / 2, self.height() / 2)
     }
-}
+}*/
 
 #[derive(Debug)]
 pub struct Rhombus {

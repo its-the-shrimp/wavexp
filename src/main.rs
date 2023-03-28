@@ -1,7 +1,8 @@
-#![feature(result_option_inspect)]
 #![feature(try_blocks)]
 #![feature(never_type)]
 #![feature(unwrap_infallible)]
+#![feature(const_float_classify)]
+#![feature(const_slice_index)]
 
 mod render;
 mod utils;
@@ -18,7 +19,7 @@ use utils::{
     JsResultUtils, OptionToJsResult, JsResult,
     Point,
     MaybeCell, WasmCell,
-    document, window, ResultToJsResult};
+    document, window, ResultToJsResult, js_error};
 use web_sys::CanvasRenderingContext2d;
 use web_sys::{
     console::warn_1,
@@ -120,7 +121,7 @@ impl Player {
                                 let (sound, after) = sound_comps.get_mut_or_js_error(dst, "sound element #", " not found").add_loc(loc!())?
                                     .transform(sound_player, sound).add_loc(loc!())?;
                                 if let Some(after) = after {
-                                    sound_comp_events.push_sorted((dst, after as f64 + time), |x, y| x.1.total_cmp(&y.1).reverse());
+                                    sound_comp_events.push_sorted((dst, after as f64 / 1000.0 + time), |x, y| x.1.total_cmp(&y.1).reverse());
                                 }
                                 Ok(sound)
                             }};
@@ -278,7 +279,6 @@ fn traverse<S: Clone + Debug>(conns: &[Vec<usize>], src_id: usize, state: S, f: 
     let dsts = conns.get_or_js_error(src_id, "element #", " not found").add_loc(loc!())?;
     for dst_id in dsts.iter() {
         let new_state = f(state.clone(), src_id, *dst_id).add_loc(loc!())?;
-        js_log!("{:?}, {}, {}", state, src_id, dst_id);
         traverse(conns, *dst_id, new_state, f).add_loc(loc!())?;
     }
     Ok(())
@@ -325,7 +325,7 @@ impl Component for Main {
         *unsafe{&mut MAINCMD_SENDER} = Some(ctx.link().callback(|msg| msg));
 
         let help_msg_bar: HtmlElement = document().create_element("div").add_loc(loc!())
-            .expect_throw("creating #help-msg element").unchecked_into();
+            .unwrap_throw().unchecked_into();
         help_msg_bar.set_id("help-msg");
         help_msg_bar.set_inner_text(Self::DEF_HELP_MSG);
 
@@ -436,9 +436,10 @@ impl Component for Main {
                                 player.disconnect_element(id).add_loc(loc!())?,
                             ParamId::Remove(id) => {
                                 player.remove_element(id).add_loc(loc!())?;
+                                self.selected_comp = None;
                                 needs_html_rerender = true;
                             }
-                            id => JsResult::<!>::Err(format!("invalid parameter ID: `{:?}`", id).into()).add_loc(loc!())?
+                            id => js_error(format!("invalid parameter ID: `{:?}`", id), loc!())?
                         }
                     }
                 }

@@ -77,7 +77,8 @@ pub enum ParamId {
     Play,
     Disconnect(usize),
     Remove(usize),
-    WaveFreq(usize, u32),
+    ToggleWaveToneType(usize, u32),
+    WaveTone(usize, u32),
     WaveType(usize, u32),
     RemoveWave(usize, u32),
     AddWave(usize),
@@ -88,20 +89,21 @@ pub enum ParamId {
 }
 
 impl ParamId {
-    // returns Some(id) when the parameter ID belongs to a specific element
+    /// returns Some(id) when the parameter ID belongs to a specific element
     pub fn element_id(&self) -> Option<usize> {
         match self {
-            &ParamId::Play                => None,
-            &ParamId::Disconnect(id)      => Some(id),
-            &ParamId::Remove(id)          => Some(id),
-            &ParamId::WaveFreq(id, _)     => Some(id),
-            &ParamId::WaveType(id, _)     => Some(id),
-            &ParamId::RemoveWave(id, _)   => Some(id),
-            &ParamId::AddWave(id)         => Some(id),
-            &ParamId::EnvelopeAttack(id)  => Some(id),
-            &ParamId::EnvelopeDecay(id)   => Some(id),
-            &ParamId::EnvelopSustain(id)  => Some(id),
-            &ParamId::EnvelopeRelease(id) => Some(id),
+            ParamId::Play                      => None,
+            ParamId::Disconnect(_)             => None,
+            ParamId::Remove(_)                 => None,
+            ParamId::ToggleWaveToneType(id, _) => Some(*id),
+            ParamId::WaveTone(id, _)           => Some(*id),
+            ParamId::WaveType(id, _)           => Some(*id),
+            ParamId::RemoveWave(id, _)         => Some(*id),
+            ParamId::AddWave(id)               => Some(*id),
+            ParamId::EnvelopeAttack(id)        => Some(*id),
+            ParamId::EnvelopeDecay(id)         => Some(*id),
+            ParamId::EnvelopSustain(id)        => Some(*id),
+            ParamId::EnvelopeRelease(id)       => Some(*id),
         }
     }
 }
