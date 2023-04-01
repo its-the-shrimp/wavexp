@@ -14,18 +14,66 @@ use crate::{
         HitZone,
         HorizontalArrow,
         Rhombus,
-        JsResultUtils, BoolExt, SliceExt, VecExt, OptionToJsResult, js_error},
+        JsResultUtils, BoolExt, SliceExt, VecExt, js_error},
     input::{Switch, Slider, Button, ParamId},
     MainCmd,
-    loc};
+    loc, SoundEvent};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Note(u8);
 
 impl Note {
-    pub const FREQS: [f32; 24] = [
-        55.00 /*A1*/, 58.27 /*A#1*/,
-        61.74 /*B1*/,
+    pub const C2:  Note = Note(0);
+    pub const CS2: Note = Note(1);
+    pub const D2:  Note = Note(2);
+    pub const DS2: Note = Note(3);
+    pub const E2:  Note = Note(4);
+    pub const F2:  Note = Note(5);
+    pub const FS2: Note = Note(6);
+    pub const G2:  Note = Note(7);
+    pub const GS2: Note = Note(8);
+    pub const A2:  Note = Note(9);
+    pub const AS2: Note = Note(10);
+    pub const B2:  Note = Note(11);
+    pub const C3:  Note = Note(12);
+    pub const CS3: Note = Note(13);
+    pub const D3:  Note = Note(14);
+    pub const DS3: Note = Note(15);
+    pub const E3:  Note = Note(16);
+    pub const F3:  Note = Note(17);
+    pub const FS3: Note = Note(18);
+    pub const G3:  Note = Note(19);
+    pub const GS3: Note = Note(20);
+    pub const A3:  Note = Note(21);
+    pub const AS3: Note = Note(22);
+    pub const B3:  Note = Note(23);
+    pub const C4:  Note = Note(24);
+    pub const CS4: Note = Note(25);
+    pub const D4:  Note = Note(26);
+    pub const DS4: Note = Note(27);
+    pub const E4:  Note = Note(28);
+    pub const F4:  Note = Note(29);
+    pub const FS4: Note = Note(30);
+    pub const G4:  Note = Note(31);
+    pub const GS4: Note = Note(32);
+    pub const A4:  Note = Note(33);
+    pub const AS4: Note = Note(34);
+    pub const B4:  Note = Note(35);
+
+    pub const MAX: Note = Note::B4;
+    pub const N_OCTAVES: usize = 3;
+
+    pub const ALL: [Note; 36] = {
+        let mut res = [Note(0); 36];
+        let mut iter = 0;
+        while iter < res.len() {
+            res[iter].0 = iter as u8;
+            iter += 1;
+        }
+        res
+    };
+
+    pub const FREQS: [f32; 36] = [
         65.41 /*C2*/, 69.30 /*C#2*/,
         73.42 /*D2*/, 77.78 /*D#2*/,
         82.41 /*E2*/,
@@ -37,11 +85,19 @@ impl Note {
         146.83/*D3*/, 155.56/*D#3*/,
         164.81/*E3*/,
         174.61/*F3*/, 185.00/*F#3*/,
-        196.00/*G3*/, 207.65/*G#3*/];
+        196.00/*G3*/, 207.65/*G#3*/,
+        220.0 /*A3*/, 233.08/*A#3*/,
+        246.94/*B3*/,
+        261.63/*C4*/, 277.18/*C#4*/,
+        293.66/*D4*/, 311.13/*D#4*/,
+        329.63/*E4*/,
+        349.23/*F4*/, 369.99/*F#4*/,
+        392.00/*G4*/, 415.30/*G#4*/,
+        440.0 /*A4*/, 466.16/*A#4*/,
+        493.88/*B4*/
+    ];
 
-    pub const NAMES: [&'static str; 24] = [
-        "A1", "A#1",
-        "B1",
+    pub const NAMES: [&'static str; 36] = [
         "C2", "C#2",
         "D2", "D#2",
         "E2",
@@ -53,19 +109,32 @@ impl Note {
         "D3", "D#3",
         "E3",
         "F3", "F#3",
-        "G3", "G#3"];
+        "G3", "G#3",
+        "A3", "A#3",
+        "B3",
+        "C4", "C#4",
+        "D4", "D#4",
+        "E4",
+        "F4", "F#4",
+        "G4", "G#4",
+        "A4", "A#4",
+        "B4"];
 
-    pub const fn index(value: usize) -> Option<Self> {
+    #[inline] pub const fn from_index(value: usize) -> Option<Self> {
         if value >= Self::FREQS.len() {return None}
         Some(Self(value as u8))
     }
 
     /// SAFETY: `value` must be finite
-    pub unsafe fn freq_unchecked(value: f32) -> Self {
+    pub unsafe fn from_freq_unchecked(value: f32) -> Self {
         const MAX: usize = Note::FREQS.len() - 1;
         Self(Self::FREQS.iter()
             .position(|&freq| value <= freq)
             .unwrap_or(MAX) as u8)
+    }
+
+    #[inline] pub const fn name(&self) -> &'static str {
+        unsafe{Self::NAMES.get_unchecked(self.0 as usize)}
     }
 
     /*pub fn freq(value: f32) -> Option<Self> {
@@ -73,46 +142,50 @@ impl Note {
         Some(unsafe{Self::freq_unchecked(value)})
     }*/
 
-    pub const fn to_index(self) -> usize {
+    #[inline] pub const fn index(&self) -> usize {
         self.0 as usize
     }
 
-    pub const fn to_freq(self) -> f32 {
+    pub fn diatonic_index(&self) -> usize {
+        let octave = self.0 as usize / 12;
+        let pitch = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6].get_wrapping(self.0 as usize);
+        octave * 7 + *pitch
+    }
+
+    #[inline] pub const fn freq(&self) -> f32 {
         unsafe{*Self::FREQS.get_unchecked(self.0 as usize)}
+    }
+
+    #[inline] pub const fn is_sharp(&self) -> bool {
+        self.0 % 2 == (self.0 % 12 < 5) as u8
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum Tone {
+enum Pitch {
     Freq(f32),
-    Note(Note)
+    Note(i8)
 }
 
-impl Tone {
-    pub fn to_freq(&self) -> f32 {
-        match self {
-            Self::Freq(x) => *x,
-            Self::Note(x) => x.to_freq()}
+impl Pitch {
+    fn toggle(&mut self) {
+        *self = match *self {
+            Self::Freq(_) => Self::Note(0),
+            Self::Note(_) => Self::Freq(0.0)}
     }
 
-    /*pub fn to_note(&self) -> Note {
+    fn apply(&self, note: Note) -> f32 {
         match self {
-            &Self::Note(x) => x,
-            &Self::Freq(x) => unsafe{Note::freq_unchecked(x)}
+            Self::Freq(freq) => note.freq() + freq,
+            Self::Note(off)  =>
+                Note(note.0.saturating_add_signed(*off).min(Note::MAX.0)).freq()
         }
-    }*/
-
-    pub fn toggled(self) -> Self {
-        unsafe {
-            match self {
-                Self::Freq(freq) => Self::Note(Note::freq_unchecked(freq)),
-                Self::Note(note) => Self::Freq(note.to_freq())}}
     }
 }
 
 #[derive(Clone, Debug)]
 pub enum Sound {
-    InputFreq(f32),
+    InputNote(Note),
     Wave(GainNode),
     Envelope{attack: Option<u32>, decay: u32, sustain: f32, release: u32, ctrl: GainNode},
     End
@@ -132,13 +205,13 @@ impl Sound {
     const MAX_WAVE_FREQ: f64 = 5000.0;
     const MAX_INTERVAL: f64 = 2000.0;
 
-    pub fn wave<'a>(self, ctx: &AudioContext, waves: impl Iterator<Item = WaveDef>) -> JsResult<Self> {
+    fn wave<'a>(self, ctx: &AudioContext, waves: impl Iterator<Item = WaveDef>) -> JsResult<Self> {
         Ok(match self {
-            Self::InputFreq(freq) => {
+            Self::InputNote(note) => {
                 let ctrl = GainNode::new_with_options(ctx, GainOptions::new().gain(f32::MIN_POSITIVE)).add_loc(loc!())?;
                 for wave in waves {
                     let wave = OscillatorNode::new_with_options(ctx, OscillatorOptions::new()
-                        .frequency(wave.freq + freq)
+                        .frequency(wave.pitch.apply(note))
                         .type_(wave.wave_type)).add_loc(loc!())?;
                     wave.start().add_loc(loc!())?;
                     wave.connect_with_audio_node(&ctrl).add_loc(loc!())?;
@@ -149,13 +222,13 @@ impl Sound {
         })
     }
 
-    /// `attack`, `decay` and `release` are in microseconds, `sustain` must be in [0; 1]
-    pub fn envelope(self, ctx: &AudioContext, attack: u32, decay: u32, sustain: f32, release: u32) -> JsResult<Self> {
+    /// `attack`, `decay` and `release` are in milliseconds, `sustain` must be in [0; 1]
+    fn envelope(self, ctx: &AudioContext, attack: u32, decay: u32, sustain: f32, release: u32) -> JsResult<Self> {
         let ctrl = match self {
-            Self::InputFreq(freq) => {
+            Self::InputNote(note) => {
                 let ctrl = GainNode::new_with_options(ctx, GainOptions::new().gain(f32::MIN_POSITIVE)).add_loc(loc!())?;
                 let gen = OscillatorNode::new_with_options(ctx,
-                    OscillatorOptions::new().frequency(WaveDef::DEF_FREQ + freq)).add_loc(loc!())?;
+                    OscillatorOptions::new().frequency(note.freq())).add_loc(loc!())?;
                 gen.connect_with_audio_node(&ctrl).add_loc(loc!())?;
                 gen.start().add_loc(loc!())?;
                 ctrl}
@@ -165,20 +238,22 @@ impl Sound {
         Ok(Self::Envelope{attack: Some(attack), decay, sustain, release, ctrl})
     }
 
-    #[inline] pub fn name(&self) -> &'static str {
+    #[inline] fn name(&self) -> &'static str {
         match self {
-            Self::InputFreq(_) => "Input Frequency",
+            Self::InputNote(_) => "Input Note",
             Self::Wave(_) => "Complex Wave",
             Self::Envelope{..} => "Envelope",
             Self::End => "Ending Signal"}
     }
 
-    pub fn prepare(self, dest: &AudioNode) -> JsResult<Self> {
+    fn prepare(self, dest: &AudioNode) -> JsResult<Self> {
         Ok(match self {
-            Self::InputFreq(freq) => {
+            Self::InputNote(note) => {
                 let ctx = dest.context();
-                let ctrl = GainNode::new_with_options(&ctx, GainOptions::new().gain(f32::MIN_POSITIVE)).add_loc(loc!())?;
-                OscillatorNode::new_with_options(&ctx, OscillatorOptions::new().frequency(freq)).add_loc(loc!())?
+                let ctrl = GainNode::new_with_options(&ctx, GainOptions::new()
+                    .gain(f32::MIN_POSITIVE)).add_loc(loc!())?;
+                OscillatorNode::new_with_options(&ctx, OscillatorOptions::new()
+                    .frequency(note.freq())).add_loc(loc!())?
                     .connect_with_audio_node(&ctrl).add_loc(loc!())?
                     .connect_with_audio_node(dest).add_loc(loc!())?;
                 Self::Wave(ctrl)}
@@ -195,7 +270,7 @@ impl Sound {
         })
     }
 
-    pub fn progress(&mut self) -> JsResult<Option<u32>> {
+    fn progress(&mut self) -> JsResult<Option<u32>> {
         Ok(match self {
             Self::Wave(ctrl) => {
                 let ctx: AudioContext = ctrl.context().unchecked_into();
@@ -215,8 +290,8 @@ impl Sound {
         })
     }
 
-    /// the returned float signifies when the object can be discarded
-    pub fn end(&mut self) -> JsResult<u32> {
+    /// returns the time interval in milliseconds after which the object can be discarded
+    fn end(&mut self) -> JsResult<u32> {
         Ok(match self {
             Self::Wave(ctrl) => {
                 let ctx: AudioContext = ctrl.context().unchecked_into();
@@ -232,7 +307,7 @@ impl Sound {
         })
     }
 
-    pub fn disconnect(self) -> JsResult<()> {
+    fn disconnect(self) -> JsResult<()> {
         match self {
             Self::Wave(ctrl) | Self::Envelope{ctrl, ..}
                 => ctrl.disconnect(),
@@ -257,37 +332,15 @@ pub struct Element {
 
 /// used by the implementation of `SoundGen::Wave`
 #[derive(Debug, Clone, Copy)]
-pub struct WaveDef{
-    pub freq: f32,
-    pub wave_type: OscillatorType
-}
-
-impl Default for WaveDef {
-    fn default() -> Self {
-        Self{freq: Self::DEF_FREQ, wave_type: OscillatorType::Sine}
-    }
+pub struct WaveDef {
+    id: usize,
+    pitch: Pitch,
+    wave_type: OscillatorType
 }
 
 impl WaveDef {
-    const DEF_FREQ: f32 = 440.0;
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct RawWaveDef{
-    pub id: usize,
-    pub tone: Tone,
-    pub wave_type: OscillatorType
-}
-
-impl From<RawWaveDef> for WaveDef {
-    fn from(value: RawWaveDef) -> Self {
-        Self{freq: value.tone.to_freq(), wave_type: value.wave_type}
-    }
-}
-
-impl RawWaveDef {
     fn new(id: usize) -> Self {
-        Self{id, tone: Tone::Freq(440.0), wave_type: OscillatorType::Sine}
+        Self{id, pitch: Pitch::Freq(0.0), wave_type: OscillatorType::Sine}
     }
 }
 
@@ -298,7 +351,7 @@ pub enum SoundGen {
     /// emits a stub sound when it's time to start playing, doesn't accept any input
     Input{base: Element},
     /// generates a wave combined from a variable number of primitive waves of customizable form
-    Wave{base: Element, waves: Vec<RawWaveDef>, n_waves: usize},
+    Wave{base: Element, waves: Vec<WaveDef>, n_waves: usize},
     /// wraps the input sound in an "envelope": https://en.wikipedia.org/wiki/Envelope_(music)
     Envelope{base: Element, attack: u32, decay: u32, sustain: f32, release: u32},
     /// consumes the input sound, delegating it to the `SoundPlayer`
@@ -390,7 +443,7 @@ impl SoundGen {
 
     /// the returned optional integer marks the interval (in microseconds) after which
     /// this function should be called again with a stub sound as input
-    pub fn transform(&mut self, player: &mut SoundPlayer, sound: Sound) -> JsResult<(Sound, Option<u32>)> {
+    pub fn transform(&mut self, player: &mut SoundPlayer, sound: Sound, _time: f64) -> JsResult<(Sound, Option<SoundEvent>)> {
         match self {
             Self::Wave{waves, ..} =>
                 sound.wave(player.audio_ctx(), waves.iter().map(|&x| x.into()))
@@ -455,26 +508,28 @@ impl SoundGen {
                         </Button>
                         <Button
                         key={wave.id * 5 + 3}
-                        id={ParamId::ToggleWaveToneType(self.id, i as u32)}
-                        desc={"Toggle tone input mode"}>
-                            <div>{if let Tone::Freq(_) = wave.tone {"Frequency"} else {"Pitch"}}</div>
+                        id={ParamId::ToggleWavePitchType(self.id, i as u32)}
+                        desc={"Toggle pitch input mode"}>
+                            <div>{if let Pitch::Freq(_) = wave.pitch {"Frequency"} else {"Note"}}</div>
                         </Button>
                     </div>
-                    if let Tone::Note(note) = wave.tone {
-                        <Switch
-                        key={wave.id * 5}
-                        id={ParamId::WaveTone(self.id, i as u32)}
-                        options={Note::NAMES.to_vec()}
-                        name={"Note"}
-                        initial={note.to_index()}/>
-                    } else if let Tone::Freq(freq) = wave.tone {
+                    if let Pitch::Note(off) = wave.pitch {
                         <Slider
                         key={wave.id * 5}
-                        id={ParamId::WaveTone(self.id, i as u32)}
-                        coef={Sound::MAX_WAVE_FREQ} precision={0}
+                        id={ParamId::WavePitch(self.id, i as u32)}
+                        max={Note::MAX.0 as f64} precision={0}
+                        signed={true}
+                        name={"Note"}
+                        initial={off as f64}/>
+                    } else if let Pitch::Freq(off) = wave.pitch {
+                        <Slider
+                        key={wave.id * 5 + 4}
+                        id={ParamId::WavePitch(self.id, i as u32)}
+                        max={Sound::MAX_WAVE_FREQ} precision={0}
+                        signed={true}
                         postfix={"Hz"}
                         name={"Frequency"}
-                        initial={freq as f64}/>
+                        initial={off as f64}/>
                     }
                     <Switch
                     key={wave.id * 5 + 1}
@@ -486,8 +541,8 @@ impl SoundGen {
                 <Button
                 key={n_waves * 5}
                 id={ParamId::AddWave(self.id)}
-                desc={"Add new wave element"}
-                style={"grid-column: 1 / -1; width: auto"}>
+                desc="Add new wave element"
+                class="add-wave-button">
                     <svg viewBox="0 0 100 100" style="height:100%">
                         <polygon points="45,25 55,25 55,45 75,45 75,55 55,55 55,75 45,75 45,55 25,55 25,45 45,45"/>
                     </svg>
@@ -497,22 +552,22 @@ impl SoundGen {
             Self::Envelope{attack, decay, sustain, release, ..} => html! {<div id="inputs">
                 <Slider name={"Attack time"}
                     id={ParamId::EnvelopeAttack(self.id)}
-                    coef={Sound::MAX_INTERVAL}
+                    max={Sound::MAX_INTERVAL}
                     postfix={"ms"} precision={0}
                     initial={*attack as f64}/>
                 <Slider name={"Decay time"}
                     id={ParamId::EnvelopeDecay(self.id)}
-                    coef={Sound::MAX_INTERVAL}
+                    max={Sound::MAX_INTERVAL}
                     postfix={"ms"} precision={0}
                     initial={*decay as f64}/>
                 <Slider name={"Sustain level"}
                     id={ParamId::EnvelopSustain(self.id)}
-                    coef={1.0}
+                    max={1.0}
                     postfix={""} precision={2}
                     initial={*sustain as f64}/>
                 <Slider name={"Release time"}
                     id={ParamId::EnvelopeRelease(self.id)}
-                    coef={Sound::MAX_INTERVAL}
+                    max={Sound::MAX_INTERVAL}
                     postfix={"ms"} precision={0}
                     initial={*release as f64}/>
             </div>},
@@ -523,20 +578,15 @@ impl SoundGen {
     pub fn set_param(&mut self, id: ParamId, value: f64) -> JsResult<bool> {
         Ok(match self {
             Self::Wave{waves, n_waves, ..} => match id {
-                ParamId::ToggleWaveToneType(_, id) => value.is_sign_negative().then_try(|| {
+                ParamId::ToggleWavePitchType(_, id) => value.is_sign_negative().then_try(|| {
                     waves.get_mut_or_js_error(id as usize, "wave element #", " not found").add_loc(loc!())
-                        .map(|wave| wave.tone = wave.tone.toggled())
+                        .map(|wave| wave.pitch.toggle())
                 })?.is_some(),
 
-                ParamId::WaveTone(_, id) => {
-                    if !value.is_finite() || value < 0.0 {
-                        js_error(format!("{:?} is an invalid wave tone", value), loc!())?;
-                    }
-                    match waves.get_mut_or_js_error(id as usize, "wave element #", " not found").add_loc(loc!())?.tone {
-                        Tone::Note(ref mut note) => *note = Note::index(value as usize)
-                            .to_js_result_with(|| format!("{:?} is an invalid note index", value)).add_loc(loc!())?,
-                        Tone::Freq(ref mut freq) => *freq = value as f32
-                    }
+                ParamId::WavePitch(_, id) => {
+                    match waves.get_mut_or_js_error(id as usize, "wave element #", " not found").add_loc(loc!())?.pitch {
+                        Pitch::Note(ref mut off) => *off = value as i8,
+                        Pitch::Freq(ref mut off) => *off = value as f32}
                     false}
 
                 ParamId::WaveType(_, id) => {
@@ -549,7 +599,7 @@ impl SoundGen {
                     waves.remove(id as usize)).is_some(),
 
                 ParamId::AddWave(_) => value.is_sign_negative().then(|| {
-                    waves.push(RawWaveDef::new(*n_waves));
+                    waves.push(WaveDef::new(*n_waves));
                     *n_waves += 1;
                 }).is_some(),
 

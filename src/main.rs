@@ -1,7 +1,6 @@
 #![feature(try_blocks)]
 #![feature(never_type)]
 #![feature(unwrap_infallible)]
-#![feature(const_float_classify)]
 #![feature(const_slice_index)]
 
 mod render;
@@ -9,17 +8,19 @@ mod utils;
 mod input;
 mod sound;
 use std::cell::{Ref, RefMut};
+use std::cmp::Ordering;
 use std::fmt::Debug;
+use std::rc::Rc;
 use input::{ParamId, Button};
 use render::Renderer;
-use sound::{Sound, SoundGen, SoundPlayer, Graph};
+use sound::{SoundGen, SoundPlayer, Graph, Note};
 use utils::{
     HtmlCanvasExt, HtmlDocumentExt,
     SliceExt, VecExt,
     JsResultUtils, OptionToJsResult, JsResult,
     Point,
     MaybeCell, WasmCell,
-    document, window, ResultToJsResult, js_error};
+    document, window, ResultToJsResult, js_error, Check};
 use web_sys::CanvasRenderingContext2d;
 use web_sys::{
     console::warn_1,
@@ -35,13 +36,39 @@ use wasm_bindgen::JsCast;
 use js_sys::{
     Array as JsArray,
     Function as JsFunction};
+use yew::virtual_dom::VList;
 use yew::{
     Callback,
     Component,
     Context, Html, html};
 
+use crate::sound::Sound;
+
+#[derive(Debug, PartialEq)]
+pub struct SoundEvent {
+    pub element_id: usize,
+    pub when: f64,
+    pub note: Note
+}
+
+impl Eq for SoundEvent {}
+
+impl PartialOrd for SoundEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.when.partial_cmp(&other.when)
+    }
+}
+
+impl Ord for SoundEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let x =  self.when.check(|x| !x.is_nan()).unwrap_or(f64::INFINITY);
+        let y = other.when.check(|y| !y.is_nan()).unwrap_or(f64::INFINITY);
+        unsafe{x.partial_cmp(&y).unwrap_unchecked()}
+    }
+}
+
 /// responsible for playing sounds and frame-by-frame animations
-pub struct Player {
+struct Player {
     graph_canvas: HtmlCanvasElement,
     sound_visualiser_canvas: HtmlCanvasElement,
     renderer: Renderer,
@@ -52,9 +79,8 @@ pub struct Player {
     js_callback: JsFunction,
     sound_comps: Vec<SoundGen>,
     connections: Vec<Vec<usize>>,
-    sound_comp_events: Vec<(usize, f64)>,
+    sound_events: Vec<SoundEvent>,
     sound_player: SoundPlayer,
-    ending_all: bool
 }
 
 static GLOBAL_PLAYER: WasmCell<MaybeCell<Player>> = WasmCell::new(MaybeCell::new());
@@ -68,7 +94,7 @@ impl Player {
                     let Player{ref sound_visualiser_canvas, ref mut renderer,
                         ref graph_canvas, ref solid_line, ref dotted_line,
                         ref mut pbar_start, ref graph,
-                        ref mut sound_comps, ref mut sound_comp_events, ref mut sound_player, ref connections, ref mut ending_all,
+                        ref mut sound_comps, ref mut sound_events, ref mut sound_player, ref connections,
                         ref js_callback} = *handle;
                     let graph_out_span = (graph.span - graph.in_span) as f64;
 
@@ -83,6 +109,40 @@ impl Player {
                     };
 
                     let err2 = js_try!{
+                        macro_rules! apply_sound_comp {
+                            () => {|sound: Sound, _: usize, dst: usize| -> JsResult<Sound> {
+                                let (sound, event) = sound_comps
+                                    .get_mut_or_js_error(dst, "sound element #", " not found").add_loc(loc!())?
+                                    .transform(sound_player, sound, time).add_loc(loc!())?;
+                                if let Some(mut event) = event {
+                                    event.element_id = dst;
+                                    sound_events.push_sorted(event, |x, y| x.cmp(y).reverse());
+                                }
+                                Ok(sound)
+                            }};
+                        }
+
+                        if *pbar_start == f64::NEG_INFINITY {
+                                sound_events.clear();
+                                traverse(connections, 0, Sound::End, &mut apply_sound_comp!()).add_loc(loc!())?;
+                        } else {
+                            let len = sound_events.len();
+                            let start = match sound_events.iter().rev().position(|event| time < event.when) {
+                                Some(x) => (x > 0).then(|| len - x),
+                                None => Some(0)};
+                            if let Some(start) = start {
+                                let pending: Vec<_> = sound_events.drain(start..).collect();
+                                for event in pending {
+                                    let mut apply_sound_comp = apply_sound_comp!();
+                                    let sound = apply_sound_comp(Sound::InputNote(event.note), 0, event.element_id).add_loc(loc!())?;
+                                    traverse(connections, event.element_id, sound, &mut apply_sound_comp).add_loc(loc!())?;
+                                }
+                            }
+                        }
+                        sound_player.poll(time).add_loc(loc!())?;
+                    };
+
+                    let err3 = js_try!{
                         let (w, h, ctx) = (graph_canvas.width().into(), graph_canvas.height().into(), graph_canvas.get_2d_context().add_loc(loc!())?);
                         ctx.set_fill_style(&"#181818".into());
                         ctx.fill_rect(0.0, 0.0, w, h);
@@ -115,38 +175,6 @@ impl Player {
                         }
                     };
 
-                    let err3 = js_try!{
-                        macro_rules! apply_sound_comp {
-                            () => {|sound: Sound, _: usize, dst: usize| -> JsResult<Sound> {
-                                let (sound, after) = sound_comps.get_mut_or_js_error(dst, "sound element #", " not found").add_loc(loc!())?
-                                    .transform(sound_player, sound).add_loc(loc!())?;
-                                if let Some(after) = after {
-                                    sound_comp_events.push_sorted((dst, after as f64 / 1000.0 + time), |x, y| x.1.total_cmp(&y.1).reverse());
-                                }
-                                Ok(sound)
-                            }};
-                        }
-
-                        if *ending_all {
-                            *ending_all = false;
-                            sound_comp_events.clear();
-                            traverse(connections, 0, Sound::End, &mut apply_sound_comp!()).add_loc(loc!())?;
-                        } else {
-                            let len = sound_comp_events.len();
-                            let start = match sound_comp_events.iter().rev().position(|event| time < event.1) {
-                                Some(x) => (x > 0).then(|| len - x),
-                                None => Some(0)};
-                            if let Some(start) = start {
-                                let pending: Vec<_> = sound_comp_events.drain(start..).collect();
-                                for (index, _) in pending {
-                                    let mut apply_sound_comp = apply_sound_comp!();
-                                    let sound = apply_sound_comp(Sound::InputFreq(0.0), 0, index).add_loc(loc!())?;
-                                    traverse(connections, index, sound, &mut apply_sound_comp).add_loc(loc!())?;
-                                }
-                            }
-                        }
-                        sound_player.poll(time).add_loc(loc!())?;
-                    };
 
                     err1.and(err2).and(err3)
                         .and(window().request_animation_frame(js_callback).add_loc(loc!()))
@@ -167,7 +195,7 @@ impl Player {
             pbar_start: f64::NAN,
             js_callback: JsClosure::<dyn Fn(f64)>::new(render)
                 .into_js_value().unchecked_into(),
-            sound_comp_events: vec![], ending_all: false, sound_comps,
+            sound_events: vec![], sound_comps,
             connections: vec![vec![], vec![]], sound_player: SoundPlayer::new().add_loc(loc!())?
         }).add_loc(loc!())?;
         Ok(render(0.0))
@@ -221,14 +249,13 @@ impl Player {
         self.sound_comps.iter_mut().find(|x| x.contains(point))
     }
 
-    fn play_sounds(&mut self) {
+    fn play_sounds(&mut self, note: Note) {
         self.pbar_start = f64::INFINITY;
-        self.sound_comp_events.push((0, f64::NEG_INFINITY));
+        self.sound_events.push(SoundEvent{element_id: 0, when: f64::NEG_INFINITY, note});
     }
 
     fn end_sounds(&mut self) {
         self.pbar_start = f64::NEG_INFINITY;
-        self.ending_all = true;
     }
 
     fn connect(&mut self, src_id: usize, dst_id: usize) -> JsResult<bool> {
@@ -328,6 +355,7 @@ impl Component for Main {
             .unwrap_throw().unchecked_into();
         help_msg_bar.set_id("help-msg");
         help_msg_bar.set_inner_text(Self::DEF_HELP_MSG);
+        help_msg_bar.set_class_name("light-bg");
 
         Self {help_msg_bar,
             selected_comp: None, focused_comp: None, hovered_comp: None,
@@ -427,8 +455,8 @@ impl Component for Main {
                     } else {
                         let player = player.insert(GLOBAL_PLAYER.get_mut().add_loc(loc!())?);
                         match id {
-                            ParamId::Play => if value.is_sign_positive() {
-                                player.play_sounds()
+                            ParamId::Play(note) => if value.is_sign_positive() {
+                                player.play_sounds(note)
                             } else {
                                 player.end_sounds()
                             }
@@ -488,19 +516,51 @@ impl Component for Main {
                 .ok().to_js_result_with(|| format!("sound element #{} not found", id)).add_loc(loc!())
                 .expect_throw("building the app view"));
 
+        fn piano_roll() -> Html {
+            let mut list = VList::new();
+            list.reserve_exact(Note::ALL.len() + 1);
+            const N_DIATONIC_NOTES: f64 = Note::N_OCTAVES as f64 * 7.0;
+            let width: Rc<str> = format!("{:.2}%", 100.0 / N_DIATONIC_NOTES).into();
+
+            for note in Note::ALL.iter().filter(|x| !x.is_sharp()) {
+                let x = note.diatonic_index() as f64 / (N_DIATONIC_NOTES / 100.0);
+                list.add_child(html!{
+                    <Button svg={true} class="piano-note"
+                     id={ParamId::Play(*note)}
+                     desc={format!("Play the {} note", note.name())}>
+                        <rect width={width.clone()} height="100%" 
+                         x={format!("{:.2}%", x)} y="0"/>
+                    </Button>});
+            }
+
+            for note in Note::ALL.iter().filter(|x| x.is_sharp()) {
+                let x = (note.diatonic_index() as f64 + 0.5) / (N_DIATONIC_NOTES / 100.0);
+                list.add_child(html!{
+                    <Button svg={true} class="piano-note sharp-note"
+                     id={ParamId::Play(*note)}
+                     desc={format!("Play the {} note", note.name())}>
+                        <rect width={width.clone()} height="50%" 
+                         x={format!("{:.2}%", x)} y="0"/>
+                    </Button>});
+            }
+
+            list.add_child(html!{<line class="piano-note" x1="100%" x2="100%" y2="100%" transform="translate(-4.5, 0)"/>});
+            Html::VList(list)
+        }
+
         return html! {<>
             <canvas width="100%" height="100%" id="plane"
             onpointerdown={ctx.link().callback(MainCmd::Focus)}
             onpointerup={ctx.link().callback(MainCmd::Unfocus)}
             onpointermove={ctx.link().callback(MainCmd::Drag)}
             onpointerleave={ctx.link().callback(|_| MainCmd::LeavePlane)}/>
-            <div id="ctrl-panel">
+            <div id="ctrl-panel" class="dark-bg">
                 {Html::VRef(self.help_msg_bar.clone().into())}
                 {comp.as_ref().map(|x| x.params())}
-                <canvas id="graph" class="visual"
+                <canvas id="graph" class="blue-border"
                 hidden={comp.map(|x| !x.graphable()).unwrap_or(true)}/>
                 if let Some(comp_id) = self.selected_comp {
-                    <div id="general-ctrl">
+                    <div id="general-ctrl" class="dark-bg">
                         <Button
                         id={ParamId::Disconnect(comp_id)}
                         desc={"Disconnect component"}>
@@ -520,15 +580,11 @@ impl Component for Main {
                     </div>
                 }
             </div>
-            <div id="visuals">
-                <canvas id="sound-visualiser" class="visual"/>
-                <input::Button
-                id={ParamId::Play}
-                desc={"Play"}>
-                    <svg viewBox="0 0 100 100" height="100%">
-                        <polygon points="25,25 75,50 25,75"/>
-                    </svg>
-                </input::Button>
+            <div id="io-panel">
+                <svg id="piano" viewBox={format!("-3 0 {} 100", Note::ALL.len() * 20 - 3)}>
+                    {piano_roll()}
+                </svg>
+                <canvas id="sound-visualiser" class="blue-border"/>
             </div>
             if self.error_count > 0 {
                 <div id="error-count">{format!("Errors: {}", self.error_count)}</div>

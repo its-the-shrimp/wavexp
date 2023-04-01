@@ -13,7 +13,7 @@ use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingCon
 use crate::MainCmd;
 
 pub trait Check: Sized {
-	#[inline] fn check<F>(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
+	#[inline] fn check(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
 		if f(&self) {Ok(self)} else {Err(self)}
 	}
 
@@ -297,6 +297,8 @@ impl Display for GetVarError {
 pub trait SliceExt<T> {
     fn get_saturating<'a>(&'a self, id: usize) -> &'a T;
     fn get_saturating_mut<'a>(&'a mut self, id: usize) -> &'a mut T;
+    fn get_wrapping<'a>(&'a self, id: usize) -> &'a T;
+    fn get_wrapping_mut<'a>(&'a mut self, id: usize) -> &'a mut T;
     // the format of the error message would be: <prefix><id><postifx>
     fn get_or_js_error<'a>(&'a self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a T>;
     fn get_mut_or_js_error<'a>(&'a mut self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a mut T>;
@@ -311,6 +313,14 @@ impl<T> SliceExt<T> for [T] {
 
     #[inline] fn get_saturating_mut<'a>(&'a mut self, id: usize) -> &'a mut T {
         unsafe{self.get_unchecked_mut(id.min(self.len() - 1))}
+    }
+
+    #[inline] fn get_wrapping<'a>(&'a self, id: usize) -> &'a T {
+        unsafe{self.get_unchecked(id % self.len())}
+    }
+
+    #[inline] fn get_wrapping_mut<'a>(&'a mut self, id: usize) -> &'a mut T {
+        unsafe{self.get_unchecked_mut(id % self.len())}
     }
 
     #[inline] fn get_or_js_error<'a>(&'a self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a T> {

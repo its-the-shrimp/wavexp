@@ -16,46 +16,43 @@
 				z-index: 1;
 				height: 100%}
 			canvas {object-fit: contain}
+			.dark-bg {background-color: #181818}
+			.light-bg {background-color: #232328}
+			.blue-border {border: 3px solid #0069E1}
 			#ctrl-panel {
 				position: fixed;
 				left: 0;
 				top: 0;
 				padding: 1em;
+				box-sizing: border-box;
 				display: flex;
 				gap: 1em;
-				background-color: #181818;
 				flex-direction: column}
-			#ctrl-panel:has(#general-ctrl) {bottom: 0}
+			#ctrl-panel:has(#general-ctrl) {height: 80%}
 			#help-msg {
-				background-color: #232328;
 				padding: 1em;
 				white-space: pre;
 				overflow: hidden;
 				user-select: none}
-			.visual {border: 3px solid #0069E1}
 			#inputs {
 				display: grid;
 				grid-template-columns: repeat(2, 1fr)}
-			#visuals {
+			#io-panel {
 				position: fixed;
-				right: 0;
-				top: 0;
 				bottom: 0;
+				right: 0;
+				left: 0;
+				height: 20%;
 				background-color: #181818;
-				padding: 1em;
-				display: flex;
-				flex-direction: column;
-				justify-content: flex-end}
-			#visuals > .button {
-				 width: auto;
-				 border-top-width: 0;
-				 height: 3em}
-			#visuals > canvas {flex: 1}
+				display: flex}
+			#piano {
+				flex-grow: 3;
+				margin: 1em}
+			#sound-visualiser {margin: 1em}
 			.input {
 				width: 6em;
 				height: 6em}
 			.button {
-				background-color: #181818;
 				font: 1em consolas;
 				color: #0069E1;
 				border: solid 3px transparent}
@@ -71,10 +68,24 @@
 			.button > div {
 				margin-top: 12.5%;
 				user-select: none}
+			.piano-note {
+				position: relative;
+				stroke: #0069E1;
+				stroke-width: 3;
+				fill: #232328}
+			.piano-note:hover {
+				fill: #0069E1;
+				stroke: #0069E1}
+			.sharp-note {
+				fill: #0069E1;
+				stroke: #232328}
 			.component {
 				fill: #232328;
 				stroke: #0069E1;
 				stroke-width: 2}
+			.add-wave-button {
+				grid-column: 1 / -1;
+				width: auto}
 			#error-count {
 				position: fixed;
 				left: 0;

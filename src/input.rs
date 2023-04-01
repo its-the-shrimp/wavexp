@@ -8,7 +8,7 @@ use yew::{html,
     Context,
     Html,
     TargetCast,
-    html::Children};
+    html::Children, Classes, AttrValue};
 use crate::{
     utils::{
         document,
@@ -16,8 +16,8 @@ use crate::{
         JsResultUtils,
         HtmlCanvasExt,
         HtmlDocumentExt,
-        OptionToJsResult, JsResult},
-    MainCmd, loc};
+        OptionToJsResult, JsResult, BoolExt},
+    MainCmd, loc, sound::Note};
 
 #[derive(Debug)]
 pub enum Cmd {
@@ -74,11 +74,11 @@ impl Cmd {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ParamId {
-    Play,
+    Play(Note),
     Disconnect(usize),
     Remove(usize),
-    ToggleWaveToneType(usize, u32),
-    WaveTone(usize, u32),
+    ToggleWavePitchType(usize, u32),
+    WavePitch(usize, u32),
     WaveType(usize, u32),
     RemoveWave(usize, u32),
     AddWave(usize),
@@ -92,11 +92,11 @@ impl ParamId {
     /// returns Some(id) when the parameter ID belongs to a specific element
     pub fn element_id(&self) -> Option<usize> {
         match self {
-            ParamId::Play                      => None,
+            ParamId::Play(_)                   => None,
             ParamId::Disconnect(_)             => None,
             ParamId::Remove(_)                 => None,
-            ParamId::ToggleWaveToneType(id, _) => Some(*id),
-            ParamId::WaveTone(id, _)           => Some(*id),
+            ParamId::ToggleWavePitchType(id, _) => Some(*id),
+            ParamId::WavePitch(id, _)           => Some(*id),
             ParamId::WaveType(id, _)           => Some(*id),
             ParamId::RemoveWave(id, _)         => Some(*id),
             ParamId::AddWave(id)               => Some(*id),
@@ -117,9 +117,11 @@ pub struct Slider {
 
 #[derive(PartialEq, yew::Properties)]
 pub struct SliderProps {
-    pub name: &'static str,
+    pub name: AttrValue,
+    #[prop_or(false)]
+    pub signed: bool,
     #[prop_or(1.0)]
-    pub coef: f64,
+    pub max: f64,
     #[prop_or(2)]
     pub precision: usize,
     #[prop_or("")]
@@ -136,25 +138,25 @@ impl Component for Slider {
     type Properties = SliderProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        let SliderProps {coef, initial, ..} = ctx.props();
-        Self {focused: false, hovered: false, value: initial / coef,
+        let SliderProps {max, initial, ..} = ctx.props();
+        Self {focused: false, hovered: false, value: initial / max,
             canvas: JsValue::UNDEFINED.unchecked_into()}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            let SliderProps{id, coef, name, ..} = ctx.props();
+            let SliderProps{id, signed, max, name, ..} = ctx.props();
             msg.handle_hover(name, |_, hovered| Ok(self.hovered = hovered)).add_loc(loc!())?
                 .handle_focus(|_| Ok(self.focused = true)).add_loc(loc!())?
                 .handle_unfocus(|_| Ok({
                     self.focused = false;
-                    MainCmd::SetParam(*id, self.value * coef).send();
+                    MainCmd::SetParam(*id, self.value * max).send();
                 })).add_loc(loc!())?
                 .handle_drag(|e| Ok({
                     let target = e.target_dyn_into::<Element>()
                         .to_js_result("no target on a pointer event").add_loc(loc!())?;
                     self.value = (self.value + e.movement_y() as f64 / (target.client_height() * -2) as f64)
-                        .clamp(0.0, 1.0);
+                        .clamp(signed.choose(-1.0, 0.0), 1.0);
                 })).add_loc(loc!())?;
             return true
         }.report_err();
@@ -174,7 +176,7 @@ impl Component for Slider {
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         _ = js_try!{type = !:
-            let SliderProps{coef, precision, postfix, id, ..} = ctx.props();
+            let SliderProps{max, precision, postfix, id, ..} = ctx.props();
             if first_render {
                 self.canvas = document()
                     .element_dyn_into(&format!("Slider({:?})", *id)).add_loc(loc!())?;
@@ -197,11 +199,12 @@ impl Component for Slider {
                 ctx.stroke();
                 ctx.begin_path()}
             if self.value != 0.0 {
-                ctx.arc(w, h + LINE_WIDTH, r - LINE_WIDTH,
-                    PI * 1.5, (self.value * 2.0 + 1.5) * PI).add_loc(loc!())?;
-                ctx.stroke()}
+                ctx.arc_with_anticlockwise(w, h + LINE_WIDTH, r - LINE_WIDTH,
+                    PI * 1.5, (self.value * 2.0 + 1.5) * PI, self.value.is_sign_negative()).add_loc(loc!())?;
+                ctx.stroke();
+            }
             ctx.set_text_baseline("middle");
-            ctx.fill_text_with_max_width(&format!("{:.*}", precision, coef * self.value),
+            ctx.fill_text_with_max_width(&format!("{:.*}", precision, max * self.value),
                 w, h + LINE_WIDTH / 2.0, r).add_loc(loc!())?;
             ctx.set_text_baseline("top");
             return ctx.fill_text_with_max_width(postfix, 
@@ -220,7 +223,7 @@ pub struct Switch {
 
 #[derive(PartialEq, yew::Properties)]
 pub struct SwitchProps {
-    pub name: &'static str,
+    pub name: AttrValue,
     pub options: Vec<&'static str>,
     pub id: ParamId,
     pub initial: usize
@@ -304,10 +307,12 @@ pub struct Button;
 #[derive(PartialEq, yew::Properties)]
 pub struct ButtonProps {
     #[prop_or_default]
-    pub style: &'static str,
-    pub desc: &'static str,
+    pub class: Classes,
+    pub desc: AttrValue,
     pub children: Children,
-    pub id: ParamId
+    pub id: ParamId,
+    #[prop_or(false)]
+    pub svg: bool
 }
 
 impl Component for Button {
@@ -327,15 +332,28 @@ impl Component for Button {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let ButtonProps{style, children, ..} = ctx.props();
-        html!{
-            <div class="input button" style={*style}
-            onpointerdown={ctx.link().callback(Cmd::Focus)}
-            onpointerup={ctx.link().callback(Cmd::Unfocus)}
-            onpointerenter={ctx.link().callback(Cmd::HoverIn)}
-            onpointerleave={ctx.link().callback(Cmd::HoverOut)}>
-                {children.clone()}
-            </div>
+        let mut class = ctx.props().class.clone();
+        class.push("input button");
+        if ctx.props().svg {
+            html!{
+                <g {class}
+                onpointerdown={ctx.link().callback(Cmd::Focus)}
+                onpointerup={ctx.link().callback(Cmd::Unfocus)}
+                onpointerenter={ctx.link().callback(Cmd::HoverIn)}
+                onpointerleave={ctx.link().callback(Cmd::HoverOut)}>
+                    {ctx.props().children.clone()}
+                </g>
+            }
+        } else {
+            html!{
+                <div {class}
+                onpointerdown={ctx.link().callback(Cmd::Focus)}
+                onpointerup={ctx.link().callback(Cmd::Unfocus)}
+                onpointerenter={ctx.link().callback(Cmd::HoverIn)}
+                onpointerleave={ctx.link().callback(Cmd::HoverOut)}>
+                    {ctx.props().children.clone()}
+                </div>
+            }
         }
     }
 }
