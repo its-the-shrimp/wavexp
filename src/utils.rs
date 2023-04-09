@@ -1,15 +1,16 @@
 use std::{
     ptr,
+    mem,
     fmt::{self, Debug, Formatter, Display},
-    ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref},
+    ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div},
     cell::{RefMut, Ref, RefCell},
     iter::successors,
     error::Error,
     collections::TryReserveError,
-    cmp::Ordering};
+    cmp::Ordering, any::type_name};
 use js_sys::{Object as JsObject, Error as JsError};
 use wasm_bindgen::{JsCast, JsValue, throw_val};
-use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement};
+use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement, Element};
 use crate::MainCmd;
 
 pub trait Check: Sized {
@@ -18,12 +19,12 @@ pub trait Check: Sized {
 	}
 
     #[inline] fn is_in<R>(self, range: R) -> Result<Self, Self>
-	where Self: PartialOrd, R: std::ops::RangeBounds<Self> {
+	where Self: PartialOrd, R: RangeBounds<Self> {
 		if range.contains(&self) {Ok(self)} else {Err(self)}
 	}
 
 	#[inline] fn not_in<R>(self, range: R) -> Result<Self, Self>
-	where Self: PartialOrd, R: std::ops::RangeBounds<Self> {
+	where Self: PartialOrd, R: RangeBounds<Self> {
 		if !range.contains(&self) {Ok(self)} else {Err(self)}
 	}
 }
@@ -121,7 +122,7 @@ pub use web_sys::console::log_1;
 #[macro_export]
 macro_rules! js_log {
 	($arg:literal) => {
-		$crate::utils::log_1(&$arg.to_owned().into())
+        $crate::utils::log_1(&format!($arg).into())
 	};
 	($f:literal, $($arg:expr),*) => {
 		$crate::utils::log_1(&format!($f, $($arg),*).into())
@@ -170,13 +171,14 @@ fn to_error_with_msg(err: JsValue, msg: &str) -> JsValue {
 pub type JsResult<T> = Result<T, JsValue>;
 
 pub trait ResultToJsResult<T, E> {
-    fn to_js_result(self) -> JsResult<T> where E: Display;
-    fn to_js_result_with<R: AsRef<str>>(self, f: impl FnOnce(E) -> R) -> JsResult<T>;
+    fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T> where E: Display;
+    fn to_js_result_with<R: AsRef<str>>(self, f: impl FnOnce(E) -> R, loc: (&str, u32, u32)) -> JsResult<T>;
 }
 
-pub trait OptionToJsResult<T> {
-    fn to_js_result_with(self, f: impl FnOnce() -> String) -> JsResult<T>;
-    fn to_js_result(self, msg: &str) -> JsResult<T>;
+pub trait OptionExt<T> {
+    fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T>;
+    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
+    fn drop(self) -> Option<()>;
 }
 
 pub trait JsResultUtils<T>: Sized {
@@ -184,8 +186,8 @@ pub trait JsResultUtils<T>: Sized {
     fn explain_err(self, msg: &str) -> Self;
     fn expect_throw_with(self, f: impl FnOnce() -> String) -> T;
 	fn expect_throw(self, msg: &str) -> T;
-    fn unwrap_throw(self) -> T;
-	fn report_err(self) -> Self;
+    fn unwrap_throw(self, loc: (&str, u32, u32)) -> T;
+	fn report_err(self, loc: (&str, u32, u32)) -> Self;
     /// best used with the `loc!` macro
     fn add_loc(self, loc: (&str, u32, u32)) -> Self;
 }
@@ -197,22 +199,27 @@ macro_rules! loc {
 pub use loc;
 
 impl<T, E> ResultToJsResult<T, E> for Result<T, E> {
-    fn to_js_result(self) -> JsResult<T> where E: Display {
-        self.map_err(|e| e.to_string().into())
+    #[inline] fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T> where E: Display {
+        self.map_err(|e| e.to_string().into()).add_loc(loc)
     }
 
-    fn to_js_result_with<R: AsRef<str>>(self, f: impl FnOnce(E) -> R) -> JsResult<T> {
-        self.map_err(|e| JsError::new(f(e).as_ref()).into())
+    #[inline] fn to_js_result_with<R: AsRef<str>>(self, f: impl FnOnce(E) -> R, loc: (&str, u32, u32)) -> JsResult<T> {
+        self.map_err(|e| JsError::new(f(e).as_ref()).into()).add_loc(loc)
     }
 }
 
-impl<T> OptionToJsResult<T> for Option<T> {
-    #[inline] fn to_js_result_with(self, f: impl FnOnce() -> String) -> JsResult<T> {
-        self.ok_or_else(|| JsError::new(&f()).into())
+impl<T> OptionExt<T> for Option<T> {
+    #[inline] fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T> {
+        self.ok_or_else(|| JsError::new("`Option` contained the `None` value").into())
+            .add_loc(loc)
     }
 
-    #[inline] fn to_js_result(self, msg: &str) -> JsResult<T> {
-        self.ok_or_else(|| JsError::new(msg).into())
+    #[inline] fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
+        match self {Some(x) => f(x), None => U::default()}
+    }
+
+    #[inline] fn drop(self) -> Option<()> {
+        match self {Some(_) => Some(()), None => None}
     }
 }
 
@@ -236,11 +243,12 @@ impl<T> JsResultUtils<T> for JsResult<T> {
             Err(err) => throw_val(to_error_with_msg(err, msg))}
     }
 
-    #[inline] fn unwrap_throw(self) -> T {
-        self.unwrap_or_else(|x| throw_val(x))
+    #[inline] fn unwrap_throw(self, loc: (&str, u32, u32)) -> T {
+        self.add_loc(loc).unwrap_or_else(|x| throw_val(x))
     }
 
-    #[inline] fn report_err(self) -> Self {
+    #[inline] fn report_err(mut self, loc: (&str, u32, u32)) -> Self {
+        self = self.add_loc(loc);
         if let Err(err) = &self {
             MainCmd::ReportError(err.clone()).send()
         }
@@ -253,57 +261,90 @@ impl<T> JsResultUtils<T> for JsResult<T> {
 }
 
 pub trait HtmlCanvasExt {
-    fn get_2d_context(&self) -> JsResult<CanvasRenderingContext2d>;
+    fn get_2d_context(&self, loc: (&str, u32, u32)) -> JsResult<CanvasRenderingContext2d>;
+    fn rect(&self) -> Rect;
     fn sync(&self);
 }
 
 impl HtmlCanvasExt for HtmlCanvasElement {
-    fn get_2d_context(&self) -> JsResult<CanvasRenderingContext2d> {
-        Ok(self.get_context("2d")?
-            .to_js_result("the element has no rendering context")?
+    fn get_2d_context(&self, loc: (&str, u32, u32)) -> JsResult<CanvasRenderingContext2d> {
+        Ok(self.get_context("2d").add_loc(loc!()).add_loc(loc)?
+            .to_js_result(loc!()).add_loc(loc)?
             .unchecked_into::<CanvasRenderingContext2d>())
     }
 
+    fn rect(&self) -> Rect {
+        Rect(Point::ZERO, Point{x: self.width() as i32, y: self.height() as i32})
+    }
+
     fn sync(&self) {
-        self.set_width(300);
-        self.set_height((self.client_height() as f64 / self.client_width() as f64 * 300.0) as u32);
+        self.set_height((self.client_height() as f64 / self.client_width() as f64 * self.width() as f64) as u32);
     }
 }
 
 pub trait HtmlDocumentExt {
-    fn element_dyn_into<T: JsCast>(&self, id: &str) -> JsResult<T>;
+    fn element_dyn_into<T: JsCast>(&self, id: &str, loc: (&str, u32, u32)) -> JsResult<T>;
 }
 
 impl HtmlDocumentExt for HtmlDocument {
-    fn element_dyn_into<T: JsCast>(&self, id: &str) -> JsResult<T> {
-        Ok(self.get_element_by_id(id).to_js_result_with(|| format!("element #{} not found", id))?
-            .dyn_into::<T>().ok().to_js_result_with(|| format!("element #{} is not of type `{}`", id, std::any::type_name::<T>()))?)
+    fn element_dyn_into<T: JsCast>(&self, id: &str, loc: (&str, u32, u32)) -> JsResult<T> {
+        Ok(self.get_element_by_id(id).to_js_result(loc!()).add_loc(loc)?
+            .dyn_into::<T>()
+            .to_js_result_with(|_| format!("element #{} is not of type `{}`", id, type_name::<T>()), loc!())
+            .add_loc(loc)?)
     }
 }
 
+pub trait HtmlElementExt {
+    fn client_rect(&self) -> Rect;
+}
+
+impl HtmlElementExt for Element {
+    fn client_rect(&self) -> Rect {
+        Rect(Point::ZERO, Point{x: self.client_width(), y: self.client_height()})
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum GetVarError {
-    OutOfBounds(usize),
+    OutOfBounds(usize, usize),
     Overlap(usize)
 }
 
 impl Display for GetVarError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            GetVarError::OutOfBounds(x) => write!(f, "index #{} is out of bounds", x),
-            GetVarError::Overlap(x) => write!(f, "index #{} appeared more than once", x)}
+            GetVarError::OutOfBounds(x, len) =>
+                write!(f, "index #{x} is out of bounds for a slice of length {len}"),
+            GetVarError::Overlap(x) =>
+                write!(f, "index #{x} appeared more than once")}
     }
 }
+
+impl Error for GetVarError {}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReorderError {
+    index: usize,
+    len: usize
+}
+
+impl Display for ReorderError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "reoder index #{} is out of bounds for a slice of length {}", self.index, self.len)
+    }
+}
+
+impl Error for ReorderError {}
 
 pub trait SliceExt<T> {
     fn get_saturating<'a>(&'a self, id: usize) -> &'a T;
     fn get_saturating_mut<'a>(&'a mut self, id: usize) -> &'a mut T;
     fn get_wrapping<'a>(&'a self, id: usize) -> &'a T;
     fn get_wrapping_mut<'a>(&'a mut self, id: usize) -> &'a mut T;
-    // the format of the error message would be: <prefix><id><postifx>
-    fn get_or_js_error<'a>(&'a self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a T>;
-    fn get_mut_or_js_error<'a>(&'a mut self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a mut T>;
     fn get_var<'a>(&'a self, ids: &[usize]) -> Result<Vec<&'a T>, GetVarError>;
     fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Result<Vec<&'a mut T>, GetVarError>;
+    fn reorder(&mut self, index: usize) -> Result<usize, ReorderError> where T: Ord;
 }
 
 impl<T> SliceExt<T> for [T] {
@@ -323,18 +364,11 @@ impl<T> SliceExt<T> for [T] {
         unsafe{self.get_unchecked_mut(id % self.len())}
     }
 
-    #[inline] fn get_or_js_error<'a>(&'a self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a T> {
-        self.get(id).to_js_result_with(|| format!("{}{}{}", prefix, id, postfix))
-    }
-
-    #[inline] fn get_mut_or_js_error<'a>(&'a mut self, id: usize, prefix: &str, postfix: &str) -> JsResult<&'a mut T> {
-        self.get_mut (id).to_js_result_with(|| format!("{}{}{}", prefix, id, postfix))
-    }
 
     #[inline] fn get_var<'a>(&'a self, ids: &[usize]) -> Result<Vec<&'a T>, GetVarError> {
         let len = self.len();
         for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
-            if *id >= len {return Err(GetVarError::OutOfBounds(*id))}
+            if *id >= len {return Err(GetVarError::OutOfBounds(*id, len))}
             if rest.contains(id) {return Err(GetVarError::Overlap(*id))}
         }
         Ok(unsafe { // at this point, `ids` is guaranteed to contain unique valid indices into `self`
@@ -346,7 +380,7 @@ impl<T> SliceExt<T> for [T] {
     #[inline] fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Result<Vec<&'a mut T>, GetVarError> {
         let len = self.len();
         for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
-            if *id >= len {return Err(GetVarError::OutOfBounds(*id))}
+            if *id >= len {return Err(GetVarError::OutOfBounds(*id, len))}
             if rest.contains(id) {return Err(GetVarError::Overlap(*id))}
         }
         Ok(unsafe { // at this point, `ids` is guaranteed to contain unique valid indices into `self`
@@ -354,9 +388,59 @@ impl<T> SliceExt<T> for [T] {
             ids.iter().map(|x| &mut*base.add(*x)).collect::<Vec<_>>()
         })
     }
+
+    #[inline] fn reorder(&mut self, index: usize) -> Result<usize, ReorderError> where T: Ord {
+        let len = self.len();
+        if index >= len {return Err(ReorderError{index, len})}
+        unsafe {
+            let element = self.get_unchecked(index);
+            let (new, should_move) = self.get_unchecked(..index).binary_search(element)
+                .map_or_else(|x| (x, x != index), |x| (x, x < index - 1));
+            if should_move {
+                self.get_unchecked_mut(new..=index).rotate_right(1);
+                return Ok(new)}
+            let new = self.get_unchecked(index+1..).binary_search(element)
+                .unwrap_or_else(|x| x) + index;
+            if new > index {
+                self.get_unchecked_mut(index..=new).rotate_left(1)}
+            Ok(new)
+        }
+    }
 }
 
-#[derive(Debug)]
+#[test] fn slice_get_var() {
+    let x = [1, 2, 4, 8, 16, 32, 64];
+    assert_eq!(x.get_var(&[1, 3, 6]), Ok(vec![&2, &8, &64]));
+    assert_eq!(x.get_var(&[1, 25]), Err(GetVarError::OutOfBounds(25, 7)));
+    assert_eq!(x.get_var(&[1, 4, 5, 1]), Err(GetVarError::Overlap(1)));
+}
+
+#[test] fn slice_get_var_mut() {
+    let mut x = [1, 2, 4, 8, 16, 32, 64];
+    assert_eq!(x.get_var_mut(&[1, 3, 6]), Ok(vec![&mut 2, &mut 8, &mut 64]));
+    assert_eq!(x.get_var_mut(&[1, 25]), Err(GetVarError::OutOfBounds(25, 7)));
+    assert_eq!(x.get_var_mut(&[1, 4, 5, 1]), Err(GetVarError::Overlap(1)));
+}
+
+#[test] fn slice_reorder() {
+    let mut x = [1, 2, 4, 8, 16, 32, 64];
+    let old_x = x;
+    assert_eq!(x.reorder(3), Ok(3));
+    assert_eq!(x, old_x);
+    x[1] = 17;
+    assert_eq!(x.reorder(1), Ok(4));
+    // [1, 2, 4, 8, 16, 32, 64] > [1, 4, 8, 16, 17, 32, 64]
+    x[5] = 3;
+    assert_eq!(x.reorder(5), Ok(1));
+    // [1, 4, 8, 16, 17, 32, 64] > [1, 3, 4, 8, 16, 17, 64]
+    let old_x = x;
+    assert_eq!(x.reorder(69), Err(ReorderError{index: 69, len: 7}));
+    assert_eq!(x, old_x);
+    x[2] = 3;
+    assert_eq!(x.reorder(2), Ok(2));
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct SwapRemoveError {
     index: usize,
     len: usize
@@ -389,9 +473,11 @@ impl Error for InsertError {}
 
 pub trait VecExt<T> {
     fn try_swap_remove(&mut self, index: usize) -> Result<T, SwapRemoveError>;
-    fn try_insert<'a>(&'a mut self, index: usize, element: T) -> Result<&'a mut T, InsertError>;
+    fn try_insert<'v>(&'v mut self, index: usize, element: T) -> Result<&'v mut T, InsertError>;
     fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool;
-    fn push_sorted(&mut self, value: T, f: impl Fn(&T, &T) -> Ordering) -> usize;
+    fn push_sorted(&mut self, value: T) -> usize where T: Ord;
+    fn push_sorted_by(&mut self, value: T, f: impl Fn(&T, &T) -> Ordering) -> usize;
+    fn push_sorted_by_key<K: Ord>(&mut self, value: T, f: impl FnMut(&T) -> K) -> usize;
 }
 
 impl<T> VecExt<T> for Vec<T> {
@@ -409,7 +495,7 @@ impl<T> VecExt<T> for Vec<T> {
         }
     }
 
-    fn try_insert<'a>(&'a mut self, index: usize, element: T) -> Result<&'a mut T, InsertError> {
+    fn try_insert<'v>(&'v mut self, index: usize, element: T) -> Result<&'v mut T, InsertError> {
         let len = self.len();
         if len == self.capacity() {
             self.try_reserve(1).map_err(InsertError::Alloc)?;
@@ -433,8 +519,20 @@ impl<T> VecExt<T> for Vec<T> {
         true
     }
 
-    fn push_sorted(&mut self, value: T, f: impl Fn(&T, &T) -> Ordering) -> usize {
+    fn push_sorted(&mut self, value: T) -> usize where T: Ord {
+        let id = self.binary_search(&value).unwrap_or_else(|x| x);
+        self.insert(id, value);
+        id
+    }
+
+    fn push_sorted_by(&mut self, value: T, f: impl Fn(&T, &T) -> Ordering) -> usize {
         let id = self.binary_search_by(|x| f(&value, x)).unwrap_or_else(|x| x);
+        self.insert(id, value);
+        id
+    }
+
+    fn push_sorted_by_key<K: Ord>(&mut self, value: T, mut f: impl FnMut(&T) -> K) -> usize {
+        let id = self.binary_search_by_key(&f(&value), f).unwrap_or_else(|x| x);
         self.insert(id, value);
         id
     }
@@ -464,17 +562,17 @@ impl<T> MaybeCell<T> {
     }
 
     #[inline] pub fn get<'a>(&'a self) -> JsResult<Ref<'a, T>> {
-        Ref::filter_map(self.0.try_borrow().to_js_result()?,
-            |x| x.as_ref()).ok().to_js_result("MaybeCell object not initialised")
+        Ref::filter_map(self.0.try_borrow().to_js_result(loc!())?,
+            |x| x.as_ref()).to_js_result_with(|_| "MaybeCell object not initialised", loc!())
     }
 
     #[inline] pub fn get_mut<'a>(&'a self) -> JsResult<RefMut<'a, T>> {
-        RefMut::filter_map(self.0.try_borrow_mut().to_js_result()?,
-            |x| x.as_mut()).ok().to_js_result("MaybeCell object not initialised")
+        RefMut::filter_map(self.0.try_borrow_mut().to_js_result(loc!())?,
+            |x| x.as_mut()).to_js_result_with(|_| "MaybeCell object not initialised", loc!())
     }
 
     #[inline] pub fn set(&self, val: T) -> JsResult<()> {
-        RefMut::map(self.0.try_borrow_mut().to_js_result()?,
+        RefMut::map(self.0.try_borrow_mut().to_js_result(loc!())?,
             |x| x.insert(val));
         Ok(())
     }
@@ -485,6 +583,12 @@ impl<T> MaybeCell<T> {
         Ok(())
     }*/
 }
+
+pub trait Take: Default {
+    /// replaces the value with a default one and returns the previous value
+    #[inline] fn take(&mut self) -> Self {mem::take(self)}
+}
+impl<T: Default> Take for T {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {pub x: i32, pub y: i32}
@@ -528,18 +632,26 @@ impl Neg for Point {
 
 impl Point {
     pub const ZERO: Self = Self{x:0, y:0};
-    pub fn avg(self, p2: Self) -> Self {
+    #[inline] pub fn avg(self, p2: Self) -> Self {
         Self{x: ((self.x as i64 + p2.x as i64) / 2) as i32,
             y: ((self.y as i64 + p2.y as i64) / 2) as i32}
     }
 
-    pub fn clamp_x(mut self, min: i32, max: i32) -> Self {
+    #[inline] pub fn clamp_x(mut self, min: i32, max: i32) -> Self {
         self.x = self.x.clamp(min, max);
         self
     }
 
-    pub fn clamp_y(mut self, min: i32, max: i32) -> Self {
+    #[inline] pub fn clamp_y(mut self, min: i32, max: i32) -> Self {
         self.y = self.y.clamp(min, max);
+        self
+    }
+
+    #[inline] pub fn normalise(mut self, old_space: Rect, new_space: Rect) -> Self {
+        self.y = (((self.y - old_space.bottom()) as f32 / old_space.height() as f32)
+            * new_space.height() as f32) as i32 + new_space.bottom();
+        self.x = (((self.x - old_space.left()) as f32 / old_space.width() as f32)
+            * new_space.width() as f32) as i32 + new_space.left();
         self
     }
 }
@@ -560,7 +672,6 @@ pub trait HitZone: Sized + Debug {
     #[inline] fn shift_y(self, y: i32) -> Self {self.shift(Point{x:0, y})}
 }
 
-/*
 #[derive(Debug)]
 pub struct Rect(Point, Point);
 
@@ -585,21 +696,31 @@ impl HitZone for Rect {
     }
 }
 
+/// methods' naming convention:
+/// *square* - accepts `side` as both `width` & `height`,
+///     else accepts `width` and `height` separately
+/// *zero* - the top-left corner is zero,
+///     else accepts the top-left corner as `src`
+/// *center* - accepts the center point
 impl Rect {
+    #[inline] pub fn zero(width: i32, height: i32) -> Self {
+        Self(Point::ZERO, Point{x: width, y: height})
+    }
+
     #[inline] pub fn square(src: Point, side: i32) -> Self {
         Self(src, src + Point{x: side, y: side})
     }
 
-    #[inline] pub fn square_center(src: Point, mut side: i32) -> Self {
+    #[inline] pub fn square_center(center: Point, mut side: i32) -> Self {
         side /= 2;
         let offset = Point{x: side, y: side};
-        Self(src - offset, src + offset)
+        Self(center - offset, center + offset)
     }
 
     #[inline] pub fn to_rhombus(self) -> Rhombus {
         Rhombus::new(self.center(), self.width() / 2, self.height() / 2)
     }
-}*/
+}
 
 #[derive(Debug)]
 pub struct Rhombus {
@@ -679,4 +800,276 @@ impl HorizontalArrow {
     #[inline] pub fn new(back_center: Point, w: i32, half_h: i32, is_left: bool) -> Self {
         Self{back_center, w, half_h, is_left}
     }
+}
+
+#[derive(Debug)]
+pub struct NanError;
+
+impl Display for NanError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "attempted to convert a NaN to a real")
+    }
+}
+
+macro_rules! real_from_ints_impl {
+    ($real:ty { $float:ty } : $($int:ty),+) => {
+        $(
+            impl From<$int> for $real {
+                #[inline(always)] fn from(x: $int) -> Self {Self(x as $float)}
+            }
+        )+
+    };
+}
+
+macro_rules! real_float_operator_impl {
+    ($real:ty { $float:ty } : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
+        $(
+            impl $op<$float> for $real {
+                type Output = Self;
+                #[inline(always)] fn $method(self, rhs: $float) -> Self {
+                    let res = Self(self.0.$method(rhs));
+                    assert!(!res.0.is_nan());
+                    res
+                }
+            }
+
+            impl $op<&$float> for $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: &$float) -> $real {$op::$method(self, *rhs)}
+            }
+
+            impl<'a> $op<$float> for &'a $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: $float) -> $real {$op::$method(*self, rhs)}
+            }
+
+            impl<'a> $op<&$float> for &'a $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: &$float) -> $real {$op::$method(*self, *rhs)}
+            }
+
+            impl $assign_op<$float> for $real {
+                #[inline(always)] fn $assign_method(&mut self, rhs: $float) {
+                    let res = Self(self.0.$method(rhs));
+                    assert!(!res.0.is_nan());
+                    *self = res;
+                }
+            }
+
+            impl $assign_op<&$float> for $real {
+                #[inline(always)]
+                fn $assign_method(&mut self, rhs: &$float) {$assign_op::$assign_method(self, *rhs)}
+            }
+        )+
+    }
+}
+
+macro_rules! real_int_operator_impl {
+    ($real:ty { $float:ty }, $int:ty : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
+        $(
+            impl $op<$int> for $real {
+                type Output = Self;
+                #[inline(always)]
+                fn $method(self, rhs: $int) -> Self {Self(self.0.$method(rhs as $float))}
+            }
+
+            impl $op<&$int> for $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: &$int) -> $real {$op::$method(self, *rhs)}
+            }
+
+            impl<'a> $op<$int> for &'a $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: $int) -> $real {$op::$method(*self, rhs)}
+            }
+
+            impl<'a> $op<&$int> for &'a $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: &$int) -> $real {$op::$method(*self, *rhs)}
+            }
+
+            impl $assign_op<$int> for $real {
+                #[inline(always)]
+                fn $assign_method(&mut self, rhs: $int) {self.0.$assign_method(rhs as $float)}
+            }
+
+            impl $assign_op<&$int> for $real {
+                #[inline(always)]
+                fn $assign_method(&mut self, rhs: &$int) {$assign_op::$assign_method(self, *rhs)}
+            }
+        )+
+    };
+}
+
+macro_rules! real_real_operator_impl {
+    ($real:ty : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
+        $(
+            impl $op for $real {
+                type Output = Self;
+                #[inline(always)] fn $method(self, rhs: Self) -> Self {
+                    let res = self.0.$method(rhs.0);
+                    assert!(!res.is_nan());
+                    Self(res)
+                }
+            }
+
+            impl $op<&$real> for $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: &$real) -> $real {$op::$method(self, *rhs)}
+            }
+
+            impl<'a> $op<$real> for &'a $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: $real) -> $real {$op::$method(*self, rhs)}
+            }
+
+            impl<'a> $op<&$real> for &'a $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: &$real) -> $real {$op::$method(*self, *rhs)}
+            }
+
+            impl $assign_op for $real {
+                #[inline(always)] fn $assign_method(&mut self, rhs: Self) {
+                    let res = self.0.$method(rhs.0);
+                    assert!(!res.is_nan());
+                    self.0 = res;
+                }
+            }
+
+            impl $assign_op<&$real> for $real {
+                #[inline(always)]
+                fn $assign_method(&mut self, rhs: &$real) {$assign_op::$assign_method(self, *rhs)}
+            }
+        )+
+    }
+}
+
+macro_rules! real_impl {
+    ($($real:ident { $float:ident }),+) => {
+        $(
+            #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
+            pub struct $real($float);
+
+            impl Deref for $real {
+                type Target = $float;
+                #[inline(always)] fn deref(&self) -> &Self::Target {&self.0}
+            }
+
+            impl Ord for $real {
+                #[inline(always)] fn cmp(&self, other: &Self) -> Ordering {
+                    unsafe{self.partial_cmp(other).unwrap_unchecked()}
+                }
+            }
+
+            impl Eq for $real {}
+
+            impl TryFrom<$float> for $real {
+                type Error = NanError;
+                #[inline(always)] fn try_from(x: $float) -> Result<Self, Self::Error> {
+                    if x.is_nan() {return Err(NanError)}
+                    Ok(Self(x))
+                }
+            }
+
+            real_from_ints_impl!($real{$float}:
+                u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
+            real_int_operator_impl!($real{$float}, u8:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            real_int_operator_impl!($real{$float}, i8:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            real_int_operator_impl!($real{$float}, u16:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            real_int_operator_impl!($real{$float}, i16:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            real_int_operator_impl!($real{$float}, u32:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            real_int_operator_impl!($real{$float}, i32:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            real_int_operator_impl!($real{$float}, usize:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            real_int_operator_impl!($real{$float}, isize:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            real_int_operator_impl!($real{$float}, u64:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            real_int_operator_impl!($real{$float}, i64:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+
+            real_float_operator_impl!($real{$float}:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            real_real_operator_impl!($real:
+                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+
+            impl $real {
+                pub const INFINITY: $real = $real($float::INFINITY);
+                pub const NEG_INFINITY: $real = $real($float::NEG_INFINITY);
+                pub const ZERO: $real = $real(0.0);
+                pub const ONE: $real = $real(1.0);
+                pub const PI: $real = $real(std::$float::consts::PI);
+                pub const TAU: $real = $real(std::$float::consts::TAU);
+
+                #[inline(always)]
+                pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
+
+                #[inline(always)]
+                pub fn rem_euclid(self, rhs: Self) -> Option<Self> {
+                    let res = self.0.rem_euclid(rhs.0);
+                    if res.is_nan() {return None}
+                    Some(Self(res))
+                }
+
+                #[inline(always)]
+                pub fn floor(self) -> Self {Self(self.0.floor())}
+
+                #[inline(always)]
+                pub fn ceil(self) -> Self {Self(self.0.ceil())}
+            }
+        )+
+    };
+}
+
+real_impl!(R32{f32}, R64{f64});
+
+impl From<R32> for R64 {
+    #[inline(always)]
+    fn from(value: R32) -> Self {Self(value.0 as f64)}
+}
+
+impl From<R64> for R32 {
+    #[inline(always)]
+    fn from(value: R64) -> Self {Self(value.0 as f32)}
+}
+
+#[macro_export]
+macro_rules! r32 {
+    ($x:literal) => {
+        unsafe{$crate::utils::R32::new_unchecked($x)}
+    };
+}
+
+#[macro_export]
+macro_rules! r64 {
+    ($x:literal) => {
+        unsafe{$crate::utils::R64::new_unchecked($x)}
+    };
 }

@@ -2,69 +2,52 @@
 #![feature(never_type)]
 #![feature(unwrap_infallible)]
 #![feature(const_slice_index)]
+#![feature(is_some_and)]
+#![feature(option_zip)]
+#![feature(const_float_classify)]
 
 mod render;
 mod utils;
 mod input;
 mod sound;
-use std::cell::{Ref, RefMut};
-use std::cmp::Ordering;
-use std::fmt::Debug;
-use std::rc::Rc;
+use std::{
+    cell::{Ref, RefMut},
+    fmt::Debug,
+    rc::Rc,
+    ops::Not,
+    cmp::Reverse};
 use input::{ParamId, Button};
 use render::Renderer;
-use sound::{SoundGen, SoundPlayer, Graph, Note};
+use sound::{Sound, SoundGen, SoundPlayer, Note, GraphSpec};
 use utils::{
     HtmlCanvasExt, HtmlDocumentExt,
-    SliceExt, VecExt,
-    JsResultUtils, OptionToJsResult, JsResult,
+    VecExt,
+    JsResultUtils, OptionExt, JsResult,
     Point,
-    MaybeCell, WasmCell,
-    document, window, ResultToJsResult, js_error, Check};
-use web_sys::CanvasRenderingContext2d;
+    MaybeCell, WasmCell, Take,
+    document, window, ResultToJsResult, js_error, Check, HitZone, HtmlElementExt, R64};
 use web_sys::{
     console::warn_1,
-    Path2d as JsPath2d,
     HtmlCanvasElement,
     ImageData as JsImageData,
-    HtmlElement, PointerEvent};
+    HtmlElement, PointerEvent,
+    CanvasRenderingContext2d};
 use wasm_bindgen::{
+    JsCast,
     JsValue,
     Clamped as JsClamped,
     closure::Closure as JsClosure};
-use wasm_bindgen::JsCast;
-use js_sys::{
-    Array as JsArray,
-    Function as JsFunction};
-use yew::virtual_dom::VList;
+use js_sys::Function as JsFunction;
 use yew::{
+    virtual_dom::VList,
     Callback,
     Component,
     Context, Html, html};
 
-use crate::sound::Sound;
-
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
 pub struct SoundEvent {
     pub element_id: usize,
-    pub when: f64,
-    pub note: Note
-}
-
-impl Eq for SoundEvent {}
-
-impl PartialOrd for SoundEvent {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.when.partial_cmp(&other.when)
-    }
-}
-
-impl Ord for SoundEvent {
-    fn cmp(&self, other: &Self) -> Ordering {
-        let x =  self.when.check(|x| !x.is_nan()).unwrap_or(f64::INFINITY);
-        let y = other.when.check(|y| !y.is_nan()).unwrap_or(f64::INFINITY);
-        unsafe{x.partial_cmp(&y).unwrap_unchecked()}
-    }
+    pub when: R64
 }
 
 /// responsible for playing sounds and frame-by-frame animations
@@ -72,15 +55,18 @@ struct Player {
     graph_canvas: HtmlCanvasElement,
     sound_visualiser_canvas: HtmlCanvasElement,
     renderer: Renderer,
-    solid_line: JsValue,
-    dotted_line: JsValue,
-    graph: Graph,
     pbar_start: f64,
     js_callback: JsFunction,
     sound_comps: Vec<SoundGen>,
     connections: Vec<Vec<usize>>,
     sound_events: Vec<SoundEvent>,
     sound_player: SoundPlayer,
+    starting_note: Note,
+    graph_spec: Option<GraphSpec>,
+    /// if the outer `Option` is `Some(x)`, the graph will be updated with `x` passed as the
+    /// `interaction` argument
+    graph_update: Option<Option<Point>>,
+    shift_pressed: bool
 }
 
 static GLOBAL_PLAYER: WasmCell<MaybeCell<Player>> = WasmCell::new(MaybeCell::new());
@@ -91,18 +77,17 @@ impl Player {
         fn render(time: f64) {
             _ = js_try!{type = !:
                     let mut handle = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
-                    let Player{ref sound_visualiser_canvas, ref mut renderer,
-                        ref graph_canvas, ref solid_line, ref dotted_line,
-                        ref mut pbar_start, ref graph,
+                    let Player{ref sound_visualiser_canvas, ref mut renderer, ref graph_canvas, ref mut shift_pressed,
+                        ref mut pbar_start, ref graph_spec, ref mut graph_update, ref starting_note,
                         ref mut sound_comps, ref mut sound_events, ref mut sound_player, ref connections,
                         ref js_callback} = *handle;
-                    let graph_out_span = (graph.span - graph.in_span) as f64;
+                    let time = R64::try_from(time).to_js_result(loc!())?;
 
                     let err1 = js_try!{
                         let buf = renderer.set_size(sound_visualiser_canvas.width() as usize, sound_visualiser_canvas.height() as usize)
                             .get_in_buffer();
                         sound_player.output().get_byte_frequency_data(buf);
-                        sound_visualiser_canvas.get_2d_context().add_loc(loc!())?.put_image_data(
+                        sound_visualiser_canvas.get_2d_context(loc!())?.put_image_data(
                             &JsImageData::new_with_u8_clamped_array(
                                 JsClamped(renderer.graph().get_out_bytes()), sound_visualiser_canvas.width()).add_loc(loc!())?,
                             0.0, 0.0).add_loc(loc!())?;
@@ -110,13 +95,13 @@ impl Player {
 
                     let err2 = js_try!{
                         macro_rules! apply_sound_comp {
-                            () => {|sound: Sound, _: usize, dst: usize| -> JsResult<Sound> {
+                            () => {|sound: Sound, _: usize, dst: usize| -> JsResult<Option<Sound>> {
                                 let (sound, event) = sound_comps
-                                    .get_mut_or_js_error(dst, "sound element #", " not found").add_loc(loc!())?
+                                    .get_mut(dst).to_js_result(loc!())?
                                     .transform(sound_player, sound, time).add_loc(loc!())?;
                                 if let Some(mut event) = event {
                                     event.element_id = dst;
-                                    sound_events.push_sorted(event, |x, y| x.cmp(y).reverse());
+                                    sound_events.push_sorted_by_key(event, |x| Reverse(*x));
                                 }
                                 Ok(sound)
                             }};
@@ -134,21 +119,30 @@ impl Player {
                                 let pending: Vec<_> = sound_events.drain(start..).collect();
                                 for event in pending {
                                     let mut apply_sound_comp = apply_sound_comp!();
-                                    let sound = apply_sound_comp(Sound::InputNote(event.note), 0, event.element_id).add_loc(loc!())?;
+                                    let Some(sound) = apply_sound_comp(Sound::InputNote(*starting_note, None), 0, event.element_id).add_loc(loc!())?
+                                        else {continue};
                                     traverse(connections, event.element_id, sound, &mut apply_sound_comp).add_loc(loc!())?;
                                 }
                             }
                         }
-                        sound_player.poll(time).add_loc(loc!())?;
+                        sound_player.poll(time / 1000).add_loc(loc!())?;
                     };
 
                     let err3 = js_try!{
-                        let (w, h, ctx) = (graph_canvas.width().into(), graph_canvas.height().into(), graph_canvas.get_2d_context().add_loc(loc!())?);
-                        ctx.set_fill_style(&"#181818".into());
-                        ctx.fill_rect(0.0, 0.0, w, h);
-                        if graph.span > 0 {
-                            ctx.set_line_width(3.0);
+                        if let (Some(spec), Some(update)) = (graph_spec, graph_update.take()) {
+                            let (w, h) = (graph_canvas.width(), graph_canvas.height());
+                            let ctx = graph_canvas.get_2d_context(loc!())?;
+                            ctx.set_fill_style(&"#181818".into());
                             ctx.set_stroke_style(&"#0069E1".into());
+                            ctx.set_line_width(3.0);
+                            ctx.fill_rect(0.0, 0.0, w as f64, h as f64);
+                            ctx.begin_path();
+                            unsafe{sound_comps.get_unchecked_mut(spec.element_id)}
+                                .graph(w, h, &ctx, update, *shift_pressed).add_loc(loc!())?;
+                            *shift_pressed = false;
+                            ctx.stroke();
+                        }
+                        /*if graph.span > 0 {
                             ctx.stroke_with_path(&graph.path);
                             if !pbar_start.is_nan() {
                                 if pbar_start.is_infinite() {
@@ -172,15 +166,14 @@ impl Player {
                                     ctx.set_line_dash(solid_line).add_loc(loc!())?;
                                 }
                             }
-                        }
+                        }*/
                     };
-
 
                     err1.and(err2).and(err3)
                         .and(window().request_animation_frame(js_callback).add_loc(loc!()))
                         .add_loc(loc!())?;
                     return
-            }.report_err();
+            }.report_err(loc!());
         }
 
         let mut sound_comps = vec![SoundGen::new_input(Point{x: 350, y: 500}),
@@ -189,21 +182,17 @@ impl Player {
         GLOBAL_PLAYER.set(Self{
             graph_canvas, sound_visualiser_canvas,
             renderer: Renderer::new(),
-            solid_line: JsArray::new().into(),
-            dotted_line: JsArray::of2(&(10.0).into(), &(10.0).into()).into(),
-            graph: Graph{path: JsPath2d::new().add_loc(loc!())?, span: 0, in_span: 0},
+            graph_spec: None,
+            graph_update: None,
+            shift_pressed: false,
             pbar_start: f64::NAN,
             js_callback: JsClosure::<dyn Fn(f64)>::new(render)
                 .into_js_value().unchecked_into(),
-            sound_events: vec![], sound_comps,
+            sound_events: vec![], sound_comps, starting_note: Note::A2,
             connections: vec![vec![], vec![]], sound_player: SoundPlayer::new().add_loc(loc!())?
         }).add_loc(loc!())?;
         Ok(render(0.0))
     }
-
-    #[inline] fn set_graph(&mut self, graph: Graph) {self.graph = graph}
-
-    #[inline] fn clear_graph(&mut self) {self.graph.span = 0}
 
     fn add_element(&mut self, mut comp: SoundGen) {
         comp.set_id(self.sound_comps.len());
@@ -212,9 +201,9 @@ impl Player {
     }
 
     fn remove_element(&mut self, index: usize) -> JsResult<()> {
-        self.sound_comps.try_swap_remove(index).to_js_result().add_loc(loc!())?;
+        self.sound_comps.try_swap_remove(index).to_js_result(loc!())?;
         unsafe{self.sound_comps.get_unchecked_mut(index)}.set_id(index);
-        self.connections.try_swap_remove(index).to_js_result().add_loc(loc!())?;
+        self.connections.try_swap_remove(index).to_js_result(loc!())?;
         let len = self.connections.len();
         for conns in self.connections.iter_mut() {
             conns.retain_mut(|x| {
@@ -226,19 +215,16 @@ impl Player {
     }
 
     fn disconnect_element(&mut self, index: usize) -> JsResult<()> {
-        self.connections
-            .get_mut_or_js_error(index, "sound element #", " not found").add_loc(loc!())
+        self.connections.get_mut(index).to_js_result(loc!())
             .map(Vec::clear)
     }
 
     fn get_element<'a>(&'a self, index: usize) -> JsResult<&'a SoundGen> {
-        self.sound_comps
-            .get_or_js_error(index, "sound element #", " not found").add_loc(loc!())
+        self.sound_comps.get(index).to_js_result(loc!())
     }
 
     fn get_element_mut<'a>(&'a mut self, index: usize) -> JsResult<&'a mut SoundGen> {
-        self.sound_comps
-            .get_mut_or_js_error(index, "sound element #", " not found").add_loc(loc!())
+        self.sound_comps.get_mut(index).to_js_result(loc!())
     }
 
     fn get_element_by_point<'a>(&'a self, point: Point) -> Option<&'a SoundGen> {
@@ -251,7 +237,8 @@ impl Player {
 
     fn play_sounds(&mut self, note: Note) {
         self.pbar_start = f64::INFINITY;
-        self.sound_events.push(SoundEvent{element_id: 0, when: f64::NEG_INFINITY, note});
+        self.starting_note = note;
+        self.sound_events.push(SoundEvent{element_id: 0, when: R64::NEG_INFINITY});
     }
 
     fn end_sounds(&mut self) {
@@ -259,8 +246,8 @@ impl Player {
     }
 
     fn connect(&mut self, src_id: usize, dst_id: usize) -> JsResult<bool> {
-        let src = self.sound_comps.get_or_js_error(src_id, "sound element #", " not found").add_loc(loc!())?;
-        let dst = self.sound_comps.get_or_js_error(dst_id, "sound element #", " not found").add_loc(loc!())?;
+        let src = self.sound_comps.get(src_id).to_js_result(loc!())?;
+        let dst = self.sound_comps.get(dst_id).to_js_result(loc!())?;
         if !src.connectible(dst) {return Ok(false)}
         Ok(unsafe{self.connections.get_unchecked_mut(src_id)}.push_unique(dst_id, |x, y| x == y))
     }
@@ -272,12 +259,12 @@ impl Player {
             .for_each(|c| c.draw(&ctx, offset));
         for (src_id, dsts) in self.connections.iter().enumerate() {
             let Some(mut src) = self.sound_comps
-                .get_or_js_error(src_id, "sound element #", " not found").add_loc(loc!())?
+                .get(src_id).to_js_result(loc!())?
                 .output_point() else {continue};
             src -= offset;
             for dst_id in dsts.iter() {
                 let Some(mut dst) = self.sound_comps
-                    .get_or_js_error(*dst_id, "sound element #", " not found").add_loc(loc!())?
+                    .get(*dst_id).to_js_result(loc!())?
                     .input_point() else {continue};
                 dst -= offset;
                 ctx.move_to(src.x as f64, src.y as f64);
@@ -286,26 +273,55 @@ impl Player {
         }
         Ok(ctx.stroke())
     }
+
+    #[inline] fn set_graph_spec(&mut self, graph_spec: Option<GraphSpec>) {
+        self.graph_spec = graph_spec;
+        self.graph_update = Some(None);
+        self.graph_canvas.set_height((self.graph_canvas.width() as f32 * graph_spec.map_or(0.0, |x| *x.ratio)) as u32)
+    }
+
+    #[inline] fn force_graph_update(&mut self) {
+        self.graph_update = Some(None);
+    }
+
+    /// `f` will only be evaluated if there's an element being graphed and it's marked as
+    /// interactive
+    #[inline] fn emit_graph_interaction(&mut self, f: impl FnOnce() -> (Point, bool)) {
+        if self.graph_spec.is_some_and(|x| x.interactive) {
+            let (update, shift_pressed) = f();
+            self.graph_update = update.check(|x| self.graph_canvas.rect().contains(*x))
+                .ok().map(|x| Some(x));
+            self.shift_pressed = shift_pressed;
+        }
+    }
+}
+
+#[derive(Default)]
+enum Focus {
+    #[default] None,
+    PlaneHover(usize),
+    Plane,
+    Graph,
+    Element(usize)
 }
 
 pub struct Main {
     selected_comp: Option<usize>,
-    focused_comp: Option<usize>,
-    hovered_comp: Option<usize>,
     error_count: usize,
-    plane_moving: bool,
     plane_offset: Point,
     graph_canvas: HtmlCanvasElement,
     sound_visualiser_canvas: HtmlCanvasElement,
     editor_plane_canvas: HtmlCanvasElement,
     help_msg_bar: HtmlElement,
+    focus: Focus
 }
 
-fn traverse<S: Clone + Debug>(conns: &[Vec<usize>], src_id: usize, state: S, f: &mut impl FnMut(S, usize, usize) -> JsResult<S>)
+fn traverse<S: Clone + Debug>(conns: &[Vec<usize>], src_id: usize, state: S, f: &mut impl FnMut(S, usize, usize) -> JsResult<Option<S>>)
 -> JsResult<()> {
-    let dsts = conns.get_or_js_error(src_id, "element #", " not found").add_loc(loc!())?;
+    let dsts = conns.get(src_id).to_js_result(loc!())?;
     for dst_id in dsts.iter() {
-        let new_state = f(state.clone(), src_id, *dst_id).add_loc(loc!())?;
+        let Some(new_state) = f(state.clone(), src_id, *dst_id).add_loc(loc!())?
+            else {return Ok(())};
         traverse(conns, *dst_id, new_state, f).add_loc(loc!())?;
     }
     Ok(())
@@ -313,13 +329,15 @@ fn traverse<S: Clone + Debug>(conns: &[Vec<usize>], src_id: usize, state: S, f: 
 
 #[derive(Debug)]
 pub enum MainCmd {
-    Drag(PointerEvent),
+    Hover(PointerEvent),
     Focus(PointerEvent),
     Unfocus(PointerEvent),
+    FocusGraph(PointerEvent),
+    UnfocusGraph(PointerEvent),
     LeavePlane,
     SetDesc(String),
     RemoveDesc,
-    SetParam(ParamId, f64),
+    SetParam(ParamId, R64),
     TryConnect(usize, Point),
     Select(Option<usize>),
     ReportError(JsValue)
@@ -351,15 +369,15 @@ impl Component for Main {
     fn create(ctx: &Context<Self>) -> Self {
         *unsafe{&mut MAINCMD_SENDER} = Some(ctx.link().callback(|msg| msg));
 
-        let help_msg_bar: HtmlElement = document().create_element("div").add_loc(loc!())
-            .unwrap_throw().unchecked_into();
+        let help_msg_bar: HtmlElement = document().create_element("div").unwrap_throw(loc!())
+            .unchecked_into();
         help_msg_bar.set_id("help-msg");
         help_msg_bar.set_inner_text(Self::DEF_HELP_MSG);
         help_msg_bar.set_class_name("light-bg");
 
         Self {help_msg_bar,
-            selected_comp: None, focused_comp: None, hovered_comp: None,
-            plane_offset: Point::ZERO, plane_moving: false,
+            selected_comp: None, focus: Focus::None,
+            plane_offset: Point::ZERO,
             graph_canvas: JsValue::UNDEFINED.unchecked_into(),
             sound_visualiser_canvas: JsValue::UNDEFINED.unchecked_into(),
             editor_plane_canvas: JsValue::UNDEFINED.unchecked_into(),
@@ -377,30 +395,30 @@ impl Component for Main {
             let mut needs_html_rerender = false;
             let mut player: Option<RefMut<Player>> = None;
             match msg {
-                MainCmd::Drag(e) => {
+                MainCmd::Hover(e) => {
                     let player = player.insert(GLOBAL_PLAYER.get_mut().add_loc(loc!())?);
-                    if self.plane_moving {
-                        self.plane_offset -= Point{x: e.movement_x(), y: 0};
-                    } else {
-                        let point = Point{x: e.x(), y: e.y()} + self.plane_offset;
-                        if let Some(id) = self.focused_comp {
-                            if let Some(msg) = player.get_element_mut(id).add_loc(loc!())?.handle_movement(point, false) {
-                                needs_html_rerender = self.update(ctx, msg)
-                            }
-                        } else {
-                            if let Some(id) = self.hovered_comp {
-                                if !player.get_element(id).add_loc(loc!())?.contains(point) {
-                                    self.hovered_comp = None;
-                                    self.remove_desc();
-                                }
-                            }
-                            if self.hovered_comp.is_none() {
-                                if let Some(comp) = player.get_element_by_point(point) {
-                                    self.hovered_comp = Some(comp.id());
-                                    self.set_desc(comp.name());
-                                }
-                            }
-                        }
+                    match self.focus {
+                        Focus::PlaneHover(id) => _ = player.get_element(id).add_loc(loc!())?
+                            .contains(Point{x: e.x(), y: e.y()} + self.plane_offset).not()
+                            .then(|| {
+                                self.focus = Focus::None;
+                                self.remove_desc()}),
+
+                        Focus::Plane => self.plane_offset -= Point{x: e.movement_x(), y: 0},
+
+                        Focus::Graph => player.emit_graph_interaction(||
+                            (Point{x: e.offset_x(), y: e.offset_y()}
+                                .normalise(self.graph_canvas.client_rect(), self.graph_canvas.rect()), e.shift_key())),
+
+                        Focus::Element(id) => _ = player.get_element_mut(id).add_loc(loc!())?
+                            .handle_movement(Point{x: e.x(), y: e.y()} + self.plane_offset, false)
+                            .map(|msg| ctx.link().send_message(msg)),
+
+                        Focus::None => _ = player
+                            .get_element_by_point(Point{x: e.x(), y: e.y()} + self.plane_offset)
+                            .map(|comp| {
+                                self.focus = Focus::PlaneHover(comp.id());
+                                self.set_desc(comp.name())})
                     }
                 }
 
@@ -409,19 +427,18 @@ impl Component for Main {
                     let point = Point{x: e.x(), y: e.y()} + self.plane_offset;
                     let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     if let Some(comp) = player.get_element_mut_by_point(point) {
-                        self.focused_comp = Some(comp.id());
-                        if let Some(msg) = comp.handle_movement(point, false) {
-                            ctx.link().send_message(msg);
-                        }
+                        self.focus = Focus::Element(comp.id());
+                        comp.handle_movement(point, false)
+                            .map(|msg| ctx.link().send_message(msg));
                     } else {
-                        self.plane_moving = true;
-                        self.set_desc("Dragging the plane");
+                        self.focus = Focus::Plane;
+                        self.set_desc("Hovering the plane");
                     }
                 }
 
                 MainCmd::Unfocus(e) => {
                     self.editor_plane_canvas.release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    if let Some(id) = self.focused_comp.take() {
+                    if let Focus::Element(id) = self.focus.take() {
                         let point = Point{x: e.x(), y: e.y()} + self.plane_offset;
                         let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                         let comp = player.get_element_mut(id).add_loc(loc!())?;
@@ -431,15 +448,25 @@ impl Component for Main {
                         }
                     } else {
                         ctx.link().send_message(MainCmd::Select(None));
-                        self.plane_moving = false;
                         self.remove_desc();
                     }
                 }
 
+                MainCmd::FocusGraph(e) => {
+                    self.focus = Focus::Graph;
+                    self.graph_canvas.set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
+                    GLOBAL_PLAYER.get_mut().add_loc(loc!())?.emit_graph_interaction(||
+                        (Point{x: e.offset_x(), y: e.offset_y()}
+                            .normalise(self.graph_canvas.client_rect(), self.graph_canvas.rect()), e.shift_key()))}
+
+                MainCmd::UnfocusGraph(e) => {
+                    self.focus = Focus::None;
+                    self.graph_canvas.release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
+                    GLOBAL_PLAYER.get_mut().add_loc(loc!())?.force_graph_update()}
+
                 MainCmd::LeavePlane => {
-                    self.hovered_comp = None;
-                    self.remove_desc();
-                }
+                    self.focus = Focus::None;
+                    self.remove_desc()}
 
                 MainCmd::SetDesc(value) => self.set_desc(&value),
 
@@ -450,8 +477,7 @@ impl Component for Main {
                         let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                         let element = player.get_element_mut(element_id).add_loc(loc!())?;
                         needs_html_rerender = element.set_param(id, value).add_loc(loc!())?;
-                        let graph = element.graph(self.graph_canvas.width() as f64, self.graph_canvas.height() as f64).add_loc(loc!())?;
-                        player.set_graph(graph);
+                        player.force_graph_update();
                     } else {
                         let player = player.insert(GLOBAL_PLAYER.get_mut().add_loc(loc!())?);
                         match id {
@@ -487,11 +513,10 @@ impl Component for Main {
                     let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     self.selected_comp = id.filter(|id| Some(*id) != self.selected_comp);
                     if let Some(id) = self.selected_comp {
-                        let graph = player.get_element(id).add_loc(loc!())?
-                            .graph(self.graph_canvas.width().into(), self.graph_canvas.height().into()).add_loc(loc!())?;
-                        player.set_graph(graph);
+                        let graph_spec = player.get_element_mut(id).add_loc(loc!())?.graph_spec();
+                        player.set_graph_spec(graph_spec);
                     } else {
-                        player.clear_graph()}
+                        player.set_graph_spec(None)}
                     needs_html_rerender = true;
                 }
 
@@ -500,7 +525,7 @@ impl Component for Main {
 
             if let Some(player) = player {
                 player.render_editor_plane(
-                    &self.editor_plane_canvas.get_2d_context().add_loc(loc!())?,
+                    &self.editor_plane_canvas.get_2d_context(loc!())?,
                     self.editor_plane_canvas.width() as f64,
                     self.editor_plane_canvas.height() as f64,
                     self.plane_offset).add_loc(loc!())?;
@@ -513,8 +538,7 @@ impl Component for Main {
     fn view(&self, ctx: &Context<Self>) -> Html {
         let comp = self.selected_comp.map(|id|
             Ref::filter_map(GLOBAL_PLAYER.get().expect_throw("building the app view"), |x| x.get_element(id).ok())
-                .ok().to_js_result_with(|| format!("sound element #{} not found", id)).add_loc(loc!())
-                .expect_throw("building the app view"));
+                .map_err(|_| format!("element #{} not found", id).into()).unwrap_throw(loc!()));
 
         fn piano_roll() -> Html {
             let mut list = VList::new();
@@ -552,13 +576,15 @@ impl Component for Main {
             <canvas width="100%" height="100%" id="plane"
             onpointerdown={ctx.link().callback(MainCmd::Focus)}
             onpointerup={ctx.link().callback(MainCmd::Unfocus)}
-            onpointermove={ctx.link().callback(MainCmd::Drag)}
+            onpointermove={ctx.link().callback(MainCmd::Hover)}
             onpointerleave={ctx.link().callback(|_| MainCmd::LeavePlane)}/>
             <div id="ctrl-panel" class="dark-bg">
                 {Html::VRef(self.help_msg_bar.clone().into())}
                 {comp.as_ref().map(|x| x.params())}
-                <canvas id="graph" class="blue-border"
-                hidden={comp.map(|x| !x.graphable()).unwrap_or(true)}/>
+                <canvas id="graph" class="blue-border" height=0
+                onpointerdown={ctx.link().callback(MainCmd::FocusGraph)}
+                onpointerup={ctx.link().callback(MainCmd::UnfocusGraph)}
+                onpointermove={ctx.link().callback(MainCmd::Hover)}/>
                 if let Some(comp_id) = self.selected_comp {
                     <div id="general-ctrl" class="dark-bg">
                         <Button
@@ -594,22 +620,19 @@ impl Component for Main {
 
     fn rendered(&mut self, _: &Context<Self>, first_render: bool) {
         _ = js_try!{type = !:
-            return if first_render {
-                self.graph_canvas = document().element_dyn_into("graph").add_loc(loc!())?;
-                self.graph_canvas.set_hidden(false);
-                self.graph_canvas.sync();
-                self.graph_canvas.set_hidden(true);
-                self.sound_visualiser_canvas = document().element_dyn_into("sound-visualiser").add_loc(loc!())?;
+            if first_render {
+                self.graph_canvas = document().element_dyn_into("graph", loc!())?;
+                self.sound_visualiser_canvas = document().element_dyn_into("sound-visualiser", loc!())?;
                 self.sound_visualiser_canvas.sync();
-                self.help_msg_bar = document().element_dyn_into("help-msg").add_loc(loc!())?;
+                self.help_msg_bar = document().element_dyn_into("help-msg", loc!())?;
 
-                self.editor_plane_canvas = document().element_dyn_into("plane").add_loc(loc!())?;
-                let body = document().body().to_js_result("<body> not found").add_loc(loc!())?;
+                self.editor_plane_canvas = document().element_dyn_into("plane", loc!())?;
+                let body = document().body().to_js_result(loc!())?;
                 let (w, h) = (body.client_width(), body.client_height());
                 self.editor_plane_canvas.set_width(w as u32);
                 self.editor_plane_canvas.set_height(h as u32);
 
-                let ctx = self.editor_plane_canvas.get_2d_context().add_loc(loc!())?;
+                let ctx = self.editor_plane_canvas.get_2d_context(loc!())?;
                 ctx.set_stroke_style(&"#0069E1".into());
                 ctx.set_fill_style(&"#232328".into());
                 ctx.set_line_width(3.0);
@@ -618,8 +641,10 @@ impl Component for Main {
                 let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                 player.add_element(SoundGen::new_wave(Point{x: 350, y: 441}));
                 player.add_element(SoundGen::new_envelope(Point{x: 550, y: 441}));
+                player.add_element(SoundGen::new_pattern(Point{x: 450, y: 278}));
                 player.render_editor_plane(&ctx, w as f64, h as f64, Point::ZERO).add_loc(loc!())?;
             }
+            return
         }.expect_throw("rendering the main element");
     }
 }

@@ -1,6 +1,7 @@
 #![allow(non_camel_case_types)] // because derive(yew::Properties) generates them
 
 use std::f64::consts::{PI, TAU};
+
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{Element, HtmlCanvasElement, PointerEvent, HtmlElement};
 use yew::{html, 
@@ -16,8 +17,8 @@ use crate::{
         JsResultUtils,
         HtmlCanvasExt,
         HtmlDocumentExt,
-        OptionToJsResult, JsResult, BoolExt},
-    MainCmd, loc, sound::Note};
+        OptionExt, JsResult, BoolExt, R64},
+    MainCmd, loc, sound::Note, r64};
 
 #[derive(Debug)]
 pub enum Cmd {
@@ -109,7 +110,7 @@ impl ParamId {
 }
 
 pub struct Slider {
-    value: f64,
+    value: R64,
     canvas: HtmlCanvasElement,
     focused: bool,
     hovered: bool
@@ -120,14 +121,14 @@ pub struct SliderProps {
     pub name: AttrValue,
     #[prop_or(false)]
     pub signed: bool,
-    #[prop_or(1.0)]
-    pub max: f64,
+    #[prop_or(R64::ONE)]
+    pub max: R64,
     #[prop_or(2)]
     pub precision: usize,
     #[prop_or("")]
     pub postfix: &'static str,
     pub id: ParamId,
-    pub initial: f64
+    pub initial: R64
 }
 
 const LINE_WIDTH: f64 = 10.0;
@@ -153,13 +154,12 @@ impl Component for Slider {
                     MainCmd::SetParam(*id, self.value * max).send();
                 })).add_loc(loc!())?
                 .handle_drag(|e| Ok({
-                    let target = e.target_dyn_into::<Element>()
-                        .to_js_result("no target on a pointer event").add_loc(loc!())?;
-                    self.value = (self.value + e.movement_y() as f64 / (target.client_height() * -2) as f64)
-                        .clamp(signed.choose(-1.0, 0.0), 1.0);
+                    let target = e.target_dyn_into::<Element>().to_js_result(loc!())?;
+                    self.value = (self.value + R64::from(e.movement_y()) / R64::from(target.client_height() * -2))
+                        .clamp(signed.choose(r64![-1.0], r64![0.0]), r64![1.0]);
                 })).add_loc(loc!())?;
             return true
-        }.report_err();
+        }.report_err(loc!());
         false
     }
 
@@ -179,10 +179,10 @@ impl Component for Slider {
             let SliderProps{max, precision, postfix, id, ..} = ctx.props();
             if first_render {
                 self.canvas = document()
-                    .element_dyn_into(&format!("Slider({:?})", *id)).add_loc(loc!())?;
+                    .element_dyn_into(&format!("Slider({:?})", *id), loc!())?;
                 self.canvas.sync();
             }
-            let ctx = self.canvas.get_2d_context().add_loc(loc!())?;
+            let ctx = self.canvas.get_2d_context(loc!())?;
             let (w, h) = (self.canvas.width() as f64 / 2.0, self.canvas.height() as f64 / 2.0);
             const CORRECTION_COEF: f64 = 1.5;
             let r = w.min(h) - LINE_WIDTH * CORRECTION_COEF; 
@@ -198,24 +198,24 @@ impl Component for Slider {
                 ctx.arc(w, h + LINE_WIDTH, r, 0.0, PI * 2.0).add_loc(loc!())?;
                 ctx.stroke();
                 ctx.begin_path()}
-            if self.value != 0.0 {
+            if *self.value != 0.0 {
                 ctx.arc_with_anticlockwise(w, h + LINE_WIDTH, r - LINE_WIDTH,
-                    PI * 1.5, (self.value * 2.0 + 1.5) * PI, self.value.is_sign_negative()).add_loc(loc!())?;
+                    PI * 1.5, (*self.value * 2.0 + 1.5) * PI, self.value.is_sign_negative()).add_loc(loc!())?;
                 ctx.stroke();
             }
             ctx.set_text_baseline("middle");
-            ctx.fill_text_with_max_width(&format!("{:.*}", precision, max * self.value),
+            ctx.fill_text_with_max_width(&format!("{:.*}", precision, **max * *self.value),
                 w, h + LINE_WIDTH / 2.0, r).add_loc(loc!())?;
             ctx.set_text_baseline("top");
             return ctx.fill_text_with_max_width(postfix, 
                 w, h + LINE_WIDTH * 2.0 + ctx.measure_text("0").add_loc(loc!())?
                     .font_bounding_box_ascent() * 2.0, r * 1.5).add_loc(loc!())?
-        }.report_err();
+        }.report_err(loc!());
     }
 }
 
 pub struct Switch {
-    value: f64,
+    value: R64,
     canvas: HtmlCanvasElement,
     focused: bool,
     hovered: bool
@@ -234,7 +234,7 @@ impl Component for Switch {
     type Properties = SwitchProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        Self {focused: false, hovered: false, value: ctx.props().initial as f64,
+        Self {focused: false, hovered: false, value: R64::from(ctx.props().initial),
             canvas: JsValue::UNDEFINED.unchecked_into()}
     }
 
@@ -245,16 +245,15 @@ impl Component for Switch {
                 .handle_focus(|_| Ok(self.focused = true)).add_loc(loc!())?
                 .handle_unfocus(|_| Ok(self.focused = false)).add_loc(loc!())?
                 .handle_drag(|e| {
-                    let old_value = self.value as usize;
-                    let target = e.target_dyn_into::<Element>()
-                        .to_js_result("no target on a pointer event").add_loc(loc!())?;
-                    self.value = (self.value + e.movement_y() as f64 / target.client_height() as f64 / -2.0 * options.len() as f64)
-                        .rem_euclid(options.len() as f64);
-                    if old_value != self.value as usize {
+                    let old_value = *self.value as usize;
+                    let target = e.target_dyn_into::<Element>().to_js_result(loc!())?;
+                    self.value = R64::rem_euclid(self.value + R64::from(e.movement_y()) / R64::from(target.client_height() / -2 * options.len() as i32),
+                        R64::from(options.len())).to_js_result(loc!())?;
+                    if old_value != *self.value as usize {
                         MainCmd::SetParam(*id, self.value.floor()).send()}
-                    Ok(())}).add_loc(loc!())?;
+                    Ok(())})?;
             return true
-        }.report_err();
+        }.report_err(loc!());
         false
     }
 
@@ -273,10 +272,10 @@ impl Component for Switch {
             let SwitchProps{options, id, ..} = ctx.props();
             if first_render {
                 self.canvas = document()
-                    .element_dyn_into(&format!("Switch({:?})", *id)).add_loc(loc!())?;
+                    .element_dyn_into(&format!("Switch({:?})", *id), loc!())?;
                 self.canvas.sync();
             }
-            let ctx = self.canvas.get_2d_context().add_loc(loc!())?;
+            let ctx = self.canvas.get_2d_context(loc!())?;
             let (w, h) = (self.canvas.width() as f64 / 2.0, self.canvas.height() as f64 / 2.0);
             const CORRECTION_COEF: f64 = 1.5;
             let r = w.min(h) - LINE_WIDTH * CORRECTION_COEF;
@@ -293,12 +292,12 @@ impl Component for Switch {
                 ctx.arc(w, h + LINE_WIDTH, r, 0.0, PI * 2.0).add_loc(loc!())?;
                 ctx.stroke();
                 ctx.begin_path()}
-            let (factor, index) = (options.len() as f64 / TAU, self.value.floor());
+            let (factor, index) = (options.len() as f64 / TAU, *self.value.floor());
             ctx.arc(w, h + LINE_WIDTH, r - LINE_WIDTH, index / factor, (index + 1.0) / factor).add_loc(loc!())?;
             ctx.stroke();
             return ctx.fill_text_with_max_width(unsafe{options.get_unchecked(index as usize)},
                 w, h + LINE_WIDTH, w).add_loc(loc!())?;
-        }.report_err();
+        }.report_err(loc!());
     }
 }
 
@@ -325,9 +324,9 @@ impl Component for Button {
         _ = js_try!{
             let ButtonProps{desc, id, ..} = ctx.props();
             msg.handle_hover(desc, |_, _| Ok(())).add_loc(loc!())?
-                .handle_focus(|_| Ok(MainCmd::SetParam(*id, f64::INFINITY).send())).add_loc(loc!())?
-                .handle_unfocus(|_| Ok(MainCmd::SetParam(*id, f64::NEG_INFINITY).send())).add_loc(loc!())?;
-        }.report_err();
+                .handle_focus(|_| Ok(MainCmd::SetParam(*id, R64::INFINITY).send())).add_loc(loc!())?
+                .handle_unfocus(|_| Ok(MainCmd::SetParam(*id, R64::NEG_INFINITY).send())).add_loc(loc!())?;
+        }.report_err(loc!());
         false
     }
 

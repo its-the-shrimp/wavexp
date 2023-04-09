@@ -15,7 +15,6 @@
 				display: flex;
 				z-index: 1;
 				height: 100%}
-			canvas {object-fit: contain}
 			.dark-bg {background-color: #181818}
 			.light-bg {background-color: #232328}
 			.blue-border {border: 3px solid #0069E1}
@@ -26,13 +25,16 @@
 				padding: 1em;
 				box-sizing: border-box;
 				display: flex;
+				justify-content: flex-start;
+				overflow-y: scroll;
 				gap: 1em;
 				flex-direction: column}
-			#ctrl-panel:has(#general-ctrl) {height: 80%}
+			#ctrl-panel:has(#general-ctrl) {bottom: 10em}
 			#help-msg {
 				padding: 1em;
 				white-space: pre;
 				overflow: hidden;
+				min-height: 1em;
 				user-select: none}
 			#inputs {
 				display: grid;
@@ -42,7 +44,7 @@
 				bottom: 0;
 				right: 0;
 				left: 0;
-				height: 20%;
+				height: 10em;
 				background-color: #181818;
 				display: flex}
 			#piano {
@@ -60,7 +62,7 @@
 				border: solid 3px #0069E1}
 			.button > svg {
 				stroke: #0069E1;
-				stroke-width: 3px;
+				stroke-width: 4px;
 				fill: none;
 				height: 100%}
 			.button:hover > svg {
@@ -97,6 +99,7 @@
 				margin-top: auto}
 			#general-ctrl > * {
 				width: auto;
+				height: 4em;
 				flex: 1}
 			#general-ctrl > .button:nth-child(2):hover {border-color: #E10000}
 			#general-ctrl > .button:nth-child(2):hover > svg {
@@ -106,6 +109,7 @@
 				display: flex;
 				flex-direction: column}
 			#wave-options > .button {height: auto; flex: 1}
+			#graph[height="0"] {border-width: 0}
 		</style>
 	</head>
 	<body>
