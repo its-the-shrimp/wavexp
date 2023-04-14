@@ -2,9 +2,9 @@
 #![feature(never_type)]
 #![feature(unwrap_infallible)]
 #![feature(const_slice_index)]
-#![feature(is_some_and)]
 #![feature(option_zip)]
 #![feature(const_float_classify)]
+#![feature(int_roundings)]
 
 mod render;
 mod utils;
@@ -18,20 +18,20 @@ use std::{
     cmp::Reverse};
 use input::{ParamId, Button};
 use render::Renderer;
-use sound::{Sound, SoundGen, SoundPlayer, Note, GraphSpec};
+use sound::{Sound, SoundGen, SoundPlayer, Note, GraphSpec, GraphEvent};
 use utils::{
     HtmlCanvasExt, HtmlDocumentExt,
     VecExt,
     JsResultUtils, OptionExt, JsResult,
     Point,
     MaybeCell, WasmCell, Take,
-    document, window, ResultToJsResult, js_error, Check, HitZone, HtmlElementExt, R64};
+    document, window, ResultToJsResult, js_error, HitZone, HtmlElementExt, R64};
 use web_sys::{
     console::warn_1,
     HtmlCanvasElement,
     ImageData as JsImageData,
     HtmlElement, PointerEvent,
-    CanvasRenderingContext2d};
+    CanvasRenderingContext2d, MouseEvent};
 use wasm_bindgen::{
     JsCast,
     JsValue,
@@ -65,8 +65,7 @@ struct Player {
     graph_spec: Option<GraphSpec>,
     /// if the outer `Option` is `Some(x)`, the graph will be updated with `x` passed as the
     /// `interaction` argument
-    graph_update: Option<Option<Point>>,
-    shift_pressed: bool
+    graph_update: Option<Option<GraphEvent>>
 }
 
 static GLOBAL_PLAYER: WasmCell<MaybeCell<Player>> = WasmCell::new(MaybeCell::new());
@@ -77,7 +76,7 @@ impl Player {
         fn render(time: f64) {
             _ = js_try!{type = !:
                     let mut handle = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
-                    let Player{ref sound_visualiser_canvas, ref mut renderer, ref graph_canvas, ref mut shift_pressed,
+                    let Player{ref sound_visualiser_canvas, ref mut renderer, ref graph_canvas,
                         ref mut pbar_start, ref graph_spec, ref mut graph_update, ref starting_note,
                         ref mut sound_comps, ref mut sound_events, ref mut sound_player, ref connections,
                         ref js_callback} = *handle;
@@ -86,7 +85,7 @@ impl Player {
                     let err1 = js_try!{
                         let buf = renderer.set_size(sound_visualiser_canvas.width() as usize, sound_visualiser_canvas.height() as usize)
                             .get_in_buffer();
-                        sound_player.output().get_byte_frequency_data(buf);
+                        sound_player.visualiser().get_byte_frequency_data(buf);
                         sound_visualiser_canvas.get_2d_context(loc!())?.put_image_data(
                             &JsImageData::new_with_u8_clamped_array(
                                 JsClamped(renderer.graph().get_out_bytes()), sound_visualiser_canvas.width()).add_loc(loc!())?,
@@ -138,8 +137,7 @@ impl Player {
                             ctx.fill_rect(0.0, 0.0, w as f64, h as f64);
                             ctx.begin_path();
                             unsafe{sound_comps.get_unchecked_mut(spec.element_id)}
-                                .graph(w, h, &ctx, update, *shift_pressed).add_loc(loc!())?;
-                            *shift_pressed = false;
+                                .graph(w, h, &ctx, update).add_loc(loc!())?;
                             ctx.stroke();
                         }
                         /*if graph.span > 0 {
@@ -184,7 +182,6 @@ impl Player {
             renderer: Renderer::new(),
             graph_spec: None,
             graph_update: None,
-            shift_pressed: false,
             pbar_start: f64::NAN,
             js_callback: JsClosure::<dyn Fn(f64)>::new(render)
                 .into_js_value().unchecked_into(),
@@ -286,12 +283,9 @@ impl Player {
 
     /// `f` will only be evaluated if there's an element being graphed and it's marked as
     /// interactive
-    #[inline] fn emit_graph_interaction(&mut self, f: impl FnOnce() -> (Point, bool)) {
-        if self.graph_spec.is_some_and(|x| x.interactive) {
-            let (update, shift_pressed) = f();
-            self.graph_update = update.check(|x| self.graph_canvas.rect().contains(*x))
-                .ok().map(|x| Some(x));
-            self.shift_pressed = shift_pressed;
+    #[inline] fn emit_graph_interaction(&mut self, f: impl FnOnce() -> Option<GraphEvent>) {
+        if self.graph_spec.map_or(false, |x| x.interactive) {
+            self.graph_update = Some(f());
         }
     }
 }
@@ -360,6 +354,14 @@ impl Main {
     fn remove_desc(&self) {
         self.help_msg_bar.set_inner_text(Self::DEF_HELP_MSG)
     }
+
+    fn new_graph_event(&self, init: &MouseEvent) -> Option<GraphEvent> {
+        let canvas_rect = self.graph_canvas.client_rect();
+        let point = Point{x: init.offset_x(), y: init.offset_y()};
+        canvas_rect.contains(point).then(|| 
+            GraphEvent{shift: init.shift_key(), alt: init.alt_key(),
+                point: point.normalise(canvas_rect, self.graph_canvas.rect())})
+    }
 }
 
 impl Component for Main {
@@ -406,9 +408,7 @@ impl Component for Main {
 
                         Focus::Plane => self.plane_offset -= Point{x: e.movement_x(), y: 0},
 
-                        Focus::Graph => player.emit_graph_interaction(||
-                            (Point{x: e.offset_x(), y: e.offset_y()}
-                                .normalise(self.graph_canvas.client_rect(), self.graph_canvas.rect()), e.shift_key())),
+                        Focus::Graph => player.emit_graph_interaction(|| self.new_graph_event(&e)),
 
                         Focus::Element(id) => _ = player.get_element_mut(id).add_loc(loc!())?
                             .handle_movement(Point{x: e.x(), y: e.y()} + self.plane_offset, false)
@@ -455,18 +455,19 @@ impl Component for Main {
                 MainCmd::FocusGraph(e) => {
                     self.focus = Focus::Graph;
                     self.graph_canvas.set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    GLOBAL_PLAYER.get_mut().add_loc(loc!())?.emit_graph_interaction(||
-                        (Point{x: e.offset_x(), y: e.offset_y()}
-                            .normalise(self.graph_canvas.client_rect(), self.graph_canvas.rect()), e.shift_key()))}
+                    GLOBAL_PLAYER.get_mut().add_loc(loc!())?.emit_graph_interaction(|| self.new_graph_event(&e))
+                }
 
                 MainCmd::UnfocusGraph(e) => {
                     self.focus = Focus::None;
                     self.graph_canvas.release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    GLOBAL_PLAYER.get_mut().add_loc(loc!())?.force_graph_update()}
+                    GLOBAL_PLAYER.get_mut().add_loc(loc!())?.force_graph_update();
+                }
 
                 MainCmd::LeavePlane => {
                     self.focus = Focus::None;
-                    self.remove_desc()}
+                    self.remove_desc();
+                }
 
                 MainCmd::SetDesc(value) => self.set_desc(&value),
 

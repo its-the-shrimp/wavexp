@@ -1,13 +1,13 @@
 use std::{
-    ops::{Not, Deref, DerefMut, Range},
+    ops::{Not, Deref, DerefMut, Range, Add, Sub, Neg},
     fmt::{self, Display, Formatter},
-    cmp::{Ordering, Reverse}};
+    cmp::{Ordering, Reverse}, iter::successors};
 use web_sys::{
     AudioNode, AnalyserNode,
     AudioContext,
     GainNode, GainOptions,
     OscillatorNode, OscillatorOptions, OscillatorType,
-    CanvasRenderingContext2d};
+    CanvasRenderingContext2d, DynamicsCompressorNode, DynamicsCompressorOptions};
 use yew::{html, Html};
 use crate::{
     utils::{
@@ -23,7 +23,10 @@ use crate::{
         js_error,
         Pipe,
         OptionExt,
-        ResultToJsResult, R64, R32},
+        ResultToJsResult,
+        R64, R32,
+        SaturatingInto,
+        RangeExt, Check},
     input::{Switch, Slider, Button, ParamId},
     MainCmd,
     loc,
@@ -31,12 +34,26 @@ use crate::{
 
 type MSecs = u32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord)]
 pub struct Note(u8);
 
 impl Display for Note {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", unsafe{Self::NAMES.get_unchecked(self.0 as usize)})
+    }
+}
+
+impl Add<isize> for Note {
+    type Output = Note;
+    #[inline] fn add(self, rhs: isize) -> Self::Output {
+        Self(self.0.saturating_add_signed(rhs.saturating_into()))
+    }
+}
+
+impl Sub<isize> for Note {
+    type Output = Note;
+    #[inline] fn sub(self, rhs: isize) -> Self::Output {
+        Self(self.0.saturating_add_signed(rhs.neg().saturating_into()))
     }
 }
 
@@ -138,9 +155,9 @@ impl Note {
         "A4", "A#4",
         "B4"];
 
-    #[inline] pub const fn from_index(value: usize) -> Option<Self> {
-        if value >= Self::FREQS.len() {return None}
-        Some(Self(value as u8))
+    #[inline] pub const fn from_index(value: usize) -> Self {
+        if value >= Self::FREQS.len() {Self::MAX}
+        else {Self(value as u8)}
     }
 
     /// SAFETY: `value` must be finite
@@ -426,37 +443,19 @@ impl PatternBlock {
     }
 }
 
+pub struct GraphEvent {
+    pub shift: bool,
+    pub alt: bool,
+    pub point: Point
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum PatternInputFocus {
     DragStart(usize, MSecs),
     DragEnd(usize, MSecs),
-    Move(usize, MSecs)
-}
-
-impl PatternInputFocus {
-    #[inline] fn inner(&self) -> (usize, MSecs) {
-        match self {
-            &PatternInputFocus::DragStart(i, last_offset) => (i, last_offset),
-            &PatternInputFocus::DragEnd(i, last_offset) => (i, last_offset),
-            &PatternInputFocus::Move(i, last_offset) => (i, last_offset)
-        }
-    }
-
-    #[inline] fn set_index(&mut self, index: usize) {
-        match self {
-            PatternInputFocus::DragStart(i, ..) => *i = index,
-            PatternInputFocus::DragEnd(i, ..) => *i = index,
-            PatternInputFocus::Move(i, ..) => *i = index
-        }
-    }
-
-    #[inline] fn set_last_offset(&mut self, last_offset: MSecs) {
-        match self {
-            PatternInputFocus::DragStart(_, dst) => *dst = last_offset,
-            PatternInputFocus::DragEnd(_, dst)   => *dst = last_offset,
-            PatternInputFocus::Move(_, dst)      => *dst = last_offset
-        }
-    }
+    Move(usize, MSecs),
+    DragPlane(MSecs, i32),
+    DragWrapPoint(MSecs)
 }
 
 /// represents a sound transformer that can have an optional input element
@@ -471,7 +470,10 @@ pub enum SoundGen {
     Envelope{base: Element, attack: u32, decay: u32, sustain_level: R32, release: u32},
     /// emits the input note in a pattern with given durations, intervals and pitches
     /// can only be connected to the input node (for now)
-    Pattern{base: Element, pattern: Vec<PatternBlock>, cur_block_id: usize, start_time: R64, input_focus: Option<PatternInputFocus>},
+    Pattern{base: Element, pattern: Vec<PatternBlock>, cur_block_id: Option<usize>,
+        input_focus: Option<PatternInputFocus>, last_duration: MSecs,
+        pattern_offset: MSecs, displayed_interval: MSecs,
+        wrap_point: MSecs},
     /// consumes the input sound, delegating it to the `SoundPlayer`
     Output{base: Element},
 }
@@ -509,7 +511,7 @@ pub struct GraphSpec {
 
 impl SoundGen {
     const VISUAL_SIZE: i32 = 32;
-    const PATTERN_DISPLAY_LIMIT: MSecs = 1000; // TODO: make changable in the UI
+    const PATTERN_DEFAULT_BLOCK_DURATION: MSecs = 50;
     #[inline] pub fn new_input(location: Point) -> Self {
         Self::Input{base: Element{location, focus: Focus::None, id: 0}}
     }
@@ -525,8 +527,9 @@ impl SoundGen {
     }
 
     #[inline] pub fn new_pattern(location: Point) -> Self {
-        Self::Pattern{pattern: vec![], cur_block_id: 0, start_time: R64::NEG_INFINITY, 
-            input_focus: None,
+        Self::Pattern{pattern: vec![], cur_block_id: None,
+            input_focus: None, last_duration: 50, wrap_point: 1000,
+            pattern_offset: 0, displayed_interval: 1000,
             base: Element{location, focus: Focus::None, id: 0}}
     }
 
@@ -586,24 +589,23 @@ impl SoundGen {
                 (Some(sound.envelope(player.audio_ctx(), attack, decay, sustain_level, release).add_loc(loc!())?),
                     None),
 
-            Self::Pattern{base, pattern, cur_block_id, start_time, ..} => if matches!(sound, Sound::End) {
-                *cur_block_id = 0;
-                *start_time = R64::NEG_INFINITY;
+            Self::Pattern{base, pattern, cur_block_id, wrap_point, ..} => if matches!(sound, Sound::End) {
+                *cur_block_id = pattern.first().map_or(false, |x| x.offset == 0).then_some(0);
                 (Some(Sound::End), None)
             } else {
-                if *cur_block_id == 0 {
-                    if !start_time.is_finite() {
-                        *start_time = time;
-                        if let Some(when) = pattern.first().map(|x| x.offset).filter(|x| *x > 0) {
-                            return Ok((None, Some(SoundEvent{element_id: base.id, when: R64::from(when) + time})))
-                        }
-                    }
-                }
-                let block = pattern.get(*cur_block_id);
-                *cur_block_id += 1;
-                (block.map(|x| Sound::InputNote(x.note, x.duration.into())),
-                 block.zip_with(pattern.get(*cur_block_id),
-                    |cur, next| SoundEvent{element_id: base.id, when: R64::from(next.offset - cur.offset) + time}))
+                let Some(cur_block_id) = cur_block_id else {
+                    return if let Some(when) = pattern.first().map(|x| time + x.offset) {
+                        *cur_block_id = Some(0);
+                        Ok((None, Some(SoundEvent{element_id: base.id, when})))
+                    } else {Ok((None, None))}
+                };
+                let cur = unsafe{pattern.get_unchecked(*cur_block_id)};
+                let (next_id, offset) = pattern.get(*cur_block_id + 1)
+                    .map_or((0, unsafe{pattern.get_unchecked(0)}.offset + *wrap_point),
+                        |x| (*cur_block_id + 1, x.offset));
+                *cur_block_id = next_id;
+                (Some(Sound::InputNote(cur.note, cur.duration.into())),
+                    Some(SoundEvent{element_id: base.id, when: time + offset - cur.offset}))
             }
 
             Self::Output{..} => (player.play_sound(sound).map(|_| None).add_loc(loc!())?, None),
@@ -796,7 +798,7 @@ impl SoundGen {
         }
     }
 
-    pub fn graph(&mut self, width: u32, height: u32, ctx: &CanvasRenderingContext2d, interaction: Option<Point>, shift_pressed: bool) -> JsResult<()> {
+    pub fn graph(&mut self, width: u32, height: u32, ctx: &CanvasRenderingContext2d, event: Option<GraphEvent>) -> JsResult<()> {
         Ok(match self {
             &mut Self::Envelope {attack, decay, sustain_level, release, ..} => {
                 let (width, height) = (width as f64, height as f64);
@@ -808,50 +810,92 @@ impl SoundGen {
                 ctx.line_to(width, height);
             }
 
-            Self::Pattern{input_focus, pattern, ..} => {
-                if let Some(interaction) = interaction {
-                    let offset = ((interaction.x as f32 / width as f32) * Self::PATTERN_DISPLAY_LIMIT as f32) as MSecs;
-                    let duration: MSecs = 50; // TODO: make customizable
+            Self::Pattern{wrap_point, last_duration, input_focus, pattern, pattern_offset, displayed_interval, ..} => {
+                if let Some(GraphEvent{shift, point, ..}) = event {
+                    let offset = ((point.x as f32 / width as f32) * *displayed_interval as f32) as MSecs;
+                    let note = Note::from_index(((1.0 - point.y as f32 / height as f32) * Note::ALL.len() as f32) as usize);
                     let some_input_focus = input_focus.get_or_insert_with(|| {
-                        let note = Note(((1.0 - interaction.y as f32 / height as f32) * Note::ALL.len() as f32) as u8);
-                        if let Some((index, &block)) = pattern.iter().enumerate().find(|(_, x)| x.note == note && x.span().contains(&offset)) {
-                            match (offset as f32 - block.offset as f32) / block.duration as f32 {
-                                x if x < 0.1 => PatternInputFocus::DragStart(index, offset),
-                                x if x > 0.9 => PatternInputFocus::DragEnd(index, offset),
+                        let span = (offset + *pattern_offset).pipe(|x| x - 5 .. x + 5);
+                        let notes = note - 1 .. note + 1;
+                        if let Some((index, &block)) = pattern.iter().enumerate().find(|(_, x)| notes.contains(&x.note) && x.span().overlap(&span)) {
+                            /*
+                            match offset f32 block.offset f32 - block.duration f32 / shift_pressed not f32 {
+                                Infinite: index pattern remove |> offset DragPlane,
+                                ..0.2: offset index DragStart,
+                                0.8..: offset index DragEnd,
+                                else: offset index Move
+                            }
+                            */
+                            match ((offset + *pattern_offset) as f32 - block.offset as f32) / (block.duration * !shift as u32) as f32 {
+                                x if x.is_infinite() => {pattern.remove(index); PatternInputFocus::DragPlane(offset, point.y)}
+                                x if x < 0.2 => PatternInputFocus::DragStart(index, offset),
+                                x if x > 0.8 => PatternInputFocus::DragEnd(index, offset),
                                 _            => PatternInputFocus::Move(index, offset)
                             }
+                        } else if (*wrap_point - 5 .. *wrap_point + 5).overlap(&span) {
+                            PatternInputFocus::DragWrapPoint(offset)
+                        } else if shift {
+                            pattern.push_sorted(PatternBlock{note, duration: *last_duration, offset: offset + *pattern_offset})
+                                .pipe(|x| PatternInputFocus::Move(x, offset))
                         } else {
-                            PatternInputFocus::Move(pattern.push_sorted(PatternBlock{note, duration, offset}), offset)
+                            PatternInputFocus::DragPlane(offset, point.y)
                         }
                     });
-                    let (mut index, last_offset) = some_input_focus.inner();
-                    if shift_pressed {
-                        pattern.remove(index);
-                        *input_focus = None;
-                    } else {
-                        let mut block = *unsafe{pattern.get_unchecked(index)};
-                        let delta = offset as i32 - last_offset as i32;
-
-                        if !matches!(some_input_focus, PatternInputFocus::DragEnd(..)) {
-                            block.offset = pattern.iter().take(index).rev().find(|x| x.note == block.note)
+                    match some_input_focus {
+                        PatternInputFocus::DragStart(index, last_offset) => {
+                            let mut block = *unsafe{pattern.get_unchecked(*index)};
+                            let delta = offset as i32 - *last_offset as i32;
+                            block.offset = pattern.iter().take(*index).rev().find(|x| x.note == block.note)
                                 .map_or(0, |x| (x.offset + x.duration) as i32)
                                 .max(block.offset as i32 + delta) as u32;
                             block.duration = block.duration.saturating_add_signed(-delta);
-                            *unsafe{pattern.get_unchecked_mut(index)} = block;
-                            index = pattern.reorder(index).to_js_result(loc!())?;
-                            some_input_focus.set_index(index);
+                            *last_duration = block.duration;
+                            *last_offset = offset;
+                            if block.duration == 0 {
+                                pattern.remove(*index);
+                                *last_duration = Self::PATTERN_DEFAULT_BLOCK_DURATION;
+                                *input_focus = None;
+                            } else {
+                                *index = pattern.set_sorted(*index, block).to_js_result(loc!())?;
+                            }
                         }
-                        if !matches!(some_input_focus, PatternInputFocus::DragStart(..)) {
-                            block.duration = pattern.iter().skip(index + 1).find(|x| x.note == block.note)
+                        PatternInputFocus::DragEnd(index, last_offset) => {
+                            let mut block = *unsafe{pattern.get_unchecked(*index)};
+                            let delta = offset as i32 - *last_offset as i32;
+                            block.duration = pattern.iter().skip(*index + 1).find(|x| x.note == block.note)
                                 .map_or(i32::MAX, |x| x.offset as i32 - block.offset as i32)
                                 .min(block.duration as i32 + delta) as u32;
-                            *unsafe{pattern.get_unchecked_mut(index)} = block;
+                            *last_duration = block.duration;
+                            *last_offset = offset;
+                            if block.duration == 0 {
+                                pattern.remove(*index);
+                                *last_duration = Self::PATTERN_DEFAULT_BLOCK_DURATION;
+                                *input_focus = None;
+                            } else {
+                                *unsafe{pattern.get_unchecked_mut(*index)} = block;
+                            }
                         }
-                        if block.duration == 0 {
-                            pattern.remove(index);
-                            *input_focus = None;
-                        } else {
-                            some_input_focus.set_last_offset(offset);
+                        PatternInputFocus::Move(index, last_offset) => {
+                            let mut block = *unsafe{pattern.get_unchecked(*index)};
+                            let delta = offset as i32 - *last_offset as i32;
+                            block.note = note;
+                            block.offset = i32::clamp(block.offset as i32 + delta,
+                                pattern.iter().take(*index).rev().find(|x| x.note == block.note)
+                                    .map_or(0, |x| (x.offset + x.duration) as i32),
+                                pattern.iter().skip(*index + 1).find(|x| x.note == block.note)
+                                    .map_or(*wrap_point as i32, |x| x.offset as i32) - block.duration as i32) as u32;
+                            *index = pattern.set_sorted(*index, block).to_js_result(loc!())?;
+                            *last_offset = offset;
+                        }
+                        PatternInputFocus::DragPlane(last_offset, last_y) => {
+                            *pattern_offset = pattern_offset.saturating_add_signed(*last_offset as i32 - offset as i32);
+                            *displayed_interval = displayed_interval.saturating_add_signed(*last_y - point.y as i32);
+                            *last_offset = offset;
+                            *last_y = point.y as i32;
+                        }
+                        PatternInputFocus::DragWrapPoint(last_offset) => {
+                            *wrap_point = wrap_point.saturating_add_signed(offset as i32 - *last_offset as i32);
+                            *last_offset = offset;
                         }
                     }
                 } else {
@@ -859,12 +903,25 @@ impl SoundGen {
                 }
 
                 let (width, height) = (width as f64, height as f64);
-                let note_width = height / Note::ALL.len() as f64;
-                pattern.iter().take_while(|x| x.offset < Self::PATTERN_DISPLAY_LIMIT).for_each(|block|
-                    ctx.rect(block.offset as f64 / Self::PATTERN_DISPLAY_LIMIT as f64 * width,
+                let note_height = -height / Note::ALL.len() as f64;
+                ctx.rect((*wrap_point as f64 - *pattern_offset as f64) / *displayed_interval as f64 * width, 0.0,
+                    2.0, height);
+                let interval = 100.0 / *displayed_interval as f64 * width;
+                let stroke_style = ctx.stroke_style();
+                ctx.set_stroke_style(&"#232328".into());
+                successors(Some(*pattern_offset as f64 / *displayed_interval as f64 * -width),
+                    |x| (x + interval).check(|x| *x < width).ok())
+                    .skip_while(|x| *x < 0.0)
+                    .for_each(|i| ctx.stroke_rect(i, 0.0, 1.0, height));
+                ctx.set_stroke_style(&stroke_style);
+                pattern.iter()
+                    .skip_while(|x| x.offset + x.duration < *pattern_offset)
+                    .take_while(|x| x.offset < *pattern_offset + *displayed_interval)
+                    .for_each(|block| ctx.rect(
+                        (block.offset as f64 - *pattern_offset as f64) / *displayed_interval as f64 * width,
                         (1.0 - block.note.index() as f64 / Note::ALL.len() as f64) * height,
-                        block.duration as f64 / Self::PATTERN_DISPLAY_LIMIT as f64 * width,
-                        note_width))}
+                        block.duration as f64 / *displayed_interval as f64 * width,
+                        note_height))}
 
             _ => ()})
     }
@@ -888,30 +945,39 @@ impl Deref for SoundState {
 pub struct SoundPlayer {
     sounds: Vec<(Sound, SoundState)>,
     ending_all: bool,
-    output: AnalyserNode,
+    plug: DynamicsCompressorNode,
+    visualiser: AnalyserNode,
     audio_ctx: AudioContext
 }
 
 impl SoundPlayer {
+    const MASTER_GAIN: f32 = 0.2; // TODO: make customizable
     pub fn new() -> JsResult<Self> {
         let audio_ctx = AudioContext::new().add_loc(loc!())?;
-        let output = AnalyserNode::new(&audio_ctx).add_loc(loc!())?;
-        output.connect_with_audio_node(&audio_ctx.destination()).add_loc(loc!())?;
-        Ok(Self{sounds: vec![], ending_all: false, output, audio_ctx})
+        let plug = DynamicsCompressorNode::new_with_options(&audio_ctx,
+            DynamicsCompressorOptions::new().ratio(20.0).release(1.0)).add_loc(loc!())?;
+        let gain = GainNode::new_with_options(&audio_ctx,
+            GainOptions::new().gain(Self::MASTER_GAIN)).add_loc(loc!())?;
+        let visualiser = AnalyserNode::new(&audio_ctx).add_loc(loc!())?;
+
+        plug.connect_with_audio_node(&visualiser).add_loc(loc!())?
+            .connect_with_audio_node(&gain).add_loc(loc!())?
+            .connect_with_audio_node(&audio_ctx.destination()).add_loc(loc!())?;
+        Ok(Self{sounds: vec![], ending_all: false, plug, visualiser, audio_ctx})
     }
 
     pub fn play_sound(&mut self, sound: Sound) -> JsResult<()> {
         Ok(if matches!(sound, Sound::End) {
             self.ending_all = true;
         } else {
-            self.sounds.push((sound.prepare(&self.output).add_loc(loc!())?,
+            self.sounds.push((sound.prepare(&self.plug).add_loc(loc!())?,
                 SoundState::Active(r64![0.0], 0)));
         })
     }
 
     #[inline] pub fn audio_ctx(&self) -> &AudioContext {&self.audio_ctx}
 
-    #[inline] pub fn output(&self) -> &AnalyserNode {&self.output}
+    #[inline] pub fn visualiser(&self) -> &AnalyserNode {&self.visualiser}
 
     /// `time` is in seconds
     pub fn poll(&mut self, time: R64) -> JsResult<()> {

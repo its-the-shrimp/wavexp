@@ -2,7 +2,7 @@ use std::{
     ptr,
     mem,
     fmt::{self, Debug, Formatter, Display},
-    ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div},
+    ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Range},
     cell::{RefMut, Ref, RefCell},
     iter::successors,
     error::Error,
@@ -49,19 +49,24 @@ pub trait Pipe: Sized {
 impl<T> Pipe for T {}
 
 pub trait BoolExt {
-	fn choose<T: Sized>(self, on_true: T, on_false: T) -> T;
-    fn choose_with<T: Sized>(self, on_true: impl FnOnce() -> T, on_false: impl FnOnce() -> T) -> T;
+	fn choose<T>(self, on_true: T, on_false: T) -> T;
+    fn then_or<T>(self, default: T, f: impl FnOnce() -> T) -> T;
+    fn then_or_else<T>(self, default: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T;
     fn then_negate<T: Neg<Output=T>>(self, val: T) -> T;
     fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
 }
 
 impl BoolExt for bool {
-    #[inline] fn choose<T: Sized>(self, on_true: T, on_false: T) -> T {
+    #[inline] fn choose<T>(self, on_true: T, on_false: T) -> T {
         if self {on_true} else {on_false}
     }
 
-    #[inline] fn choose_with<T: Sized>(self, on_true: impl FnOnce() -> T, on_false: impl FnOnce() -> T) -> T {
-        if self {on_true()} else {on_false()}
+    #[inline] fn then_or<T>(self, default: T, f: impl FnOnce() -> T) -> T {
+        if self {f()} else {default}
+    }
+
+    #[inline] fn then_or_else<T>(self, default: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T {
+        if self {f()} else {default()}
     }
 
     #[inline] fn then_negate<T: Neg<Output=T>>(self, val: T) -> T {
@@ -305,7 +310,7 @@ impl HtmlElementExt for Element {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum GetVarError {
     OutOfBounds(usize, usize),
     Overlap(usize)
@@ -323,7 +328,7 @@ impl Display for GetVarError {
 
 impl Error for GetVarError {}
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct ReorderError {
     index: usize,
     len: usize
@@ -331,11 +336,27 @@ pub struct ReorderError {
 
 impl Display for ReorderError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "reoder index #{} is out of bounds for a slice of length {}", self.index, self.len)
+        write!(f, "SliceExt::reorder: index #{} is out of bounds for a slice of length {}",
+            self.index, self.len)
     }
 }
 
 impl Error for ReorderError {}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct SetSortedError {
+    index: usize,
+    len: usize
+}
+
+impl Display for SetSortedError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "SliceExt::set_sorted: index #{} is out of bounds for a slice of length {}",
+            self.index, self.len)
+    }
+}
+
+impl Error for SetSortedError {}
 
 pub trait SliceExt<T> {
     fn get_saturating<'a>(&'a self, id: usize) -> &'a T;
@@ -344,7 +365,9 @@ pub trait SliceExt<T> {
     fn get_wrapping_mut<'a>(&'a mut self, id: usize) -> &'a mut T;
     fn get_var<'a>(&'a self, ids: &[usize]) -> Result<Vec<&'a T>, GetVarError>;
     fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Result<Vec<&'a mut T>, GetVarError>;
+    unsafe fn reorder_unchecked(&mut self, index: usize) -> usize where T: Ord;
     fn reorder(&mut self, index: usize) -> Result<usize, ReorderError> where T: Ord;
+    fn set_sorted(&mut self, index: usize, value: T) -> Result<usize, SetSortedError> where T: Ord;
 }
 
 impl<T> SliceExt<T> for [T] {
@@ -389,22 +412,40 @@ impl<T> SliceExt<T> for [T] {
         })
     }
 
+    unsafe fn reorder_unchecked(&mut self, index: usize) -> usize where T: Ord {
+        let element = self.get_unchecked(index);
+        let (new, should_move) = self.get_unchecked(..index).binary_search(element)
+            .map_or_else(|x| (x, x != index), |x| (x, x < index - 1));
+        if should_move {
+            self.get_unchecked_mut(new..=index).rotate_right(1);
+            return new}
+        let new = self.get_unchecked(index+1..).binary_search(element)
+            .unwrap_or_else(|x| x) + index;
+        if new > index {
+            self.get_unchecked_mut(index..=new).rotate_left(1);
+        }
+        new
+    }
+
     #[inline] fn reorder(&mut self, index: usize) -> Result<usize, ReorderError> where T: Ord {
         let len = self.len();
-        if index >= len {return Err(ReorderError{index, len})}
-        unsafe {
-            let element = self.get_unchecked(index);
-            let (new, should_move) = self.get_unchecked(..index).binary_search(element)
-                .map_or_else(|x| (x, x != index), |x| (x, x < index - 1));
-            if should_move {
-                self.get_unchecked_mut(new..=index).rotate_right(1);
-                return Ok(new)}
-            let new = self.get_unchecked(index+1..).binary_search(element)
-                .unwrap_or_else(|x| x) + index;
-            if new > index {
-                self.get_unchecked_mut(index..=new).rotate_left(1)}
-            Ok(new)
+        if index >= len {
+            return Err(ReorderError{index, len});
         }
+        Ok(unsafe{self.reorder_unchecked(index)})
+    }
+
+    #[inline] fn set_sorted(&mut self, index: usize, value: T) -> Result<usize, SetSortedError> where T: Ord {
+        let len = self.len();
+        if index >= len {
+            return Err(SetSortedError{index, len});
+        }
+        Ok(unsafe {
+            let dst = self.get_unchecked_mut(index);
+            let should_reorder = &value != dst;
+            *dst = value;
+            if should_reorder {self.reorder_unchecked(index)} else {index}
+        })
     }
 }
 
@@ -589,6 +630,59 @@ pub trait Take: Default {
     #[inline] fn take(&mut self) -> Self {mem::take(self)}
 }
 impl<T: Default> Take for T {}
+
+pub trait RangeExt<T> {
+    fn overlap<O>(&self, other: &Range<O>) -> bool
+    where O: PartialOrd<T>, T: PartialOrd<O>;
+    fn loose_contain<O, I>(&self, item: I, offset: O) -> bool where
+    O: Copy,
+    I: PartialOrd<T> + Add<O, Output=I> + Sub<O, Output=I> + Copy,
+    T: PartialOrd<I>;
+    fn fit(&self, item: T) -> T where T: Clone + PartialOrd;
+}
+
+impl<T> RangeExt<T> for Range<T> {
+    #[inline] fn overlap<O>(&self, other: &Range<O>) -> bool
+    where O: PartialOrd<T>, T: PartialOrd<O> {
+        self.contains(&other.start)
+            || self.contains(&other.end)
+            || other.contains(&self.start)
+    }
+
+    #[inline]
+    fn loose_contain<O, I>(&self, item: I, offset: O) -> bool where
+    O: Copy,
+    I: PartialOrd<T> + Add<O, Output=I> + Sub<O, Output=I> + Copy,
+    T: PartialOrd<I> {
+        self.overlap(&(item - offset .. item + offset))
+    }
+
+    #[inline]
+    fn fit(&self, item: T) -> T where T: Clone + PartialOrd {
+             if item >= self.end   {self.end.clone()}
+        else if item <  self.start {self.start.clone()}
+        else                       {item}
+    }
+}
+
+#[test]
+fn range_overlap() {
+    assert!(!(50 .. 55).overlap(&(56 .. 61)));
+    assert!(!(50 .. 56).overlap(&(56 .. 61)));
+    assert!( (50 .. 57).overlap(&(56 .. 61)));
+    assert!( (58 .. 60).overlap(&(56 .. 61)));
+    assert!( (56 .. 61).overlap(&(58 .. 60)));
+    assert!( (56 .. 61).overlap(&(61 .. 67)));
+}
+
+pub trait LooseEq<O: Copy>: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Self> + Copy {
+    #[inline]
+    fn loose_eq(&self, value: Self, off: O) -> bool {
+        (value - off .. value + off).contains(self)
+    }
+}
+
+impl<O: Copy, T: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Self> + Copy> LooseEq<O> for T {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {pub x: i32, pub y: i32}
@@ -1073,3 +1167,52 @@ macro_rules! r64 {
         unsafe{$crate::utils::R64::new_unchecked($x)}
     };
 }
+
+pub trait SaturatingFrom<T> {
+    fn saturating_from(x: T) -> Self;
+}
+
+pub trait SaturatingInto<T: SaturatingFrom<Self>>: Sized {
+    #[inline(always)]
+    fn saturating_into(self) -> T {T::saturating_from(self)}
+}
+
+impl<S, D: SaturatingFrom<S>> SaturatingInto<D> for S {}
+
+macro_rules! sat_from_u_impl {
+    ($src:ty => $($dst:ty)|+) => {
+        $(
+            impl SaturatingFrom<$src> for $dst {
+                #[inline] fn saturating_from(x: $src) -> $dst {
+                    x.min(<$dst>::MAX as $src) as $dst
+                }
+            }
+        )+
+    };
+}
+
+sat_from_u_impl!(u64   => i64|usize|isize|u32|i32|u16|i16|u8|i8);
+sat_from_u_impl!(usize => i64|isize|u32|i32|u16|i16|u8|i8);
+sat_from_u_impl!(u32   => isize|i32|u16|i16|u8|i8);
+sat_from_u_impl!(u16   => i16|u8|i8);
+sat_from_u_impl!(u8    => i8);
+
+macro_rules! sat_from_s_impl {
+    ($src:ty => $($dst:ty)|+) => {
+        $(
+            impl SaturatingFrom<$src> for $dst {
+                #[inline] fn saturating_from(x: $src) -> $dst {
+                    const DST_SMALLER: bool = (<$dst>::MAX as u64) < <$src>::MAX as u64;
+                    if DST_SMALLER {x.clamp(<$dst>::MIN as $src, <$dst>::MAX as $src) as $dst}
+                    else {x.max(<$dst>::MIN as $src) as $dst}
+                }
+            }
+        )+
+    };
+}
+
+sat_from_s_impl!(i64   => u64|usize|isize|u32|i32|u16|i16|u8|i8);
+sat_from_s_impl!(isize => u64|usize|u32|i32|u16|i16|u8|i8);
+sat_from_s_impl!(i32   => usize|i32|u16|i16|u8|i8);
+sat_from_s_impl!(i16   => u16|u8|i8);
+sat_from_s_impl!(i8    => u8);
