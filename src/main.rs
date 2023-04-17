@@ -18,7 +18,7 @@ use std::{
     cmp::Reverse};
 use input::{ParamId, Button};
 use render::Renderer;
-use sound::{Sound, SoundGen, SoundPlayer, Note, GraphSpec, GraphEvent};
+use sound::{Sound, SoundGen, SoundPlayer, Note, GraphSpec, GraphEvent, SoundEvent};
 use utils::{
     HtmlCanvasExt, HtmlDocumentExt,
     VecExt,
@@ -43,12 +43,6 @@ use yew::{
     Callback,
     Component,
     Context, Html, html};
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
-pub struct SoundEvent {
-    pub element_id: usize,
-    pub when: R64
-}
 
 /// responsible for playing sounds and frame-by-frame animations
 struct Player {
@@ -124,7 +118,7 @@ impl Player {
                                 }
                             }
                         }
-                        sound_player.poll(time / 1000).add_loc(loc!())?;
+                        sound_player.poll(time / 1000.0).add_loc(loc!())?;
                     };
 
                     let err3 = js_try!{
@@ -186,7 +180,8 @@ impl Player {
             js_callback: JsClosure::<dyn Fn(f64)>::new(render)
                 .into_js_value().unchecked_into(),
             sound_events: vec![], sound_comps, starting_note: Note::A2,
-            connections: vec![vec![], vec![]], sound_player: SoundPlayer::new().add_loc(loc!())?
+            connections: vec![vec![], vec![]],
+            sound_player: SoundPlayer::new(r64![120.0]).add_loc(loc!())?
         }).add_loc(loc!())?;
         Ok(render(0.0))
     }

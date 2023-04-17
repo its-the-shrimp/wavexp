@@ -1002,157 +1002,160 @@ macro_rules! real_int_operator_impl {
 }
 
 macro_rules! real_real_operator_impl {
-    ($real:ty : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
+    ($real:ty { $float:ty }, $other_real:ty { $other_float:ty } : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
         $(
-            impl $op for $real {
+            impl $op<$other_real> for $real {
                 type Output = Self;
-                #[inline(always)] fn $method(self, rhs: Self) -> Self {
-                    let res = self.0.$method(rhs.0);
+                #[inline] fn $method(self, rhs: $other_real) -> Self {
+                    let res = self.0.$method(rhs.0 as $float);
                     assert!(!res.is_nan());
                     Self(res)
                 }
             }
 
-            impl $op<&$real> for $real {
+            impl $op<&$other_real> for $real {
                 type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: &$real) -> $real {$op::$method(self, *rhs)}
+                #[inline]
+                fn $method(self, rhs: &$other_real) -> $real {$op::$method(self, *rhs)}
             }
 
-            impl<'a> $op<$real> for &'a $real {
+            impl<'a> $op<$other_real> for &'a $real {
                 type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: $real) -> $real {$op::$method(*self, rhs)}
+                #[inline]
+                fn $method(self, rhs: $other_real) -> $real {$op::$method(*self, rhs)}
             }
 
-            impl<'a> $op<&$real> for &'a $real {
+            impl<'a> $op<&$other_real> for &'a $real {
                 type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: &$real) -> $real {$op::$method(*self, *rhs)}
+                #[inline]
+                fn $method(self, rhs: &$other_real) -> $real {$op::$method(*self, *rhs)}
             }
 
-            impl $assign_op for $real {
-                #[inline(always)] fn $assign_method(&mut self, rhs: Self) {
-                    let res = self.0.$method(rhs.0);
+            impl $assign_op<$other_real> for $real {
+                #[inline] fn $assign_method(&mut self, rhs: $other_real) {
+                    let res = self.0.$method(rhs.0 as $float);
                     assert!(!res.is_nan());
                     self.0 = res;
                 }
             }
 
-            impl $assign_op<&$real> for $real {
+            impl $assign_op<&$other_real> for $real {
                 #[inline(always)]
-                fn $assign_method(&mut self, rhs: &$real) {$assign_op::$assign_method(self, *rhs)}
+                fn $assign_method(&mut self, rhs: &$other_real) {$assign_op::$assign_method(self, *rhs)}
             }
         )+
     }
 }
 
 macro_rules! real_impl {
-    ($($real:ident { $float:ident }),+) => {
-        $(
-            #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
-            pub struct $real($float);
+    ($real:ident { $float:ident }, $other_real:ty { $other_float:ty }) => {
+        #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
+        pub struct $real($float);
 
-            impl Deref for $real {
-                type Target = $float;
-                #[inline(always)] fn deref(&self) -> &Self::Target {&self.0}
+        impl Deref for $real {
+            type Target = $float;
+            #[inline(always)] fn deref(&self) -> &Self::Target {&self.0}
+        }
+
+        impl Ord for $real {
+            #[inline(always)] fn cmp(&self, other: &Self) -> Ordering {
+                unsafe{self.partial_cmp(other).unwrap_unchecked()}
+            }
+        }
+
+        impl Eq for $real {}
+
+        impl TryFrom<$float> for $real {
+            type Error = NanError;
+            #[inline(always)] fn try_from(x: $float) -> Result<Self, Self::Error> {
+                if x.is_nan() {return Err(NanError)}
+                Ok(Self(x))
+            }
+        }
+
+        impl From<$other_real> for $real {
+            #[inline(always)]
+            fn from(value: $other_real) -> Self {Self(value.0 as $float)}
+        }
+
+        impl Display for $real {
+            #[inline] fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+
+        real_from_ints_impl!($real{$float}:
+            u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
+        real_int_operator_impl!($real{$float}, u8:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_int_operator_impl!($real{$float}, i8:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_int_operator_impl!($real{$float}, u16:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_int_operator_impl!($real{$float}, i16:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_int_operator_impl!($real{$float}, u32:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_int_operator_impl!($real{$float}, i32:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_int_operator_impl!($real{$float}, usize:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_int_operator_impl!($real{$float}, isize:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_int_operator_impl!($real{$float}, u64:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_int_operator_impl!($real{$float}, i64:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+
+        real_float_operator_impl!($real{$float}:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_real_operator_impl!($real{$float}, $real{$float}:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_real_operator_impl!($real{$float}, $other_real{$other_float}:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+
+        impl $real {
+            pub const INFINITY: $real = $real($float::INFINITY);
+            pub const NEG_INFINITY: $real = $real($float::NEG_INFINITY);
+            pub const ZERO: $real = $real(0.0);
+            pub const ONE: $real = $real(1.0);
+            pub const PI: $real = $real(std::$float::consts::PI);
+            pub const TAU: $real = $real(std::$float::consts::TAU);
+
+            #[inline(always)]
+            pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
+
+            #[inline(always)]
+            pub fn rem_euclid(self, rhs: Self) -> Option<Self> {
+                let res = self.0.rem_euclid(rhs.0);
+                if res.is_nan() {return None}
+                Some(Self(res))
             }
 
-            impl Ord for $real {
-                #[inline(always)] fn cmp(&self, other: &Self) -> Ordering {
-                    unsafe{self.partial_cmp(other).unwrap_unchecked()}
-                }
-            }
+            #[inline(always)]
+            pub fn floor(self) -> Self {Self(self.0.floor())}
 
-            impl Eq for $real {}
-
-            impl TryFrom<$float> for $real {
-                type Error = NanError;
-                #[inline(always)] fn try_from(x: $float) -> Result<Self, Self::Error> {
-                    if x.is_nan() {return Err(NanError)}
-                    Ok(Self(x))
-                }
-            }
-
-            real_from_ints_impl!($real{$float}:
-                u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
-            real_int_operator_impl!($real{$float}, u8:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-            real_int_operator_impl!($real{$float}, i8:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-            real_int_operator_impl!($real{$float}, u16:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-            real_int_operator_impl!($real{$float}, i16:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-            real_int_operator_impl!($real{$float}, u32:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-            real_int_operator_impl!($real{$float}, i32:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-            real_int_operator_impl!($real{$float}, usize:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-            real_int_operator_impl!($real{$float}, isize:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-            real_int_operator_impl!($real{$float}, u64:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-            real_int_operator_impl!($real{$float}, i64:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-
-            real_float_operator_impl!($real{$float}:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-            real_real_operator_impl!($real:
-                Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-                Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
-
-            impl $real {
-                pub const INFINITY: $real = $real($float::INFINITY);
-                pub const NEG_INFINITY: $real = $real($float::NEG_INFINITY);
-                pub const ZERO: $real = $real(0.0);
-                pub const ONE: $real = $real(1.0);
-                pub const PI: $real = $real(std::$float::consts::PI);
-                pub const TAU: $real = $real(std::$float::consts::TAU);
-
-                #[inline(always)]
-                pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
-
-                #[inline(always)]
-                pub fn rem_euclid(self, rhs: Self) -> Option<Self> {
-                    let res = self.0.rem_euclid(rhs.0);
-                    if res.is_nan() {return None}
-                    Some(Self(res))
-                }
-
-                #[inline(always)]
-                pub fn floor(self) -> Self {Self(self.0.floor())}
-
-                #[inline(always)]
-                pub fn ceil(self) -> Self {Self(self.0.ceil())}
-            }
-        )+
+            #[inline(always)]
+            pub fn ceil(self) -> Self {Self(self.0.ceil())}
+        }
     };
 }
 
 real_impl!(R32{f32}, R64{f64});
-
-impl From<R32> for R64 {
-    #[inline(always)]
-    fn from(value: R32) -> Self {Self(value.0 as f64)}
-}
-
-impl From<R64> for R32 {
-    #[inline(always)]
-    fn from(value: R64) -> Self {Self(value.0 as f32)}
-}
+real_impl!(R64{f64}, R32{f32});
 
 #[macro_export]
 macro_rules! r32 {
@@ -1216,3 +1219,18 @@ sat_from_s_impl!(isize => u64|usize|u32|i32|u16|i16|u8|i8);
 sat_from_s_impl!(i32   => usize|i32|u16|i16|u8|i8);
 sat_from_s_impl!(i16   => u16|u8|i8);
 sat_from_s_impl!(i8    => u8);
+
+macro_rules! sat_from_real_impl {
+    ($src:ty => $($dst:ty)|+) => {
+        $(
+            impl SaturatingFrom<$src> for $dst {
+                #[inline] fn saturating_from(x: $src) -> $dst {
+                    *x.clamp(<$dst>::MIN.into(), <$dst>::MAX.into()) as $dst
+                }
+            }
+        )+
+    };
+}
+
+sat_from_real_impl!(R32 => u64|i64|usize|isize|u32|i32|u16|i16|u8|i8);
+sat_from_real_impl!(R64 => u64|i64|usize|isize|u32|i32|u16|i16|u8|i8);
