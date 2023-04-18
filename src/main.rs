@@ -102,7 +102,7 @@ impl Player {
 
                         if *pbar_start == f64::NEG_INFINITY {
                                 sound_events.clear();
-                                traverse(connections, 0, Sound::End, &mut apply_sound_comp!()).add_loc(loc!())?;
+                                sound_player.end_sounds();
                         } else {
                             let len = sound_events.len();
                             let start = match sound_events.iter().rev().position(|event| time < event.when) {
@@ -168,8 +168,9 @@ impl Player {
             }.report_err(loc!());
         }
 
+        let mut sound_player = SoundPlayer::new(r64![120.0]).add_loc(loc!())?;
         let mut sound_comps = vec![SoundGen::new_input(Point{x: 350, y: 500}),
-            SoundGen::new_output(Point{x: 550, y: 500})];
+            SoundGen::new_output(Point{x: 550, y: 500}, &mut sound_player)];
         sound_comps[1].set_id(1);
         GLOBAL_PLAYER.set(Self{
             graph_canvas, sound_visualiser_canvas,
@@ -181,7 +182,7 @@ impl Player {
                 .into_js_value().unchecked_into(),
             sound_events: vec![], sound_comps, starting_note: Note::A2,
             connections: vec![vec![], vec![]],
-            sound_player: SoundPlayer::new(r64![120.0]).add_loc(loc!())?
+            sound_player
         }).add_loc(loc!())?;
         Ok(render(0.0))
     }
@@ -230,6 +231,9 @@ impl Player {
     fn play_sounds(&mut self, note: Note) {
         self.pbar_start = f64::INFINITY;
         self.starting_note = note;
+        for element in self.sound_comps.iter_mut() {
+            element.reset(&mut self.sound_player);
+        }
         self.sound_events.push(SoundEvent{element_id: 0, when: R64::NEG_INFINITY});
     }
 

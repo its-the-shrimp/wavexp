@@ -232,8 +232,7 @@ impl Pitch {
 pub enum Sound {
     InputNote(Note, Option<Beats>),
     Wave(GainNode, Option<Beats>),
-    Envelope{attack: Beats, decay: Beats, sustain_level: R32, sustain: Option<Beats>, release: Beats, ctrl: GainNode},
-    End
+    Envelope{attack: Beats, decay: Beats, sustain_level: R32, sustain: Option<Beats>, release: Beats, ctrl: GainNode}
 }
 
 impl Sound {
@@ -262,7 +261,6 @@ impl Sound {
                     wave.connect_with_audio_node(&ctrl).add_loc(loc!())?;
                 }
                 Self::Wave(ctrl, duration)}
-            x @Self::End => x,
             x => js_error(format!("`{}` sound cannot be turned into a `Complex Wave`", x.name()), loc!())?
         })
     }
@@ -278,8 +276,8 @@ impl Sound {
                 gen.start().add_loc(loc!())?;
                 (ctrl, duration)}
             Self::Wave(x, duration) => (x, duration),
-            Self::Envelope{ctrl, attack, decay, sustain, ..} => (ctrl, sustain.map(|x| x + attack + decay)),
-            x @Self::End => return Ok(x)};
+            Self::Envelope{ctrl, attack, decay, sustain, ..} => (ctrl, sustain.map(|x| x + attack + decay))
+        };
         let mut sustain = None;
         if let Some(duration) = duration {
             sustain = Some(duration - attack - decay);
@@ -295,8 +293,7 @@ impl Sound {
         match self {
             Self::InputNote(..) => "Input Note",
             Self::Wave(..) => "Complex Wave",
-            Self::Envelope{..} => "Envelope",
-            Self::End => "Ending Signal"}
+            Self::Envelope{..} => "Envelope"}
     }
 
     fn prepare(self, dest: &AudioNode) -> JsResult<Self> {
@@ -319,8 +316,6 @@ impl Sound {
             Self::Envelope{attack, decay, sustain_level, sustain, release, ctrl} => {
                 ctrl.connect_with_audio_node(dest).add_loc(loc!())?;
                 Self::Envelope{attack, decay, sustain_level, sustain, release, ctrl}}
-
-            x => js_error(format!("`{}` sound cannot be played", x.name()), loc!())?
         })
     }
 
@@ -346,13 +341,13 @@ impl Sound {
                         gain.set_value(*sustain_level);
                         time}
 
-                    (true, false) => {
+                    (false, true) => {
                         gain.set_value(1.0);
                         let at = time + decay.to_secs(bpm);
                         gain.linear_ramp_to_value_at_time(*sustain_level, *at).add_loc(loc!())?;
                         at}
 
-                    (false, true) => {
+                    (true, false) => {
                         let at = time + attack.to_secs(bpm);
                         gain.linear_ramp_to_value_at_time(1.0, *at).add_loc(loc!())?;
                         gain.set_value_at_time(*sustain_level, *at).add_loc(loc!())?;
@@ -495,7 +490,7 @@ pub enum SoundGen {
         pattern_offset: i32, displayed_interval: Beats,
         wrap_point: Beats},
     /// consumes the input sound, delegating it to the `SoundPlayer`
-    Output{base: Element},
+    Output{base: Element, bpm: Beats},
 }
 
 impl Deref for SoundGen {
@@ -506,7 +501,7 @@ impl Deref for SoundGen {
             Self::Wave {base, ..} => base,
             Self::Envelope{base, ..} => base,
             Self::Pattern{base, ..} => base,
-            Self::Output{base} => base}
+            Self::Output{base, ..} => base}
     }
 }
 
@@ -517,7 +512,7 @@ impl DerefMut for SoundGen {
             Self::Wave {base, ..} => base,
             Self::Envelope{base, ..} => base,
             Self::Pattern{base, ..} => base,
-            Self::Output{base} => base}
+            Self::Output{base, ..} => base}
     }
 }
 
@@ -553,8 +548,8 @@ impl SoundGen {
             base: Element{location, focus: Focus::None, id: 0}}
     }
 
-    #[inline] pub fn new_output(location: Point) -> Self {
-        Self::Output{base: Element{location, focus: Focus::None, id: 0}}
+    #[inline] pub fn new_output(location: Point, player: &mut SoundPlayer) -> Self {
+        Self::Output{base: Element{location, focus: Focus::None, id: 0}, bpm: player.bpm()}
     }
 
     #[inline] pub fn id(&self) -> usize {self.id}
@@ -601,6 +596,16 @@ impl SoundGen {
             .then(|| self.location - Point{x: Self::VISUAL_SIZE, y: 0})
     }
 
+    /// called right before starting to play the sounds
+    pub fn reset(&mut self, player: &mut SoundPlayer) {
+        match self {
+            SoundGen::Pattern{cur_block_id, pattern, ..} => *cur_block_id =
+                pattern.first().filter(|x| *x.offset > 0.0).map(|_| 0),
+            SoundGen::Output{bpm, ..} => player.set_bpm(*bpm),
+            _ => ()
+        }
+    }
+
     pub fn transform(&mut self, player: &mut SoundPlayer, sound: Sound, time: MSecs) -> JsResult<(Option<Sound>, Option<SoundEvent>)> {
         Ok(match self {
             Self::Wave{waves, ..} => (Some(sound.wave(player.audio_ctx(), waves).add_loc(loc!())?), None),
@@ -609,10 +614,7 @@ impl SoundGen {
                 (Some(sound.envelope(player.audio_ctx(), attack, decay, sustain_level, release).add_loc(loc!())?),
                     None),
 
-            Self::Pattern{base, pattern, cur_block_id, wrap_point, ..} => if matches!(sound, Sound::End) {
-                *cur_block_id = pattern.first().map_or(false, |x| *x.offset == 0.0).then_some(0);
-                (Some(Sound::End), None)
-            } else {
+            Self::Pattern{base, pattern, cur_block_id, wrap_point, ..} => {
                 let bpm = player.bpm();
                 let Some(cur_block_id) = cur_block_id else {
                     return if let Some(when) = pattern.first().map(|x| time + x.offset.to_msecs(bpm)) {
@@ -629,7 +631,11 @@ impl SoundGen {
                     Some(SoundEvent{element_id: base.id, when: time + offset.to_msecs(bpm) - cur.offset.to_msecs(bpm)}))
             }
 
-            Self::Output{..} => (player.play_sound(sound).map(|_| None).add_loc(loc!())?, None),
+            Self::Output{bpm, ..} => {
+                player.set_bpm(*bpm);
+                player.play_sound(sound).add_loc(loc!())?;
+                (None, None)
+            }
 
             Self::Input{..} => (Some(sound), None)})
     }
@@ -730,12 +736,12 @@ impl SoundGen {
                 <Slider name={"Attack time"}
                     id={ParamId::EnvelopeAttack(self.id)}
                     max={Sound::MAX_INTERVAL}
-                    postfix={"QB"} precision={2}
+                    postfix={"Beats"} precision={2}
                     initial={*attack}/>
                 <Slider name={"Decay time"}
                     id={ParamId::EnvelopeDecay(self.id)}
                     max={Sound::MAX_INTERVAL}
-                    postfix={"QB"} precision={2}
+                    postfix={"Beats"} precision={2}
                     initial={*decay}/>
                 <Slider name={"Sustain level"}
                     id={ParamId::EnvelopSustain(self.id)}
@@ -745,8 +751,16 @@ impl SoundGen {
                 <Slider name={"Release time"}
                     id={ParamId::EnvelopeRelease(self.id)}
                     max={Sound::MAX_INTERVAL}
-                    postfix={"QB"} precision={2}
+                    postfix={"Beats"} precision={2}
                     initial={*release}/>
+            </div>},
+
+            Self::Output{bpm, ..} => html!{<div id="inputs">
+                <Slider name={"Tempo"}
+                    id={ParamId::SetBPM(self.id)}
+                    min={r64![30.0]} max={r64![240.0]}
+                    postfix={"BpM"} precision={2}
+                    initial={*bpm}/>
             </div>},
 
             _ => Default::default()}
@@ -789,6 +803,11 @@ impl SoundGen {
                 ParamId::EnvelopeDecay(_)  =>  {*decay   = value;              false}
                 ParamId::EnvelopSustain(_) =>  {*sustain_level = value.into(); false}
                 ParamId::EnvelopeRelease(_) => {*release = value;              false}
+                id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
+            }
+
+            Self::Output{bpm, ..} => match id {
+                ParamId::SetBPM(_) => {*bpm = value; false}
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
             }
 
@@ -922,7 +941,7 @@ impl SoundGen {
                 let note_height = -height / Note::ALL.len() as f64;
                 ctx.rect(**wrap_point as f64 / **displayed_interval as f64 * width - *pattern_offset as f64, 0.0,
                     2.0, height);
-                let interval = 4.0 / **displayed_interval as f64 * width;
+                let interval = 1.0 / **displayed_interval as f64 * width;
                 let stroke_style = ctx.stroke_style();
                 ctx.set_stroke_style(&"#232328".into());
                 successors(Some(-*pattern_offset as f64),
@@ -985,19 +1004,18 @@ impl SoundPlayer {
     }
 
     pub fn play_sound(&mut self, sound: Sound) -> JsResult<()> {
-        Ok(if matches!(sound, Sound::End) {
-            self.ending_all = true;
-        } else {
-            self.sounds.push((sound.prepare(&self.plug).add_loc(loc!())?,
-                SoundState::Pending));
-        })
+        Ok(self.sounds.push((sound.prepare(&self.plug).add_loc(loc!())?,
+            SoundState::Pending)))
+    }
+
+    #[inline] pub fn end_sounds(&mut self) {
+        self.ending_all = true;
     }
 
     #[inline] pub fn audio_ctx(&self) -> &AudioContext {&self.audio_ctx}
 
     #[inline] pub fn visualiser(&self) -> &AnalyserNode {&self.visualiser}
 
-    /// `time` is in seconds
     pub fn poll(&mut self, time: Secs) -> JsResult<()> {
         if self.ending_all {
             self.ending_all = false;

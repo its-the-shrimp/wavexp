@@ -86,25 +86,27 @@ pub enum ParamId {
     EnvelopeAttack(usize),
     EnvelopeDecay(usize),
     EnvelopSustain(usize),
-    EnvelopeRelease(usize)
+    EnvelopeRelease(usize),
+    SetBPM(usize)
 }
 
 impl ParamId {
     /// returns Some(id) when the parameter ID belongs to a specific element
     pub fn element_id(&self) -> Option<usize> {
         match self {
-            ParamId::Play(_)                   => None,
-            ParamId::Disconnect(_)             => None,
-            ParamId::Remove(_)                 => None,
+            ParamId::Play(_)                    => None,
+            ParamId::Disconnect(_)              => None,
+            ParamId::Remove(_)                  => None,
             ParamId::ToggleWavePitchType(id, _) => Some(*id),
             ParamId::WavePitch(id, _)           => Some(*id),
-            ParamId::WaveType(id, _)           => Some(*id),
-            ParamId::RemoveWave(id, _)         => Some(*id),
-            ParamId::AddWave(id)               => Some(*id),
-            ParamId::EnvelopeAttack(id)        => Some(*id),
-            ParamId::EnvelopeDecay(id)         => Some(*id),
-            ParamId::EnvelopSustain(id)        => Some(*id),
-            ParamId::EnvelopeRelease(id)       => Some(*id),
+            ParamId::WaveType(id, _)            => Some(*id),
+            ParamId::RemoveWave(id, _)          => Some(*id),
+            ParamId::AddWave(id)                => Some(*id),
+            ParamId::EnvelopeAttack(id)         => Some(*id),
+            ParamId::EnvelopeDecay(id)          => Some(*id),
+            ParamId::EnvelopSustain(id)         => Some(*id),
+            ParamId::EnvelopeRelease(id)        => Some(*id),
+            ParamId::SetBPM(id)                 => Some(*id)
         }
     }
 }
@@ -123,6 +125,8 @@ pub struct SliderProps {
     pub signed: bool,
     #[prop_or(R64::ONE)]
     pub max: R64,
+    #[prop_or(R64::ZERO)]
+    pub min: R64,
     #[prop_or(2)]
     pub precision: usize,
     #[prop_or("")]
@@ -139,19 +143,19 @@ impl Component for Slider {
     type Properties = SliderProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        let SliderProps {max, initial, ..} = ctx.props();
-        Self {focused: false, hovered: false, value: initial / max,
+        let SliderProps {min, max, initial, ..} = ctx.props();
+        Self {focused: false, hovered: false, value: (initial - min) / (max - min),
             canvas: JsValue::UNDEFINED.unchecked_into()}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            let SliderProps{id, signed, max, name, ..} = ctx.props();
+            let SliderProps{id, signed, min, max, name, ..} = ctx.props();
             msg.handle_hover(name, |_, hovered| Ok(self.hovered = hovered)).add_loc(loc!())?
                 .handle_focus(|_| Ok(self.focused = true)).add_loc(loc!())?
                 .handle_unfocus(|_| Ok({
                     self.focused = false;
-                    MainCmd::SetParam(*id, self.value * max).send();
+                    MainCmd::SetParam(*id, self.value * (max - min) + min).send();
                 })).add_loc(loc!())?
                 .handle_drag(|e| Ok({
                     let target = e.target_dyn_into::<Element>().to_js_result(loc!())?;
@@ -176,7 +180,7 @@ impl Component for Slider {
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         _ = js_try!{type = !:
-            let SliderProps{max, precision, postfix, id, ..} = ctx.props();
+            let SliderProps{min, max, precision, postfix, id, ..} = ctx.props();
             if first_render {
                 self.canvas = document()
                     .element_dyn_into(&format!("Slider({:?})", *id), loc!())?;
@@ -204,7 +208,7 @@ impl Component for Slider {
                 ctx.stroke();
             }
             ctx.set_text_baseline("middle");
-            ctx.fill_text_with_max_width(&format!("{:.*}", precision, **max * *self.value),
+            ctx.fill_text_with_max_width(&format!("{:.*}", precision, *self.value * (**max - **min) + **min),
                 w, h + LINE_WIDTH / 2.0, r).add_loc(loc!())?;
             ctx.set_text_baseline("top");
             return ctx.fill_text_with_max_width(postfix, 
