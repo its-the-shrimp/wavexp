@@ -31,7 +31,7 @@ use crate::{
     input::{Switch, Slider, Button, ParamId},
     MainCmd,
     loc,
-    r32, r64};
+    r32, r64, js_log};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -736,31 +736,39 @@ impl SoundGen {
                 <Slider name={"Attack time"}
                     id={ParamId::EnvelopeAttack(self.id)}
                     max={Sound::MAX_INTERVAL}
-                    postfix={"Beats"} precision={2}
+                    postfix={"Beats"}
                     initial={*attack}/>
                 <Slider name={"Decay time"}
                     id={ParamId::EnvelopeDecay(self.id)}
                     max={Sound::MAX_INTERVAL}
-                    postfix={"Beats"} precision={2}
+                    postfix={"Beats"}
                     initial={*decay}/>
                 <Slider name={"Sustain level"}
                     id={ParamId::EnvelopSustain(self.id)}
                     max={r64![1.0]}
-                    postfix={""} precision={2}
+                    postfix={""}
                     initial={R64::from(*sustain_level)}/>
                 <Slider name={"Release time"}
                     id={ParamId::EnvelopeRelease(self.id)}
                     max={Sound::MAX_INTERVAL}
-                    postfix={"Beats"} precision={2}
+                    postfix={"Beats"}
                     initial={*release}/>
             </div>},
 
             Self::Output{bpm, ..} => html!{<div id="inputs">
                 <Slider name={"Tempo"}
-                    id={ParamId::SetBPM(self.id)}
+                    id={ParamId::BPM(self.id)}
                     min={r64![30.0]} max={r64![240.0]}
-                    postfix={"BpM"} precision={2}
+                    postfix={"BPM"}
                     initial={*bpm}/>
+            </div>},
+
+            Self::Pattern{displayed_interval, ..} => html!{<div id="inputs">
+                <Slider name={"Displayed interval"}
+                    id={ParamId::DisplayInterval(self.id)}
+                    min={r64![1.0]} max={r64![32.0]}
+                    postfix={"beats"}
+                    initial={*displayed_interval}/>
             </div>},
 
             _ => Default::default()}
@@ -807,7 +815,12 @@ impl SoundGen {
             }
 
             Self::Output{bpm, ..} => match id {
-                ParamId::SetBPM(_) => {*bpm = value; false}
+                ParamId::BPM(_) => {*bpm = value; false}
+                id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
+            }
+
+            Self::Pattern{displayed_interval, ..} => match id {
+                ParamId::DisplayInterval(_) => {*displayed_interval = value; false}
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
             }
 
@@ -924,7 +937,6 @@ impl SoundGen {
 
                         PatternInputFocus::DragPlane(last_point) => {
                             *pattern_offset = pattern_offset.sub(last_point.x - point.x).max(0);
-                            *displayed_interval = (*displayed_interval + (last_point.y - point.y)).clamp(r64![1.0], r64![32.0]);
                             *last_point = point;
                         }
 

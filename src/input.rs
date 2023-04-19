@@ -87,7 +87,8 @@ pub enum ParamId {
     EnvelopeDecay(usize),
     EnvelopSustain(usize),
     EnvelopeRelease(usize),
-    SetBPM(usize)
+    BPM(usize),
+    DisplayInterval(usize)
 }
 
 impl ParamId {
@@ -106,7 +107,8 @@ impl ParamId {
             ParamId::EnvelopeDecay(id)          => Some(*id),
             ParamId::EnvelopSustain(id)         => Some(*id),
             ParamId::EnvelopeRelease(id)        => Some(*id),
-            ParamId::SetBPM(id)                 => Some(*id)
+            ParamId::BPM(id)                    => Some(*id),
+            ParamId::DisplayInterval(id)        => Some(*id)
         }
     }
 }
