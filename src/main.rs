@@ -168,7 +168,7 @@ impl Player {
             }.report_err(loc!());
         }
 
-        let mut sound_player = SoundPlayer::new(r64![120.0]).add_loc(loc!())?;
+        let mut sound_player = SoundPlayer::new(r64![120.0], r32![0.2]).add_loc(loc!())?;
         let mut sound_comps = vec![SoundGen::new_input(Point{x: 350, y: 500}),
             SoundGen::new_output(Point{x: 550, y: 500}, &mut sound_player)];
         sound_comps[1].set_id(1);

@@ -490,7 +490,7 @@ pub enum SoundGen {
         pattern_offset: i32, displayed_interval: Beats,
         wrap_point: Beats, snap_step: Beats},
     /// consumes the input sound, delegating it to the `SoundPlayer`
-    Output{base: Element, bpm: Beats},
+    Output{base: Element, bpm: Beats, master_gain: R32},
 }
 
 impl Deref for SoundGen {
@@ -549,7 +549,8 @@ impl SoundGen {
     }
 
     #[inline] pub fn new_output(location: Point, player: &mut SoundPlayer) -> Self {
-        Self::Output{base: Element{location, focus: Focus::None, id: 0}, bpm: player.bpm()}
+        Self::Output{bpm: player.bpm(), master_gain: player.master_gain(),
+            base: Element{location, focus: Focus::None, id: 0}}
     }
 
     #[inline] pub fn id(&self) -> usize {self.id}
@@ -601,7 +602,10 @@ impl SoundGen {
         match self {
             SoundGen::Pattern{cur_block_id, pattern, ..} => *cur_block_id =
                 pattern.first().filter(|x| *x.offset > 0.0).map(|_| 0),
-            SoundGen::Output{bpm, ..} => player.set_bpm(*bpm),
+            SoundGen::Output{bpm, master_gain, ..} => {
+                player.set_bpm(*bpm);
+                player.set_master_gain(*master_gain);
+            }
             _ => ()
         }
     }
@@ -733,43 +737,45 @@ impl SoundGen {
             </div>},
 
             &Self::Envelope{attack, decay, sustain_level, release, ..} => html!{<div id="inputs">
-                <Slider name={"Attack time"}
+                <Slider key="att" name="Attack time"
                     id={ParamId::EnvelopeAttack(self.id)}
                     max={Sound::MAX_INTERVAL}
                     postfix={"Beats"}
                     initial={attack}/>
-                <Slider name={"Decay time"}
+                <Slider key="dec" name="Decay time"
                     id={ParamId::EnvelopeDecay(self.id)}
                     max={Sound::MAX_INTERVAL}
                     postfix={"Beats"}
                     initial={decay}/>
-                <Slider name={"Sustain level"}
+                <Slider key="sus" name="Sustain level"
                     id={ParamId::EnvelopSustain(self.id)}
                     max={r64![1.0]}
-                    postfix={""}
                     initial={R64::from(sustain_level)}/>
-                <Slider name={"Release time"}
+                <Slider key="rel" name="Release time"
                     id={ParamId::EnvelopeRelease(self.id)}
                     max={Sound::MAX_INTERVAL}
-                    postfix={"Beats"}
+                    postfix="Beats"
                     initial={release}/>
             </div>},
 
-            &Self::Output{bpm, ..} => html!{<div id="inputs">
-                <Slider name={"Tempo"}
+            &Self::Output{master_gain, bpm, ..} => html!{<div id="inputs">
+                <Slider key="tmp" name="Tempo"
                     id={ParamId::BPM(self.id)}
                     min={r64![30.0]} max={r64![240.0]}
-                    postfix={"BPM"}
+                    postfix="BPM"
                     initial={bpm}/>
+                <Slider key="gain" name="Master gain level"
+                    id={ParamId::MasterGain(self.id)}
+                    initial={R64::from(master_gain)}/>
             </div>},
 
             &Self::Pattern{displayed_interval, snap_step, ..} => html!{<div id="inputs">
-                <Slider name={"Displayed interval"}
+                <Slider key="int" name="Displayed interval"
                     id={ParamId::DisplayInterval(self.id)}
                     min={r64![1.0]} max={r64![32.0]}
-                    postfix={"beats"}
+                    postfix="beats"
                     initial={displayed_interval}/>
-                <Switch name={"Interval for notes to snap to"}
+                <Switch key="snap" name="Interval for notes to snap to"
                     id={ParamId::SnapStep(self.id)}
                     options={vec!["None", "1", "1/2", "1/4", "1/8"]}
                     initial={if *snap_step == 0.0 {0} else {snap_step.recip().round() as usize}}/>
@@ -818,8 +824,9 @@ impl SoundGen {
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
             }
 
-            Self::Output{bpm, ..} => match id {
+            Self::Output{master_gain, bpm, ..} => match id {
                 ParamId::BPM(_) => {*bpm = value; false}
+                ParamId::MasterGain(_) => {*master_gain = value.into(); false}
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
             }
 
@@ -960,7 +967,7 @@ impl SoundGen {
                     }
                     Some((note, point.y as f64))
                 } else {
-                    if let Some(PatternInputFocus::DragStart(index, _) | PatternInputFocus::DragEnd(index, _)) = input_focus.take() {
+                    if let Some(PatternInputFocus::DragStart(index, _) |PatternInputFocus::DragEnd(index, _)) = input_focus.take() {
                         let mut block = unsafe{pattern.get_unchecked_mut(index)};
                         if *block.duration == 0.0 {
                             pattern.remove(index);
@@ -1032,23 +1039,23 @@ pub struct SoundPlayer {
     plug: DynamicsCompressorNode,
     visualiser: AnalyserNode,
     audio_ctx: AudioContext,
-    bpm: Beats
+    bpm: Beats,
+    master_gain: R32
 }
 
 impl SoundPlayer {
-    const MASTER_GAIN: f32 = 0.2; // TODO: make customizable
-    pub fn new(bpm: Beats) -> JsResult<Self> {
+    pub fn new(bpm: Beats, master_gain: R32) -> JsResult<Self> {
         let audio_ctx = AudioContext::new().add_loc(loc!())?;
         let plug = DynamicsCompressorNode::new_with_options(&audio_ctx,
             DynamicsCompressorOptions::new().ratio(20.0).release(1.0)).add_loc(loc!())?;
         let gain = GainNode::new_with_options(&audio_ctx,
-            GainOptions::new().gain(Self::MASTER_GAIN)).add_loc(loc!())?;
+            GainOptions::new().gain(*master_gain)).add_loc(loc!())?;
         let visualiser = AnalyserNode::new(&audio_ctx).add_loc(loc!())?;
 
         plug.connect_with_audio_node(&visualiser).add_loc(loc!())?
             .connect_with_audio_node(&gain).add_loc(loc!())?
             .connect_with_audio_node(&audio_ctx.destination()).add_loc(loc!())?;
-        Ok(Self{sounds: vec![], ending_all: false, plug, visualiser, audio_ctx, bpm})
+        Ok(Self{sounds: vec![], ending_all: false, plug, visualiser, audio_ctx, bpm, master_gain})
     }
 
     pub fn play_sound(&mut self, sound: Sound) -> JsResult<()> {
@@ -1110,4 +1117,12 @@ impl SoundPlayer {
 
     #[inline]
     pub fn set_bpm(&mut self, bpm: Beats) {self.bpm = bpm}
+
+    pub fn master_gain(&self) -> R32 {
+        self.master_gain
+    }
+
+    pub fn set_master_gain(&mut self, master_gain: R32) {
+        self.master_gain = master_gain;
+    }
 }

@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)] // because derive(yew::Properties) generates them
 
-use std::f64::consts::{PI, TAU};
+use std::{f64::consts::{PI, TAU}, ops::{Div, Mul, Add, Sub}};
 
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{Element, HtmlCanvasElement, PointerEvent, HtmlElement};
@@ -89,7 +89,8 @@ pub enum ParamId {
     EnvelopeRelease(usize),
     BPM(usize),
     DisplayInterval(usize),
-    SnapStep(usize)
+    SnapStep(usize),
+    MasterGain(usize),
 }
 
 impl ParamId {
@@ -110,7 +111,8 @@ impl ParamId {
             ParamId::EnvelopeRelease(id)        => Some(*id),
             ParamId::BPM(id)                    => Some(*id),
             ParamId::DisplayInterval(id)        => Some(*id),
-            ParamId::SnapStep(id)               => Some(*id)
+            ParamId::SnapStep(id)               => Some(*id),
+            ParamId::MasterGain(id)             => Some(*id)
         }
     }
 }
@@ -119,7 +121,8 @@ pub struct Slider {
     value: R64,
     canvas: HtmlCanvasElement,
     focused: bool,
-    hovered: bool
+    hovered: bool,
+    floored: bool
 }
 
 #[derive(PartialEq, yew::Properties)]
@@ -147,24 +150,31 @@ impl Component for Slider {
     type Properties = SliderProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        let SliderProps {min, max, initial, ..} = ctx.props();
-        Self {focused: false, hovered: false, value: (initial - min) / (max - min),
-            canvas: JsValue::UNDEFINED.unchecked_into()}
+        Self {focused: false, hovered: false, floored: false,
+            value: ctx.props().initial, canvas: JsValue::UNDEFINED.unchecked_into()}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            let SliderProps{id, signed, min, max, name, ..} = ctx.props();
+            let SliderProps{id, min, max, name, signed, ..} = ctx.props();
             msg.handle_hover(name, |_, hovered| Ok(self.hovered = hovered)).add_loc(loc!())?
-                .handle_focus(|_| Ok(self.focused = true)).add_loc(loc!())?
-                .handle_unfocus(|_| Ok({
+                .handle_focus(|e| Ok({
+                    self.focused = true;
+                    self.floored = e.shift_key();
+                })).add_loc(loc!())?
+                .handle_unfocus(|e| Ok({
                     self.focused = false;
-                    MainCmd::SetParam(*id, self.value * (max - min) + min).send();
+                    self.floored = e.shift_key();
+                    MainCmd::SetParam(*id, if self.floored {self.value.floor()} else {self.value}).send();
                 })).add_loc(loc!())?
                 .handle_drag(|e| Ok({
                     let target = e.target_dyn_into::<Element>().to_js_result(loc!())?;
-                    self.value = (self.value + R64::from(e.movement_y()) / R64::from(target.client_height() * -2))
-                        .clamp(signed.choose(r64![-1.0], r64![0.0]), r64![1.0]);
+                    self.value = R64::from(e.movement_y())
+                        .div(target.client_height() * -2)
+                        .mul(max - min)
+                        .add(self.value)
+                        .clamp(signed.choose(-*max, *min), *max);
+                    self.floored = e.shift_key();
                 })).add_loc(loc!())?;
             return true
         }.report_err(loc!());
@@ -206,13 +216,16 @@ impl Component for Slider {
                 ctx.arc(w, h + LINE_WIDTH, r, 0.0, PI * 2.0).add_loc(loc!())?;
                 ctx.stroke();
                 ctx.begin_path()}
-            if *self.value != 0.0 {
+            let value = if self.floored {self.value.floor()} else {self.value};
+            if value != *min {
                 ctx.arc_with_anticlockwise(w, h + LINE_WIDTH, r - LINE_WIDTH,
-                    PI * 1.5, (*self.value * 2.0 + 1.5) * PI, self.value.is_sign_negative()).add_loc(loc!())?;
+                    PI * 1.5,
+                    ((*value - **min) / (**max - **min) * 2.0 + 1.5) * PI,
+                    self.value < *min).add_loc(loc!())?;
                 ctx.stroke();
             }
             ctx.set_text_baseline("middle");
-            ctx.fill_text_with_max_width(&format!("{:.*}", precision, *self.value * (**max - **min) + **min),
+            ctx.fill_text_with_max_width(&format!("{:.*}", precision, *value),
                 w, h + LINE_WIDTH / 2.0, r).add_loc(loc!())?;
             ctx.set_text_baseline("top");
             return ctx.fill_text_with_max_width(postfix, 
