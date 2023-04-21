@@ -1054,11 +1054,11 @@ macro_rules! real_impl {
 
         impl Deref for $real {
             type Target = $float;
-            #[inline(always)] fn deref(&self) -> &Self::Target {&self.0}
+            #[inline] fn deref(&self) -> &Self::Target {&self.0}
         }
 
         impl Ord for $real {
-            #[inline(always)] fn cmp(&self, other: &Self) -> Ordering {
+            #[inline] fn cmp(&self, other: &Self) -> Ordering {
                 unsafe{self.partial_cmp(other).unwrap_unchecked()}
             }
         }
@@ -1067,14 +1067,14 @@ macro_rules! real_impl {
 
         impl TryFrom<$float> for $real {
             type Error = NanError;
-            #[inline(always)] fn try_from(x: $float) -> Result<Self, Self::Error> {
+            #[inline] fn try_from(x: $float) -> Result<Self, Self::Error> {
                 if x.is_nan() {return Err(NanError)}
                 Ok(Self(x))
             }
         }
 
         impl From<$other_real> for $real {
-            #[inline(always)]
+            #[inline]
             fn from(value: $other_real) -> Self {Self(value.0 as $float)}
         }
 
@@ -1082,6 +1082,12 @@ macro_rules! real_impl {
             #[inline] fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
                 write!(f, "{}", self.0)
             }
+        }
+
+        impl Neg for $real {
+            type Output = Self;
+            #[inline]
+            fn neg(self) -> Self::Output {Self(-self.0)}
         }
 
         real_from_ints_impl!($real{$float}:

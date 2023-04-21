@@ -284,7 +284,7 @@ impl Player {
     /// interactive
     #[inline] fn emit_graph_interaction(&mut self, f: impl FnOnce() -> Option<GraphEvent>) {
         if self.graph_spec.map_or(false, |x| x.interactive) {
-            self.graph_update = Some(f());
+            self.graph_update = f().map(|x| Some(x));
         }
     }
 }

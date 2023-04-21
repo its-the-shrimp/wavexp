@@ -823,10 +823,11 @@ impl SoundGen {
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
             }
 
-            Self::Pattern{displayed_interval, snap_step, ..} => match id {
+            Self::Pattern{last_duration, displayed_interval, snap_step, ..} => match id {
                 ParamId::DisplayInterval(_) => {*displayed_interval = value; false}
                 ParamId::SnapStep(_) => {
                     *snap_step = if *value == 0.0 {r64![0.0]} else {value.sub(1u8).exp2().recip()};
+                    *last_duration = last_duration.floor_to(*snap_step);
                     false
                 }
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
@@ -872,7 +873,7 @@ impl SoundGen {
             }
 
             Self::Pattern{wrap_point, last_duration, input_focus, pattern, pattern_offset, displayed_interval, snap_step, ..} => {
-                if let Some(GraphEvent{shift, point, ..}) = event {
+                let hovered_note = if let Some(GraphEvent{shift, point, ..}) = event {
                     let offset_raw = R64::from(point.x + *pattern_offset) / R64::from(width) * *displayed_interval;
                     let offset = offset_raw.floor_to(*snap_step);
                     let note = Note::from_index(((1.0 - point.y as f32 / height as f32) * Note::ALL.len() as f32) as usize);
@@ -880,11 +881,28 @@ impl SoundGen {
                     let some_input_focus = input_focus.get_or_insert_with(|| {
                         let span = offset - 1 .. offset + 1;
                         let notes = note - 1 .. note + 1;
-                        if let Some((index, &block)) = pattern.iter().enumerate().find(|(_, x)| notes.contains(&x.note) && x.span().overlap(&span)) {
-                            match (*offset_raw - *block.offset) / *block.duration {
-                                x if x < 0.2 => PatternInputFocus::DragStart(index, offset),
-                                x if x > 0.8 => PatternInputFocus::DragEnd(index, offset),
-                                _            => PatternInputFocus::Move(index, offset)
+                        if let Some((index, block)) = pattern.iter_mut().enumerate().find(|(_, x)| notes.contains(&x.note) && x.span().overlap(&span)) {
+                            if shift {
+                                pattern.remove(index);
+                                PatternInputFocus::DragPlane(point)
+                            } else {
+                                match (*offset_raw - *block.offset) / *block.duration {
+                                    x if x < 0.2 => {
+                                        let old = block.offset;
+                                        block.offset = block.offset.floor_to(*snap_step);
+                                        block.duration += old - block.offset;
+                                        PatternInputFocus::DragStart(index, offset)
+                                    }
+                                    x if x > 0.8 => {
+                                        block.duration = block.duration.floor_to(*snap_step);
+                                        PatternInputFocus::DragEnd(index, offset)
+                                    }
+                                    _ => {
+                                        block.offset = block.offset.floor_to(*snap_step);
+                                        block.duration = block.duration.floor_to(*snap_step);
+                                        PatternInputFocus::Move(index, offset)
+                                    }
+                                }
                             }
                         } else if (*wrap_point - 1 .. *wrap_point + 1).overlap(&span) {
                             PatternInputFocus::DragWrapPoint(offset)
@@ -904,15 +922,8 @@ impl SoundGen {
                                 .map_or(R64::ZERO, |x| x.offset + x.duration)
                                 .max(block.offset + delta);
                             block.duration = block.duration - delta;
-                            *last_duration = block.duration;
                             *last_offset = offset;
-                            if *block.duration == 0.0 {
-                                pattern.remove(*index);
-                                *last_duration = Self::PATTERN_DEFAULT_BLOCK_DURATION;
-                                *input_focus = None;
-                            } else {
-                                *index = pattern.set_sorted(*index, block).to_js_result(loc!())?;
-                            }
+                            *index = pattern.set_sorted(*index, block).to_js_result(loc!())?;
                         }
 
                         PatternInputFocus::DragEnd(index, last_offset) => {
@@ -922,13 +933,7 @@ impl SoundGen {
                                 .min(block.duration + offset - *last_offset);
                             *last_duration = block.duration;
                             *last_offset = offset;
-                            if *block.duration == 0.0 {
-                                pattern.remove(*index);
-                                *last_duration = Self::PATTERN_DEFAULT_BLOCK_DURATION;
-                                *input_focus = None;
-                            } else {
-                                *unsafe{pattern.get_unchecked_mut(*index)} = block;
-                            }
+                            *unsafe{pattern.get_unchecked_mut(*index)} = block;
                         }
 
                         PatternInputFocus::Move(index, last_offset) => {
@@ -953,9 +958,21 @@ impl SoundGen {
                             *last_offset = offset;
                         }
                     }
+                    Some((note, point.y as f64))
                 } else {
-                    *input_focus = None;
-                }
+                    if let Some(PatternInputFocus::DragStart(index, _) | PatternInputFocus::DragEnd(index, _)) = input_focus.take() {
+                        let mut block = unsafe{pattern.get_unchecked_mut(index)};
+                        if *block.duration == 0.0 {
+                            pattern.remove(index);
+                            *last_duration = Self::PATTERN_DEFAULT_BLOCK_DURATION;
+                        } else if *block.duration < 0.0 {
+                            block.offset += block.duration;
+                            block.duration = -block.duration;
+                            *last_duration = block.duration;
+                        }
+                    }
+                    None
+                };
 
                 let (width, height) = (width as f64, height as f64);
                 let note_height = -height / Note::ALL.len() as f64;
@@ -968,6 +985,15 @@ impl SoundGen {
                     |x| (x + interval).check(|x| *x < width).ok())
                     .skip_while(|x| *x < 0.0)
                     .for_each(|i| ctx.stroke_rect(i, 0.0, 1.0, height));
+                if let Some((note, at)) = hovered_note {
+                    ctx.stroke_rect(0.0, (1.0 - note.index() as f64 / Note::ALL.len() as f64) * height,
+                        width as f64, note_height);
+                    ctx.set_font("20px consolas");
+                    ctx.set_fill_style(&"#0069E1".into());
+                    ctx.set_text_align("right");
+                    ctx.set_text_baseline("middle");
+                    ctx.fill_text(note.name(), width as f64 * 0.975, at).add_loc(loc!())?;
+                }
                 ctx.set_stroke_style(&stroke_style);
                 pattern.iter()
                     .map(|block| (
@@ -976,9 +1002,11 @@ impl SoundGen {
                         *block.duration as f64 / **displayed_interval as f64 * width))
                     .skip_while(|(x, _, w)| x + w < 0.0)
                     .take_while(|(x, _, _)| *x < width)
-                    .for_each(|(x, y, w)| ctx.rect(x, y, w, note_height))}
+                    .for_each(|(x, y, w)| ctx.rect(x, y, w, note_height));
+            }
 
-            _ => ()})
+            _ => ()
+        })
     }
 }
 
