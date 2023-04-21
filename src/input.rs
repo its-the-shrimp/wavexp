@@ -88,7 +88,8 @@ pub enum ParamId {
     EnvelopSustain(usize),
     EnvelopeRelease(usize),
     BPM(usize),
-    DisplayInterval(usize)
+    DisplayInterval(usize),
+    SnapStep(usize)
 }
 
 impl ParamId {
@@ -108,7 +109,8 @@ impl ParamId {
             ParamId::EnvelopSustain(id)         => Some(*id),
             ParamId::EnvelopeRelease(id)        => Some(*id),
             ParamId::BPM(id)                    => Some(*id),
-            ParamId::DisplayInterval(id)        => Some(*id)
+            ParamId::DisplayInterval(id)        => Some(*id),
+            ParamId::SnapStep(id)               => Some(*id)
         }
     }
 }
@@ -253,7 +255,7 @@ impl Component for Switch {
                 .handle_drag(|e| {
                     let old_value = *self.value as usize;
                     let target = e.target_dyn_into::<Element>().to_js_result(loc!())?;
-                    self.value = R64::rem_euclid(self.value + R64::from(e.movement_y()) / R64::from(target.client_height() / -2 * options.len() as i32),
+                    self.value = R64::rem_euclid(self.value + R64::from(e.movement_y()) / R64::from(target.client_height() / -4 * options.len() as i32),
                         R64::from(options.len())).to_js_result(loc!())?;
                     if old_value != *self.value as usize {
                         MainCmd::SetParam(*id, self.value.floor()).send()}

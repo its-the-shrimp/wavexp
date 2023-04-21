@@ -31,7 +31,7 @@ use crate::{
     input::{Switch, Slider, Button, ParamId},
     MainCmd,
     loc,
-    r32, r64, js_log};
+    r32, r64};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -488,7 +488,7 @@ pub enum SoundGen {
     Pattern{base: Element, pattern: Vec<PatternBlock>, cur_block_id: Option<usize>,
         input_focus: Option<PatternInputFocus>, last_duration: Beats,
         pattern_offset: i32, displayed_interval: Beats,
-        wrap_point: Beats},
+        wrap_point: Beats, snap_step: Beats},
     /// consumes the input sound, delegating it to the `SoundPlayer`
     Output{base: Element, bpm: Beats},
 }
@@ -544,7 +544,7 @@ impl SoundGen {
     #[inline] pub fn new_pattern(location: Point) -> Self {
         Self::Pattern{pattern: vec![], cur_block_id: None,
             input_focus: None, last_duration: r64![4.0], wrap_point: r64![16.0],
-            pattern_offset: 0, displayed_interval: r64![20.0],
+            pattern_offset: 0, displayed_interval: r64![20.0], snap_step: r64![1.0],
             base: Element{location, focus: Focus::None, id: 0}}
     }
 
@@ -679,7 +679,7 @@ impl SoundGen {
     }
 
     pub fn params(&self) -> Html {
-        match &self {
+        match self {
             Self::Wave{waves, n_waves, ..} => html!{<div id="inputs" style="grid-template-columns:repeat(3,1fr)">
                 {for waves.iter().enumerate().map(|(i, wave)| html!{<>
                     <div id="wave-options">
@@ -732,43 +732,47 @@ impl SoundGen {
                 </Button>
             </div>},
 
-            Self::Envelope{attack, decay, sustain_level, release, ..} => html! {<div id="inputs">
+            &Self::Envelope{attack, decay, sustain_level, release, ..} => html!{<div id="inputs">
                 <Slider name={"Attack time"}
                     id={ParamId::EnvelopeAttack(self.id)}
                     max={Sound::MAX_INTERVAL}
                     postfix={"Beats"}
-                    initial={*attack}/>
+                    initial={attack}/>
                 <Slider name={"Decay time"}
                     id={ParamId::EnvelopeDecay(self.id)}
                     max={Sound::MAX_INTERVAL}
                     postfix={"Beats"}
-                    initial={*decay}/>
+                    initial={decay}/>
                 <Slider name={"Sustain level"}
                     id={ParamId::EnvelopSustain(self.id)}
                     max={r64![1.0]}
                     postfix={""}
-                    initial={R64::from(*sustain_level)}/>
+                    initial={R64::from(sustain_level)}/>
                 <Slider name={"Release time"}
                     id={ParamId::EnvelopeRelease(self.id)}
                     max={Sound::MAX_INTERVAL}
                     postfix={"Beats"}
-                    initial={*release}/>
+                    initial={release}/>
             </div>},
 
-            Self::Output{bpm, ..} => html!{<div id="inputs">
+            &Self::Output{bpm, ..} => html!{<div id="inputs">
                 <Slider name={"Tempo"}
                     id={ParamId::BPM(self.id)}
                     min={r64![30.0]} max={r64![240.0]}
                     postfix={"BPM"}
-                    initial={*bpm}/>
+                    initial={bpm}/>
             </div>},
 
-            Self::Pattern{displayed_interval, ..} => html!{<div id="inputs">
+            &Self::Pattern{displayed_interval, snap_step, ..} => html!{<div id="inputs">
                 <Slider name={"Displayed interval"}
                     id={ParamId::DisplayInterval(self.id)}
                     min={r64![1.0]} max={r64![32.0]}
                     postfix={"beats"}
-                    initial={*displayed_interval}/>
+                    initial={displayed_interval}/>
+                <Switch name={"Interval for notes to snap to"}
+                    id={ParamId::SnapStep(self.id)}
+                    options={vec!["None", "1", "1/2", "1/4", "1/8"]}
+                    initial={if *snap_step == 0.0 {0} else {snap_step.recip().round() as usize}}/>
             </div>},
 
             _ => Default::default()}
@@ -819,8 +823,12 @@ impl SoundGen {
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
             }
 
-            Self::Pattern{displayed_interval, ..} => match id {
+            Self::Pattern{displayed_interval, snap_step, ..} => match id {
                 ParamId::DisplayInterval(_) => {*displayed_interval = value; false}
+                ParamId::SnapStep(_) => {
+                    *snap_step = if *value == 0.0 {r64![0.0]} else {value.sub(1u8).exp2().recip()};
+                    false
+                }
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
             }
 
@@ -863,11 +871,12 @@ impl SoundGen {
                 ctx.line_to(width, height);
             }
 
-            Self::Pattern{wrap_point, last_duration, input_focus, pattern, pattern_offset, displayed_interval, ..} => {
+            Self::Pattern{wrap_point, last_duration, input_focus, pattern, pattern_offset, displayed_interval, snap_step, ..} => {
                 if let Some(GraphEvent{shift, point, ..}) = event {
-                    let offset_raw = R64::from(point.x - *pattern_offset) / R64::from(width) * *displayed_interval;
-                    let offset = offset_raw.floor();
+                    let offset_raw = R64::from(point.x + *pattern_offset) / R64::from(width) * *displayed_interval;
+                    let offset = offset_raw.floor_to(*snap_step);
                     let note = Note::from_index(((1.0 - point.y as f32 / height as f32) * Note::ALL.len() as f32) as usize);
+
                     let some_input_focus = input_focus.get_or_insert_with(|| {
                         let span = offset - 1 .. offset + 1;
                         let notes = note - 1 .. note + 1;
@@ -886,13 +895,14 @@ impl SoundGen {
                             PatternInputFocus::DragPlane(point)
                         }
                     });
+
                     match some_input_focus {
                         PatternInputFocus::DragStart(index, last_offset) => {
                             let mut block = *unsafe{pattern.get_unchecked(*index)};
-                            let delta = *offset as i32 - **last_offset as i32;
+                            let delta = offset - *last_offset;
                             block.offset = pattern.iter().take(*index).rev().find(|x| x.note == block.note)
-                                .map_or(0, |x| (*x.offset + *x.duration) as i32)
-                                .max(*block.offset as i32 + delta).into();
+                                .map_or(R64::ZERO, |x| x.offset + x.duration)
+                                .max(block.offset + delta);
                             block.duration = block.duration - delta;
                             *last_duration = block.duration;
                             *last_offset = offset;
@@ -907,10 +917,9 @@ impl SoundGen {
 
                         PatternInputFocus::DragEnd(index, last_offset) => {
                             let mut block = *unsafe{pattern.get_unchecked(*index)};
-                            let delta = *offset as i32 - **last_offset as i32;
                             block.duration = pattern.iter().skip(*index + 1).find(|x| x.note == block.note)
-                                .map_or(i32::MAX, |x| *x.offset as i32 - *block.offset as i32)
-                                .min(*block.duration as i32 + delta).into();
+                                .map_or(R64::INFINITY, |x| x.offset - block.offset)
+                                .min(block.duration + offset - *last_offset);
                             *last_duration = block.duration;
                             *last_offset = offset;
                             if *block.duration == 0.0 {
@@ -924,19 +933,18 @@ impl SoundGen {
 
                         PatternInputFocus::Move(index, last_offset) => {
                             let mut block = *unsafe{pattern.get_unchecked(*index)};
-                            let delta = *offset as i32 - **last_offset as i32;
                             block.note = note;
-                            block.offset = i32::clamp(*block.offset as i32 + delta,
+                            block.offset = R64::clamp(block.offset + offset - *last_offset,
                                 pattern.iter().take(*index).rev().find(|x| x.note == block.note)
-                                    .map_or(0, |x| (*x.offset + *x.duration) as i32),
+                                    .map_or(R64::ZERO, |x| x.offset + x.duration),
                                 pattern.iter().skip(*index + 1).find(|x| x.note == block.note)
-                                    .map_or(**wrap_point as i32, |x| *x.offset as i32) - *block.duration as i32).into();
+                                    .map_or(*wrap_point, |x| x.offset) - block.duration);
                             *index = pattern.set_sorted(*index, block).to_js_result(loc!())?;
                             *last_offset = offset;
                         }
 
                         PatternInputFocus::DragPlane(last_point) => {
-                            *pattern_offset = pattern_offset.sub(last_point.x - point.x).max(0);
+                            *pattern_offset = pattern_offset.sub(point.x - last_point.x).max(0);
                             *last_point = point;
                         }
 

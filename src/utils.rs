@@ -672,7 +672,7 @@ fn range_overlap() {
     assert!( (50 .. 57).overlap(&(56 .. 61)));
     assert!( (58 .. 60).overlap(&(56 .. 61)));
     assert!( (56 .. 61).overlap(&(58 .. 60)));
-    assert!( (56 .. 61).overlap(&(61 .. 67)));
+    assert!(!(56 .. 61).overlap(&(61 .. 67)));
 }
 
 pub trait LooseEq<O: Copy>: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Self> + Copy {
@@ -1135,21 +1135,40 @@ macro_rules! real_impl {
             pub const PI: $real = $real(std::$float::consts::PI);
             pub const TAU: $real = $real(std::$float::consts::TAU);
 
-            #[inline(always)]
+            #[inline]
             pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
 
-            #[inline(always)]
+            #[inline]
             pub fn rem_euclid(self, rhs: Self) -> Option<Self> {
                 let res = self.0.rem_euclid(rhs.0);
                 if res.is_nan() {return None}
                 Some(Self(res))
             }
 
-            #[inline(always)]
+            #[inline]
+            pub fn copysign(self, sign: Self) -> Self {
+                Self(self.0.copysign(*sign))
+            }
+
+            #[inline]
+            pub fn recip(self) -> Self {Self(self.0.recip())}
+
+            #[inline]
+            pub fn exp2(self) -> Self {Self(self.0.exp2())}
+
+            #[inline]
             pub fn floor(self) -> Self {Self(self.0.floor())}
 
-            #[inline(always)]
+            #[inline]
             pub fn ceil(self) -> Self {Self(self.0.ceil())}
+
+            #[inline]
+            pub fn floor_to(self, step: Self) -> Self {
+                match Self::try_from(self.0 - self.0.rem_euclid(*step)) {
+                    Ok(x) => x,
+                    Err(_) => if step.is_infinite() {step} else {self}
+                }
+            }
         }
     };
 }
@@ -1169,6 +1188,12 @@ macro_rules! r64 {
     ($x:literal) => {
         unsafe{$crate::utils::R64::new_unchecked($x)}
     };
+}
+
+#[test]
+fn real_floor_to() {
+    assert!(r64![1.3].floor_to(r64![0.2]).loose_eq(r64![1.2], 0.005));
+    assert!(r64![-1.3].floor_to(r64![0.2]).loose_eq(r64![-1.4], 0.005));
 }
 
 pub trait SaturatingFrom<T> {
