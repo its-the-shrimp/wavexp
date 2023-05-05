@@ -5,6 +5,7 @@
 #![feature(option_zip)]
 #![feature(const_float_classify)]
 #![feature(int_roundings)]
+#![allow(clippy::unit_arg)]
 
 mod render;
 mod utils;
@@ -106,7 +107,7 @@ impl Player {
                         } else {
                             let len = sound_events.len();
                             let start = match sound_events.iter().rev().position(|event| time < event.when) {
-                                Some(x) => (x > 0).then(|| len - x),
+                                Some(x) => (x > 0).then_some(len - x),
                                 None => Some(0)};
                             if let Some(start) = start {
                                 let pending: Vec<_> = sound_events.drain(start..).collect();
@@ -212,19 +213,19 @@ impl Player {
             .map(Vec::clear)
     }
 
-    fn get_element<'a>(&'a self, index: usize) -> JsResult<&'a SoundGen> {
+    fn get_element(&self, index: usize) -> JsResult<&SoundGen> {
         self.sound_comps.get(index).to_js_result(loc!())
     }
 
-    fn get_element_mut<'a>(&'a mut self, index: usize) -> JsResult<&'a mut SoundGen> {
+    fn get_element_mut(&mut self, index: usize) -> JsResult<&mut SoundGen> {
         self.sound_comps.get_mut(index).to_js_result(loc!())
     }
 
-    fn get_element_by_point<'a>(&'a self, point: Point) -> Option<&'a SoundGen> {
+    fn get_element_by_point(&self, point: Point) -> Option<&SoundGen> {
         self.sound_comps.iter().find(|x| x.contains(point))
     }
 
-    fn get_element_mut_by_point<'a>(&'a mut self, point: Point) -> Option<&'a mut SoundGen> {
+    fn get_element_mut_by_point(&mut self, point: Point) -> Option<&mut SoundGen> {
         self.sound_comps.iter_mut().find(|x| x.contains(point))
     }
 
@@ -252,7 +253,7 @@ impl Player {
         ctx.fill_rect(0.0, 0.0, width, height);
         ctx.begin_path();
         self.sound_comps.iter()
-            .for_each(|c| c.draw(&ctx, offset));
+            .for_each(|c| c.draw(ctx, offset));
         for (src_id, dsts) in self.connections.iter().enumerate() {
             let Some(mut src) = self.sound_comps
                 .get(src_id).to_js_result(loc!())?
@@ -284,7 +285,7 @@ impl Player {
     /// interactive
     #[inline] fn emit_graph_interaction(&mut self, f: impl FnOnce() -> Option<GraphEvent>) {
         if self.graph_spec.map_or(false, |x| x.interactive) {
-            self.graph_update = f().map(|x| Some(x));
+            self.graph_update = f().map(Some);
         }
     }
 }
@@ -427,8 +428,9 @@ impl Component for Main {
                     let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     if let Some(comp) = player.get_element_mut_by_point(point) {
                         self.focus = Focus::Element(comp.id());
-                        comp.handle_movement(point, false)
-                            .map(|msg| ctx.link().send_message(msg));
+                        if let Some(msg) = comp.handle_movement(point, false) {
+                            ctx.link().send_message(msg);
+                        }
                     } else {
                         self.focus = Focus::Plane;
                         self.set_desc("Hovering the plane");
@@ -572,7 +574,7 @@ impl Component for Main {
             Html::VList(list)
         }
 
-        return html! {<>
+        html! {<>
             <canvas width="100%" height="100%" id="plane"
             onpointerdown={ctx.link().callback(MainCmd::Focus)}
             onpointerup={ctx.link().callback(MainCmd::Unfocus)}
@@ -619,7 +621,7 @@ impl Component for Main {
     }
 
     fn rendered(&mut self, _: &Context<Self>, first_render: bool) {
-        _ = js_try!{type = !:
+        js_try!{type = !:
             if first_render {
                 self.graph_canvas = document().element_dyn_into("graph", loc!())?;
                 self.sound_visualiser_canvas = document().element_dyn_into("sound-visualiser", loc!())?;

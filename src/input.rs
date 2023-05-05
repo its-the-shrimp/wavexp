@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)] // because derive(yew::Properties) generates them
 
-use std::{f64::consts::{PI, TAU}, ops::{Div, Mul, Add, Sub}};
+use std::{f64::consts::{PI, TAU}, ops::{Div, Mul, Add}};
 
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{Element, HtmlCanvasElement, PointerEvent, HtmlElement};
@@ -18,7 +18,7 @@ use crate::{
         HtmlCanvasExt,
         HtmlDocumentExt,
         OptionExt, JsResult, BoolExt, R64},
-    MainCmd, loc, sound::Note, r64};
+    MainCmd, loc, sound::Note};
 
 #[derive(Debug)]
 pub enum Cmd {
@@ -87,7 +87,7 @@ pub enum ParamId {
     EnvelopeDecay(usize),
     EnvelopSustain(usize),
     EnvelopeRelease(usize),
-    BPM(usize),
+    Bpm(usize),
     DisplayInterval(usize),
     SnapStep(usize),
     MasterGain(usize),
@@ -109,7 +109,7 @@ impl ParamId {
             ParamId::EnvelopeDecay(id)          => Some(*id),
             ParamId::EnvelopSustain(id)         => Some(*id),
             ParamId::EnvelopeRelease(id)        => Some(*id),
-            ParamId::BPM(id)                    => Some(*id),
+            ParamId::Bpm(id)                    => Some(*id),
             ParamId::DisplayInterval(id)        => Some(*id),
             ParamId::SnapStep(id)               => Some(*id),
             ParamId::MasterGain(id)             => Some(*id)
@@ -143,7 +143,7 @@ pub struct SliderProps {
 }
 
 const LINE_WIDTH: f64 = 10.0;
-const FONT: &'static str = "4em consolas";
+const FONT: &str = "4em consolas";
 
 impl Component for Slider {
     type Message = Cmd;

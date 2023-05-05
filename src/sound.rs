@@ -27,7 +27,7 @@ use crate::{
         ResultToJsResult,
         R64, R32,
         SaturatingInto,
-        RangeExt, Check},
+        RangeExt, Check, total_clamp},
     input::{Switch, Slider, Button, ParamId},
     MainCmd,
     loc,
@@ -247,9 +247,10 @@ impl Sound {
         "Saw",
         "Triangle"];
     const MAX_WAVE_FREQ: R64 = r64![5000.0];
-    const MAX_INTERVAL: R64 = r64![20.0];
+    const MAX_INTERVAL: Beats = r64![20.0];
+    const DEFAULT_REL_TIME: Secs = r64![0.2];
 
-    fn wave<'a>(self, ctx: &AudioContext, waves: &[WaveDef]) -> JsResult<Self> {
+    fn wave(self, ctx: &AudioContext, waves: &[WaveDef]) -> JsResult<Self> {
         Ok(match self {
             Self::InputNote(note, duration) => {
                 let ctrl = GainNode::new_with_options(ctx, GainOptions::new().gain(f32::MIN_POSITIVE)).add_loc(loc!())?;
@@ -326,17 +327,15 @@ impl Sound {
                 let gain = ctrl.gain();
                 gain.set_value(1.0);
                 if let Some(duration) = duration {
-                    let at = time + duration.to_secs(bpm);
-                    gain.set_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
-                    at
+                    time + duration.to_secs(bpm)
                 } else {
                     R64::INFINITY
                 }
             }
 
-            &mut Self::Envelope{attack, decay, sustain, sustain_level, release, ref ctrl} => {
+            &mut Self::Envelope{attack, decay, sustain, sustain_level, ref ctrl, ..} => {
                 let gain = ctrl.gain();
-                let mut at = match (*attack > 0.0, *decay > 0.0) {
+                 sustain.map_or(R64::INFINITY, |x| x.to_secs(bpm)) + match (*attack > 0.0, *decay > 0.0) {
                     (false, false) => {
                         gain.set_value(*sustain_level);
                         time}
@@ -359,14 +358,6 @@ impl Sound {
                         at += decay.to_secs(bpm);
                         gain.linear_ramp_to_value_at_time(*sustain_level, *at).add_loc(loc!())?;
                         at}
-                };
-                if let Some(sustain) = sustain {
-                    at += sustain.to_secs(bpm);
-                    gain.set_value_at_time(*sustain_level, *at).add_loc(loc!())?;
-                    gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at + *release.to_secs(bpm)).add_loc(loc!())?;
-                    at
-                } else {
-                    R64::INFINITY
                 }
             }
 
@@ -377,15 +368,24 @@ impl Sound {
     /// returns the time moment at & after which the object can be discarded
     fn end(&self, time: Secs, bpm: Beats) -> JsResult<Secs> {
         Ok(match self {
-            Self::Wave(ctrl, _) => ctrl.gain()
-                .cancel_scheduled_values(0.0).add_loc(loc!())?
-                .set_value(f32::MIN_POSITIVE).pipe(|_| time),
+            Self::Wave(ctrl, _) => {
+                let at = time + Self::DEFAULT_REL_TIME;
+                let gain = ctrl.gain();
+                gain.cancel_scheduled_values(0.0).add_loc(loc!())?;
+                gain.set_value_at_time(1.0, *time).add_loc(loc!())?;
+                gain.exponential_ramp_to_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
+                at
+            }
 
             &Self::Envelope{release, ref ctrl, ..} => {
                 let at = time + release.to_secs(bpm);
-                ctrl.gain().cancel_scheduled_values(0.0).add_loc(loc!())?
-                    .linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
-                at}
+                let gain = ctrl.gain();
+                let cur = gain.value();
+                gain.cancel_scheduled_values(0.0).add_loc(loc!())?;
+                gain.set_value_at_time(cur, *time).add_loc(loc!())?;
+                gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
+                at + 1.0
+            }
 
             x => js_error(format!("`{}` sound cannot be played", x.name()), loc!())?
         })
@@ -490,7 +490,7 @@ pub enum SoundGen {
         pattern_offset: i32, displayed_interval: Beats,
         wrap_point: Beats, snap_step: Beats},
     /// consumes the input sound, delegating it to the `SoundPlayer`
-    Output{base: Element, bpm: Beats, master_gain: R32},
+    Output{base: Element, bpm: Beats, gain_level: R32},
 }
 
 impl Deref for SoundGen {
@@ -549,7 +549,7 @@ impl SoundGen {
     }
 
     #[inline] pub fn new_output(location: Point, player: &mut SoundPlayer) -> Self {
-        Self::Output{bpm: player.bpm(), master_gain: player.master_gain(),
+        Self::Output{bpm: player.bpm(), gain_level: player.gain_level(),
             base: Element{location, focus: Focus::None, id: 0}}
     }
 
@@ -602,9 +602,9 @@ impl SoundGen {
         match self {
             SoundGen::Pattern{cur_block_id, pattern, ..} => *cur_block_id =
                 pattern.first().filter(|x| *x.offset > 0.0).map(|_| 0),
-            SoundGen::Output{bpm, master_gain, ..} => {
+            SoundGen::Output{bpm, gain_level, ..} => {
                 player.set_bpm(*bpm);
-                player.set_master_gain(*master_gain);
+                player.set_gain_level(*gain_level);
             }
             _ => ()
         }
@@ -758,15 +758,15 @@ impl SoundGen {
                     initial={release}/>
             </div>},
 
-            &Self::Output{master_gain, bpm, ..} => html!{<div id="inputs">
+            &Self::Output{gain_level, bpm, ..} => html!{<div id="inputs">
                 <Slider key="tmp" name="Tempo"
-                    id={ParamId::BPM(self.id)}
+                    id={ParamId::Bpm(self.id)}
                     min={r64![30.0]} max={r64![240.0]}
                     postfix="BPM"
                     initial={bpm}/>
                 <Slider key="gain" name="Master gain level"
                     id={ParamId::MasterGain(self.id)}
-                    initial={R64::from(master_gain)}/>
+                    initial={R64::from(gain_level)}/>
             </div>},
 
             &Self::Pattern{displayed_interval, snap_step, ..} => html!{<div id="inputs">
@@ -824,9 +824,9 @@ impl SoundGen {
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
             }
 
-            Self::Output{master_gain, bpm, ..} => match id {
-                ParamId::BPM(_) => {*bpm = value; false}
-                ParamId::MasterGain(_) => {*master_gain = value.into(); false}
+            Self::Output{gain_level, bpm, ..} => match id {
+                ParamId::Bpm(_) => {*bpm = value; false}
+                ParamId::MasterGain(_) => {*gain_level = value.into(); false}
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
             }
 
@@ -871,10 +871,10 @@ impl SoundGen {
         Ok(match self {
             &mut Self::Envelope {attack, decay, sustain_level, release, ..} => {
                 let (width, height) = (width as f64, height as f64);
-                let in_span = (*attack + *decay) as f64;
-                let span = in_span + *release as f64;
+                let in_span = *attack + *decay;
+                let span = in_span + *release;
                 ctx.move_to(0.0, height);
-                ctx.line_to(*attack as f64 / span * width, 0.0);
+                ctx.line_to(*attack / span * width, 0.0);
                 ctx.line_to(in_span / span * width, (1.0 - *sustain_level) as f64 * height);
                 ctx.line_to(width, height);
             }
@@ -928,7 +928,7 @@ impl SoundGen {
                             block.offset = pattern.iter().take(*index).rev().find(|x| x.note == block.note)
                                 .map_or(R64::ZERO, |x| x.offset + x.duration)
                                 .max(block.offset + delta);
-                            block.duration = block.duration - delta;
+                            block.duration -= delta;
                             *last_offset = offset;
                             *index = pattern.set_sorted(*index, block).to_js_result(loc!())?;
                         }
@@ -946,7 +946,7 @@ impl SoundGen {
                         PatternInputFocus::Move(index, last_offset) => {
                             let mut block = *unsafe{pattern.get_unchecked(*index)};
                             block.note = note;
-                            block.offset = R64::clamp(block.offset + offset - *last_offset,
+                            block.offset = total_clamp(block.offset + offset - *last_offset,
                                 pattern.iter().take(*index).rev().find(|x| x.note == block.note)
                                     .map_or(R64::ZERO, |x| x.offset + x.duration),
                                 pattern.iter().skip(*index + 1).find(|x| x.note == block.note)
@@ -983,9 +983,9 @@ impl SoundGen {
 
                 let (width, height) = (width as f64, height as f64);
                 let note_height = -height / Note::ALL.len() as f64;
-                ctx.rect(**wrap_point as f64 / **displayed_interval as f64 * width - *pattern_offset as f64, 0.0,
+                ctx.rect(**wrap_point / **displayed_interval * width - *pattern_offset as f64, 0.0,
                     2.0, height);
-                let interval = 1.0 / **displayed_interval as f64 * width;
+                let interval = 1.0 / **displayed_interval * width;
                 let stroke_style = ctx.stroke_style();
                 ctx.set_stroke_style(&"#232328".into());
                 successors(Some(-*pattern_offset as f64),
@@ -994,19 +994,19 @@ impl SoundGen {
                     .for_each(|i| ctx.stroke_rect(i, 0.0, 1.0, height));
                 if let Some((note, at)) = hovered_note {
                     ctx.stroke_rect(0.0, (1.0 - note.index() as f64 / Note::ALL.len() as f64) * height,
-                        width as f64, note_height);
+                        width, note_height);
                     ctx.set_font("20px consolas");
                     ctx.set_fill_style(&"#0069E1".into());
                     ctx.set_text_align("right");
                     ctx.set_text_baseline("middle");
-                    ctx.fill_text(note.name(), width as f64 * 0.975, at).add_loc(loc!())?;
+                    ctx.fill_text(note.name(), width * 0.975, at).add_loc(loc!())?;
                 }
                 ctx.set_stroke_style(&stroke_style);
                 pattern.iter()
                     .map(|block| (
-                        *block.offset as f64 / **displayed_interval as f64 * width - *pattern_offset as f64,
+                        *block.offset / **displayed_interval * width - *pattern_offset as f64,
                         (1.0 - block.note.index() as f64 / Note::ALL.len() as f64) * height,
-                        *block.duration as f64 / **displayed_interval as f64 * width))
+                        *block.duration / **displayed_interval * width))
                     .skip_while(|(x, _, w)| x + w < 0.0)
                     .take_while(|(x, _, _)| *x < width)
                     .for_each(|(x, y, w)| ctx.rect(x, y, w, note_height));
@@ -1027,9 +1027,9 @@ enum SoundState {
 impl SoundState {
     #[inline] fn time(&self) -> Secs {
         match self {
-            &Self::Pending   => Secs::NEG_INFINITY,
-            &Self::Active(x) => x,
-            &Self::Ending(x) => x}
+            Self::Pending   => Secs::NEG_INFINITY,
+            Self::Active(x) => *x,
+            Self::Ending(x) => *x}
     }
 }
 
@@ -1037,25 +1037,26 @@ pub struct SoundPlayer {
     sounds: Vec<(Sound, SoundState)>,
     ending_all: bool,
     plug: DynamicsCompressorNode,
+    gain: GainNode,
     visualiser: AnalyserNode,
     audio_ctx: AudioContext,
     bpm: Beats,
-    master_gain: R32
+    gain_level: R32
 }
 
 impl SoundPlayer {
-    pub fn new(bpm: Beats, master_gain: R32) -> JsResult<Self> {
+    pub fn new(bpm: Beats, gain_level: R32) -> JsResult<Self> {
         let audio_ctx = AudioContext::new().add_loc(loc!())?;
         let plug = DynamicsCompressorNode::new_with_options(&audio_ctx,
             DynamicsCompressorOptions::new().ratio(20.0).release(1.0)).add_loc(loc!())?;
         let gain = GainNode::new_with_options(&audio_ctx,
-            GainOptions::new().gain(*master_gain)).add_loc(loc!())?;
+            GainOptions::new().gain(*gain_level)).add_loc(loc!())?;
         let visualiser = AnalyserNode::new(&audio_ctx).add_loc(loc!())?;
 
         plug.connect_with_audio_node(&visualiser).add_loc(loc!())?
             .connect_with_audio_node(&gain).add_loc(loc!())?
             .connect_with_audio_node(&audio_ctx.destination()).add_loc(loc!())?;
-        Ok(Self{sounds: vec![], ending_all: false, plug, visualiser, audio_ctx, bpm, master_gain})
+        Ok(Self{sounds: vec![], ending_all: false, plug, visualiser, audio_ctx, bpm, gain_level, gain})
     }
 
     pub fn play_sound(&mut self, sound: Sound) -> JsResult<()> {
@@ -1088,7 +1089,7 @@ impl SoundPlayer {
 
         let len = self.sounds.len();
         let start = self.sounds.iter().rev().position(|&(_, state)| time < state.time())
-            .map_or(Some(0), |x| (x > 0).then(|| len - x));
+            .map_or(Some(0), |x| (x > 0).then_some(len - x));
         let mut err = Ok(());
         if let Some(start) = start {
             let pending: Vec<_> = self.sounds.drain(start..).collect();
@@ -1118,11 +1119,12 @@ impl SoundPlayer {
     #[inline]
     pub fn set_bpm(&mut self, bpm: Beats) {self.bpm = bpm}
 
-    pub fn master_gain(&self) -> R32 {
-        self.master_gain
-    }
+    #[inline]
+    pub fn gain_level(&self) -> R32 {self.gain_level}
 
-    pub fn set_master_gain(&mut self, master_gain: R32) {
-        self.master_gain = master_gain;
+    #[inline]
+    pub fn set_gain_level(&mut self, gain_level: R32) {
+        self.gain_level = gain_level;
+        self.gain.gain().set_value(*gain_level);
     }
 }

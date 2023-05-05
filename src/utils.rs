@@ -1,6 +1,6 @@
 use std::{
     ptr,
-    mem,
+    mem::{self, swap},
     fmt::{self, Debug, Formatter, Display},
     ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Range},
     cell::{RefMut, Ref, RefCell},
@@ -18,12 +18,12 @@ pub trait Check: Sized {
 		if f(&self) {Ok(self)} else {Err(self)}
 	}
 
-    #[inline] fn is_in<R>(self, range: R) -> Result<Self, Self>
+    #[inline] fn check_in<R>(self, range: R) -> Result<Self, Self>
 	where Self: PartialOrd, R: RangeBounds<Self> {
 		if range.contains(&self) {Ok(self)} else {Err(self)}
 	}
 
-	#[inline] fn not_in<R>(self, range: R) -> Result<Self, Self>
+	#[inline] fn check_not_in<R>(self, range: R) -> Result<Self, Self>
 	where Self: PartialOrd, R: RangeBounds<Self> {
 		if !range.contains(&self) {Ok(self)} else {Err(self)}
 	}
@@ -35,7 +35,7 @@ pub trait Tee: Sized {
         f(&self); self
 	}
 
-    #[inline] fn js_log<'a>(self, label: &'a str) -> Self 
+    #[inline] fn js_log(self, label: &str) -> Self 
     where Self: Debug {
         js_log!("{}{:?}", label, &self); self
     }
@@ -138,13 +138,13 @@ pub use js_log;
 #[macro_export]
 macro_rules! js_try {
     (type = $r:ty : $($s:tt)*) => {
-        {let x: crate::utils::JsResult<$r> = try {
+        {let x: $crate::utils::JsResult<$r> = try {
             $($s)*
         }; x}
     };
 
     ($($s:tt)*) => {
-        {let x: crate::utils::JsResult<_> = try {
+        {let x: $crate::utils::JsResult<_> = try {
             $($s)*
         }; x}
     };
@@ -162,7 +162,7 @@ pub fn document() -> HtmlDocument {
 fn to_error_with_msg(err: JsValue, msg: &str) -> JsValue {
     let s = format!("{}\n{}", msg, 
         match err.dyn_into::<JsError>() {
-            Ok(val) => val.message().into(),
+            Ok(val) => val.message(),
             Err(val) => JsObject::from(val).to_string()});
     JsError::new(&s).into()
 }
@@ -293,10 +293,10 @@ pub trait HtmlDocumentExt {
 
 impl HtmlDocumentExt for HtmlDocument {
     fn element_dyn_into<T: JsCast>(&self, id: &str, loc: (&str, u32, u32)) -> JsResult<T> {
-        Ok(self.get_element_by_id(id).to_js_result(loc!()).add_loc(loc)?
+        self.get_element_by_id(id).to_js_result(loc!()).add_loc(loc)?
             .dyn_into::<T>()
             .to_js_result_with(|_| format!("element #{} is not of type `{}`", id, type_name::<T>()), loc!())
-            .add_loc(loc)?)
+            .add_loc(loc)
     }
 }
 
@@ -359,10 +359,10 @@ impl Display for SetSortedError {
 impl Error for SetSortedError {}
 
 pub trait SliceExt<T> {
-    fn get_saturating<'a>(&'a self, id: usize) -> &'a T;
-    fn get_saturating_mut<'a>(&'a mut self, id: usize) -> &'a mut T;
-    fn get_wrapping<'a>(&'a self, id: usize) -> &'a T;
-    fn get_wrapping_mut<'a>(&'a mut self, id: usize) -> &'a mut T;
+    fn get_saturating(&self, id: usize) -> &T;
+    fn get_saturating_mut(&mut self, id: usize) -> &mut T;
+    fn get_wrapping(&self, id: usize) -> &T;
+    fn get_wrapping_mut(&mut self, id: usize) -> &mut T;
     fn get_var<'a>(&'a self, ids: &[usize]) -> Result<Vec<&'a T>, GetVarError>;
     fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Result<Vec<&'a mut T>, GetVarError>;
     unsafe fn reorder_unchecked(&mut self, index: usize) -> usize where T: Ord;
@@ -371,19 +371,19 @@ pub trait SliceExt<T> {
 }
 
 impl<T> SliceExt<T> for [T] {
-    #[inline] fn get_saturating<'a>(&'a self, id: usize) -> &'a T {
+    #[inline] fn get_saturating(&self, id: usize) -> &T {
         unsafe{self.get_unchecked(id.min(self.len() - 1))}
     }
 
-    #[inline] fn get_saturating_mut<'a>(&'a mut self, id: usize) -> &'a mut T {
+    #[inline] fn get_saturating_mut(&mut self, id: usize) -> &mut T {
         unsafe{self.get_unchecked_mut(id.min(self.len() - 1))}
     }
 
-    #[inline] fn get_wrapping<'a>(&'a self, id: usize) -> &'a T {
+    #[inline] fn get_wrapping(&self, id: usize) -> &T {
         unsafe{self.get_unchecked(id % self.len())}
     }
 
-    #[inline] fn get_wrapping_mut<'a>(&'a mut self, id: usize) -> &'a mut T {
+    #[inline] fn get_wrapping_mut(&mut self, id: usize) -> &mut T {
         unsafe{self.get_unchecked_mut(id % self.len())}
     }
 
@@ -514,7 +514,7 @@ impl Error for InsertError {}
 
 pub trait VecExt<T> {
     fn try_swap_remove(&mut self, index: usize) -> Result<T, SwapRemoveError>;
-    fn try_insert<'v>(&'v mut self, index: usize, element: T) -> Result<&'v mut T, InsertError>;
+    fn try_insert(&mut self, index: usize, element: T) -> Result<&mut T, InsertError>;
     fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool;
     fn push_sorted(&mut self, value: T) -> usize where T: Ord;
     fn push_sorted_by(&mut self, value: T, f: impl Fn(&T, &T) -> Ordering) -> usize;
@@ -536,18 +536,17 @@ impl<T> VecExt<T> for Vec<T> {
         }
     }
 
-    fn try_insert<'v>(&'v mut self, index: usize, element: T) -> Result<&'v mut T, InsertError> {
+    fn try_insert(&mut self, index: usize, element: T) -> Result<&mut T, InsertError> {
         let len = self.len();
+        if index > len {
+            return Err(InsertError::Index{index, len});
+        }
         if len == self.capacity() {
             self.try_reserve(1).map_err(InsertError::Alloc)?;
         }
         unsafe {
             let p = self.as_mut_ptr().add(index);
-            if index < len {
-                ptr::copy(p, p.add(1), len - index);
-            } else if index > len {
-                return Err(InsertError::Index{index, len})
-            }
+            ptr::copy(p, p.add(1), len - index);
             ptr::write(p, element);
             self.set_len(len + 1);
             Ok(&mut *p)
@@ -555,7 +554,7 @@ impl<T> VecExt<T> for Vec<T> {
     }
 
     fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool {
-        if self.iter().find(|x| f(*x, &value)).is_some() {return false}
+        if self.iter().any(|x| f(x, &value)) {return false}
         self.push(value);
         true
     }
@@ -602,12 +601,12 @@ impl<T> MaybeCell<T> {
         Self(RefCell::new(None))
     }
 
-    #[inline] pub fn get<'a>(&'a self) -> JsResult<Ref<'a, T>> {
+    #[inline] pub fn get(&self) -> JsResult<Ref<'_, T>> {
         Ref::filter_map(self.0.try_borrow().to_js_result(loc!())?,
             |x| x.as_ref()).to_js_result_with(|_| "MaybeCell object not initialised", loc!())
     }
 
-    #[inline] pub fn get_mut<'a>(&'a self) -> JsResult<RefMut<'a, T>> {
+    #[inline] pub fn get_mut(&self) -> JsResult<RefMut<'_, T>> {
         RefMut::filter_map(self.0.try_borrow_mut().to_js_result(loc!())?,
             |x| x.as_mut()).to_js_result_with(|_| "MaybeCell object not initialised", loc!())
     }
@@ -684,6 +683,15 @@ pub trait LooseEq<O: Copy>: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Sel
 
 impl<O: Copy, T: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Self> + Copy> LooseEq<O> for T {}
 
+/// function just like `Ord::clamp`, except that instead of panicking when `min > max`,
+/// it swaps `min` and `max`
+pub fn total_clamp<T: Ord>(x: T, mut min: T, mut max: T) -> T {
+    if min > max {swap(&mut min, &mut max)}
+    if x < min {min}
+    else if x > max {max}
+    else {x}
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {pub x: i32, pub y: i32}
 
@@ -732,12 +740,12 @@ impl Point {
     }
 
     #[inline] pub fn clamp_x(mut self, min: i32, max: i32) -> Self {
-        self.x = self.x.clamp(min, max);
+        self.x = total_clamp(self.x, min, max);
         self
     }
 
     #[inline] pub fn clamp_y(mut self, min: i32, max: i32) -> Self {
-        self.y = self.y.clamp(min, max);
+        self.y = total_clamp(self.y, min, max);
         self
     }
 
@@ -766,7 +774,7 @@ pub trait HitZone: Sized + Debug {
     #[inline] fn shift_y(self, y: i32) -> Self {self.shift(Point{x:0, y})}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Rect(Point, Point);
 
 impl HitZone for Rect {
@@ -1049,7 +1057,7 @@ macro_rules! real_real_operator_impl {
 
 macro_rules! real_impl {
     ($real:ident { $float:ident }, $other_real:ty { $other_float:ty }) => {
-        #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
+        #[derive(Debug, PartialEq, Clone, Copy)]
         pub struct $real($float);
 
         impl Deref for $real {
@@ -1057,9 +1065,15 @@ macro_rules! real_impl {
             #[inline] fn deref(&self) -> &Self::Target {&self.0}
         }
 
+        impl PartialOrd for $real {
+            #[inline] fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                self.0.partial_cmp(&other.0)
+            }
+        }
+
         impl Ord for $real {
             #[inline] fn cmp(&self, other: &Self) -> Ordering {
-                unsafe{self.partial_cmp(other).unwrap_unchecked()}
+                unsafe{self.0.partial_cmp(&other.0).unwrap_unchecked()}
             }
         }
 
