@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)] // because derive(yew::Properties) generates them
 
-use std::{f64::consts::{PI, TAU}, ops::{Div, Mul, Add}};
+use std::{f64::consts::{PI, TAU}, ops::{Div, Mul, Add}, rc::Rc};
 
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{Element, HtmlCanvasElement, PointerEvent, HtmlElement};
@@ -17,8 +17,8 @@ use crate::{
         JsResultUtils,
         HtmlCanvasExt,
         HtmlDocumentExt,
-        OptionExt, JsResult, BoolExt, R64},
-    MainCmd, loc, sound::Note};
+        OptionExt, BoolExt, R64, Point},
+    MainCmd, loc, sound::{Note, SoundGen}, visual::HintHandler};
 
 #[derive(Debug)]
 pub enum Cmd {
@@ -29,59 +29,18 @@ pub enum Cmd {
     HoverOut(PointerEvent)
 }
 
-impl Cmd {
-    pub fn handle_focus<F>(self, f: F) -> JsResult<Self>
-    where F: FnOnce(&PointerEvent) -> JsResult<()> {
-        if let Cmd::Focus(e) = &self {
-            e.target_unchecked_into::<HtmlElement>()
-                .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-            f(e).add_loc(loc!())?;
-        }
-        Ok(self)
-    }
-
-    pub fn handle_unfocus<F>(self, f: F) -> JsResult<Self>
-    where F: FnOnce(&PointerEvent) -> JsResult<()> {
-        if let Cmd::Unfocus(e) = &self {
-            e.target_unchecked_into::<HtmlElement>()
-                .release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-            f(e).add_loc(loc!())?;
-        }
-        Ok(self)
-    }
-
-    /// the boolean passed to `f` indicates whether the element is hovered over
-    #[inline]
-    pub fn handle_hover<F>(self, help_msg: &str, f: F) -> JsResult<Self>
-    where F: FnOnce(&PointerEvent, bool) -> JsResult<()> {
-        match &self {
-            Cmd::HoverIn(e) => {
-                f(e, true).add_loc(loc!())?;
-                MainCmd::SetDesc(help_msg.to_owned()).send()}
-            Cmd::HoverOut(e) => {
-                f(e, false).add_loc(loc!())?;
-                MainCmd::RemoveDesc.send()}
-            _ => ()};
-        Ok(self)
-    }
-
-    pub fn handle_drag(self, f: impl FnOnce(&PointerEvent) -> JsResult<()>) -> JsResult<Self> {
-        if let Cmd::Drag(e) = &self {
-            f(e).add_loc(loc!())?;
-        };
-        Ok(self)
-    }
-}
-
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ParamId {
     Play(Note),
+    Select(Option<usize>),
+    Connect(usize, usize),
     Disconnect(usize),
+    Add(fn() -> SoundGen, Point),
     Remove(usize),
-    ToggleWavePitchType(usize, u32),
-    WavePitch(usize, u32),
-    WaveType(usize, u32),
-    RemoveWave(usize, u32),
+    ToggleWavePitchType(usize, usize),
+    WavePitch(usize, usize),
+    WaveType(usize, usize),
+    RemoveWave(usize, usize),
     AddWave(usize),
     EnvelopeAttack(usize),
     EnvelopeDecay(usize),
@@ -94,11 +53,14 @@ pub enum ParamId {
 }
 
 impl ParamId {
-    /// returns Some(id) when the parameter ID belongs to a specific element
+    /// returns `Some(id)` when the parameter ID belongs to a specific element
     pub fn element_id(&self) -> Option<usize> {
         match self {
             ParamId::Play(_)                    => None,
+            ParamId::Select(_)                  => None,
+            ParamId::Connect(_, _)              => None,
             ParamId::Disconnect(_)              => None,
+            ParamId::Add(_, _)                  => None,
             ParamId::Remove(_)                  => None,
             ParamId::ToggleWavePitchType(id, _) => Some(*id),
             ParamId::WavePitch(id, _)           => Some(*id),
@@ -139,7 +101,8 @@ pub struct SliderProps {
     #[prop_or("")]
     pub postfix: &'static str,
     pub id: ParamId,
-    pub initial: R64
+    pub initial: R64,
+    pub hint: Rc<HintHandler>
 }
 
 const LINE_WIDTH: f64 = 10.0;
@@ -156,26 +119,44 @@ impl Component for Slider {
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            let SliderProps{id, min, max, name, signed, ..} = ctx.props();
-            msg.handle_hover(name, |_, hovered| Ok(self.hovered = hovered)).add_loc(loc!())?
-                .handle_focus(|e| Ok({
-                    self.focused = true;
-                    self.floored = e.shift_key();
-                })).add_loc(loc!())?
-                .handle_unfocus(|e| Ok({
-                    self.focused = false;
-                    self.floored = e.shift_key();
-                    MainCmd::SetParam(*id, if self.floored {self.value.floor()} else {self.value}).send();
-                })).add_loc(loc!())?
-                .handle_drag(|e| Ok({
-                    let target = e.target_dyn_into::<Element>().to_js_result(loc!())?;
+            let SliderProps{id, min, max, name, signed, hint, ..} = ctx.props();
+            match msg {
+                Cmd::Drag(e) => {
+                    let target: Element = e.target_dyn_into().to_js_result(loc!())?;
                     self.value = R64::from(e.movement_y())
                         .div(target.client_height() * -2)
                         .mul(max - min)
                         .add(self.value)
                         .clamp(signed.choose(-*max, *min), *max);
                     self.floored = e.shift_key();
-                })).add_loc(loc!())?;
+                }
+
+                Cmd::Focus(e) => {
+                    e.target_dyn_into::<HtmlElement>().to_js_result(loc!())?
+                        .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
+                    self.focused = true;
+                    self.floored = e.shift_key();
+                }
+
+                Cmd::Unfocus(e) => {
+                    e.target_dyn_into::<HtmlElement>().to_js_result(loc!())?
+                        .release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
+                    self.focused = false;
+                    self.floored = e.shift_key();
+                    MainCmd::SetParam(*id,
+                        if self.floored {self.value.floor()} else {self.value}).send();
+                }
+
+                Cmd::HoverIn(_) => {
+                    self.hovered = true;
+                    hint.set_hint(name, "").add_loc(loc!())?;
+                }
+
+                Cmd::HoverOut(_) => {
+                    self.hovered = false;
+                    hint.clear_hint().add_loc(loc!())?;
+                }
+            }
             return true
         }.report_err(loc!());
         false
@@ -247,7 +228,8 @@ pub struct SwitchProps {
     pub name: AttrValue,
     pub options: Vec<&'static str>,
     pub id: ParamId,
-    pub initial: usize
+    pub initial: usize,
+    pub hint: Rc<HintHandler>
 }
 
 impl Component for Switch {
@@ -261,18 +243,40 @@ impl Component for Switch {
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            let SwitchProps {options, id, name, ..} = ctx.props();
-            msg.handle_hover(name, |_, hovered| Ok(self.hovered = hovered)).add_loc(loc!())?
-                .handle_focus(|_| Ok(self.focused = true)).add_loc(loc!())?
-                .handle_unfocus(|_| Ok(self.focused = false)).add_loc(loc!())?
-                .handle_drag(|e| {
+            let SwitchProps {options, id, name, hint, ..} = ctx.props();
+            match msg {
+                Cmd::Drag(e) => {
                     let old_value = *self.value as usize;
-                    let target = e.target_dyn_into::<Element>().to_js_result(loc!())?;
-                    self.value = R64::rem_euclid(self.value + R64::from(e.movement_y()) / R64::from(target.client_height() / -4 * options.len() as i32),
+                    let h = e.target_dyn_into::<Element>().to_js_result(loc!())?.client_height();
+                    self.value = R64::rem_euclid(self.value + R64::from(e.movement_y()) / R64::from(h / -4 * options.len() as i32),
                         R64::from(options.len())).to_js_result(loc!())?;
                     if old_value != *self.value as usize {
-                        MainCmd::SetParam(*id, self.value.floor()).send()}
-                    Ok(())})?;
+                        MainCmd::SetParam(*id, self.value.floor()).send()
+                    }
+                }
+
+                Cmd::Focus(e) => {
+                    e.target_dyn_into::<HtmlElement>().to_js_result(loc!())?
+                        .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
+                    self.focused = true;
+                }
+
+                Cmd::Unfocus(e) => {
+                    e.target_dyn_into::<HtmlElement>().to_js_result(loc!())?
+                        .release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
+                    self.focused = false;
+                }
+
+                Cmd::HoverIn(_) => {
+                    self.hovered = true;
+                    hint.set_hint(name, "").add_loc(loc!())?;
+                }
+
+                Cmd::HoverOut(_) => {
+                    self.hovered = false;
+                    hint.clear_hint().add_loc(loc!())?;
+                }
+            }
             return true
         }.report_err(loc!());
         false
@@ -328,9 +332,10 @@ pub struct Button;
 pub struct ButtonProps {
     #[prop_or_default]
     pub class: Classes,
-    pub desc: AttrValue,
+    pub name: AttrValue,
     pub children: Children,
     pub id: ParamId,
+    pub hint: Rc<HintHandler>,
     #[prop_or(false)]
     pub svg: bool
 }
@@ -343,10 +348,14 @@ impl Component for Button {
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{
-            let ButtonProps{desc, id, ..} = ctx.props();
-            msg.handle_hover(desc, |_, _| Ok(())).add_loc(loc!())?
-                .handle_focus(|_| Ok(MainCmd::SetParam(*id, R64::INFINITY).send())).add_loc(loc!())?
-                .handle_unfocus(|_| Ok(MainCmd::SetParam(*id, R64::NEG_INFINITY).send())).add_loc(loc!())?;
+            let ButtonProps{name, id, hint, ..} = ctx.props();
+            match msg {
+                Cmd::Drag(_) => (),
+                Cmd::Focus(_) => MainCmd::SetParam(*id, R64::INFINITY).send(),
+                Cmd::Unfocus(_) => MainCmd::SetParam(*id, R64::NEG_INFINITY).send(),
+                Cmd::HoverIn(_) => hint.set_hint(name, "").add_loc(loc!())?,
+                Cmd::HoverOut(_) => hint.clear_hint().add_loc(loc!())?
+            }
         }.report_err(loc!());
         false
     }

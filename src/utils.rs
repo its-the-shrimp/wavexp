@@ -54,6 +54,7 @@ pub trait BoolExt {
     fn then_or_else<T>(self, default: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T;
     fn then_negate<T: Neg<Output=T>>(self, val: T) -> T;
     fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
+    fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T>;
 }
 
 impl BoolExt for bool {
@@ -75,6 +76,10 @@ impl BoolExt for bool {
 
     #[inline] fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E> {
         self.then(f).transpose()
+    }
+
+    #[inline] fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T> {
+        if self {f()} else {None}
     }
 }
 /*
@@ -151,6 +156,18 @@ macro_rules! js_try {
 }
 pub use js_try;
 
+#[macro_export]
+macro_rules! js_assert {
+    ($($s:tt)+) => {
+        if !$($s)+ {
+            Err(js_sys::Error::new(stringify!($($s)+)).into()).add_loc(loc!())
+        } else {
+            Ok(())
+        }
+    };
+}
+pub use js_assert;
+
 pub fn window() -> HtmlWindow {
 	unsafe {web_sys::window().unwrap_unchecked()}
 }
@@ -182,6 +199,7 @@ pub trait ResultToJsResult<T, E> {
 
 pub trait OptionExt<T> {
     fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T>;
+    fn report_err(self, loc: (&str, u32, u32)) -> Self;
     fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
     fn drop(self) -> Option<()>;
 }
@@ -219,10 +237,18 @@ impl<T> OptionExt<T> for Option<T> {
             .add_loc(loc)
     }
 
+    #[inline] fn report_err(self, loc: (&str, u32, u32)) -> Self {
+        if self.is_none() {
+            MainCmd::ReportError(js_error("`Option` contained the `None` value", loc).into_err()).send()
+        }
+        self
+    }
+
     #[inline] fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
         match self {Some(x) => f(x), None => U::default()}
     }
 
+    #[allow(clippy::manual_map)]
     #[inline] fn drop(self) -> Option<()> {
         match self {Some(_) => Some(()), None => None}
     }
@@ -252,7 +278,8 @@ impl<T> JsResultUtils<T> for JsResult<T> {
         self.add_loc(loc).unwrap_or_else(|x| throw_val(x))
     }
 
-    #[inline] fn report_err(mut self, loc: (&str, u32, u32)) -> Self {
+    #[inline]
+    fn report_err(mut self, loc: (&str, u32, u32)) -> Self {
         self = self.add_loc(loc);
         if let Err(err) = &self {
             MainCmd::ReportError(err.clone()).send()
@@ -611,10 +638,9 @@ impl<T> MaybeCell<T> {
             |x| x.as_mut()).to_js_result_with(|_| "MaybeCell object not initialised", loc!())
     }
 
-    #[inline] pub fn set(&self, val: T) -> JsResult<()> {
-        RefMut::map(self.0.try_borrow_mut().to_js_result(loc!())?,
-            |x| x.insert(val));
-        Ok(())
+    #[inline] pub fn set(&self, val: T) -> JsResult<RefMut<'_, T>> {
+        Ok(RefMut::map(self.0.try_borrow_mut().to_js_result(loc!())?,
+            |x| x.insert(val)))
     }
 
     /*#[inline] pub fn maybe_set(&self, val: Option<T>) -> JsResult<()> {
@@ -674,14 +700,19 @@ fn range_overlap() {
     assert!(!(56 .. 61).overlap(&(61 .. 67)));
 }
 
-pub trait LooseEq<O: Copy>: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Self> + Copy {
-    #[inline]
-    fn loose_eq(&self, value: Self, off: O) -> bool {
-        (value - off .. value + off).contains(self)
+pub trait LooseEq<O = Self> {
+    fn loose_eq(&self, value: Self, off: O) -> bool;
+    #[inline] fn loose_ne(&self, value: Self, off: O) -> bool
+    where Self: Sized {
+        !self.loose_eq(value, off)
     }
 }
 
-impl<O: Copy, T: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Self> + Copy> LooseEq<O> for T {}
+impl<O: Copy, T: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Self> + Copy> LooseEq<O> for T {
+    #[inline] fn loose_eq(&self, value: Self, off: O) -> bool {
+        (value - off .. value + off).contains(self)
+    }
+}
 
 /// function just like `Ord::clamp`, except that instead of panicking when `min > max`,
 /// it swaps `min` and `max`
@@ -696,32 +727,41 @@ pub fn total_clamp<T: Ord>(x: T, mut min: T, mut max: T) -> T {
 pub struct Point {pub x: i32, pub y: i32}
 
 impl From<Point> for [i32; 2] {
-    fn from(value: Point) -> Self {[value.x, value.y]}
+    #[inline] fn from(value: Point) -> Self {
+        [value.x, value.y]
+    }
 }
 
 impl Add for Point {
     type Output = Self;
-    fn add(self, rhs: Self) -> Self::Output {
+    #[inline] fn add(self, rhs: Self) -> Self::Output {
         Self{x: self.x + rhs.x, y: self.y + rhs.y}
     }
 }
 
 impl AddAssign for Point {
-    fn add_assign(&mut self, rhs: Self) {
+    #[inline] fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs
     }
 }
 
 impl Sub for Point {
     type Output = Self;
-    fn sub(self, rhs: Self) -> Self::Output {
+    #[inline] fn sub(self, rhs: Self) -> Self::Output {
         Self{x: self.x - rhs.x, y: self.y - rhs.y}
     }
 }
 
 impl SubAssign for Point {
-    fn sub_assign(&mut self, rhs: Self) {
+    #[inline] fn sub_assign(&mut self, rhs: Self) {
         *self = *self - rhs
+    }
+}
+
+impl LooseEq for Point {
+    #[inline] fn loose_eq(&self, value: Self, off: Self) -> bool {
+        self.x.loose_eq(value.x, off.x)
+            && self.y.loose_eq(value.y, off.y)
     }
 }
 
@@ -764,7 +804,7 @@ pub trait HitZone: Sized + Debug {
     fn      top(&self) -> i32;
     fn    right(&self) -> i32;
     fn   bottom(&self) -> i32;
-    fn   center(&self) -> Point;
+    fn   center_point(&self) -> Point;
     fn    shift(self, offset: Point)  -> Self;
     fn     draw(&self, ctx: &CanvasRenderingContext2d);
 
@@ -774,6 +814,12 @@ pub trait HitZone: Sized + Debug {
     #[inline] fn shift_y(self, y: i32) -> Self {self.shift(Point{x:0, y})}
 }
 
+/// methods' naming convention:
+/// *square* - accepts `side` as both `width` & `height`,
+///     else accepts the bottom-right corner
+/// *zero* - the top-left corner is zero,
+///     else accepts the top-left corner as `src`
+/// *center* - accepts the center point, the dimensions are accepted halved
 #[derive(Debug, Clone, Copy)]
 pub struct Rect(Point, Point);
 
@@ -787,40 +833,54 @@ impl HitZone for Rect {
     #[inline] fn    top(&self) -> i32 {self.0.y}
     #[inline] fn  right(&self) -> i32 {self.1.x}
     #[inline] fn bottom(&self) -> i32 {self.1.y}
-    #[inline] fn center(&self) -> Point {self.0.avg(self.1)}
+    #[inline] fn center_point(&self) -> Point {self.0.avg(self.1)}
 
     #[inline] fn shift(self, offset: Point) -> Self {
         Self(self.0 + offset, self.1 + offset)
     }
 
-    fn draw(&self, ctx: &CanvasRenderingContext2d) {
+    #[inline] fn draw(&self, ctx: &CanvasRenderingContext2d) {
         ctx.rect(self.left().into(), self.top().into(), self.width().into(), self.height().into())
     }
 }
 
-/// methods' naming convention:
-/// *square* - accepts `side` as both `width` & `height`,
-///     else accepts `width` and `height` separately
-/// *zero* - the top-left corner is zero,
-///     else accepts the top-left corner as `src`
-/// *center* - accepts the center point
 impl Rect {
-    #[inline] pub fn zero(width: i32, height: i32) -> Self {
-        Self(Point::ZERO, Point{x: width, y: height})
+    #[inline] pub fn new(top_left: Point, bottom_right: Point) -> Self {
+        Self(top_left, bottom_right)
+    }
+
+    #[inline] pub fn zero(bottom_right: Point) -> Self {
+        Self(Point::ZERO, bottom_right)
+    }
+
+    #[inline] pub fn center(center: Point, half_sides: Point) -> Self {
+        Self(center - half_sides, center + half_sides)
+    }
+
+    #[inline] pub fn zero_center(center: Point) -> Self {
+        Self(Point::ZERO, center + center)
     }
 
     #[inline] pub fn square(src: Point, side: i32) -> Self {
         Self(src, src + Point{x: side, y: side})
     }
 
-    #[inline] pub fn square_center(center: Point, mut side: i32) -> Self {
-        side /= 2;
-        let offset = Point{x: side, y: side};
-        Self(center - offset, center + offset)
+    #[inline] pub fn square_center(center: Point, half_side: i32) -> Self {
+        let half_sides = Point{x: half_side, y: half_side};
+        Self(center - half_sides, center + half_sides)
+    }
+
+    #[inline] pub fn square_zero(side: i32) -> Self {
+        Self(Point::ZERO, Point{x: side, y: side})
+    }
+
+    #[inline] pub fn square_zero_center(half_side: i32) -> Self {
+        let side = half_side * 2;
+        Self(Point::ZERO, Point{x: side, y: side})
     }
 
     #[inline] pub fn to_rhombus(self) -> Rhombus {
-        Rhombus::new(self.center(), self.width() / 2, self.height() / 2)
+        Rhombus::new(self.center_point(), self.width() / 2, self.height() / 2)
     }
 }
 
@@ -842,7 +902,7 @@ impl HitZone for Rhombus {
     #[inline] fn bottom(&self) -> i32   {self.center.y + self.half_h}
     #[inline] fn  width(&self) -> i32   {self.half_w * 2}
     #[inline] fn height(&self) -> i32   {self.half_h * 2}
-    #[inline] fn center(&self) -> Point {self.center}
+    #[inline] fn center_point(&self) -> Point {self.center}
 
     #[inline] fn shift(mut self, offset: Point) -> Self {
         self.center += offset;
@@ -882,7 +942,7 @@ impl HitZone for HorizontalArrow {
     #[inline] fn    top(&self) -> i32 {self.back_center.y - self.half_h}
     #[inline] fn  right(&self) -> i32 {self.back_center.x + self.w * !self.is_left as i32}
     #[inline] fn bottom(&self) -> i32 {self.back_center.y + self.half_h}
-    #[inline] fn center(&self) -> Point {self.back_center}
+    #[inline] fn center_point(&self) -> Point {self.back_center}
 
     #[inline] fn shift(mut self, offset: Point) -> Self {
         self.back_center += offset;

@@ -1,7 +1,7 @@
 use std::{
-    ops::{Not, Deref, DerefMut, Range, Add, Sub, Neg},
+    ops::{Range, Add, Sub, Neg},
     fmt::{self, Display, Formatter},
-    cmp::{Ordering, Reverse}, iter::successors};
+    cmp::{Ordering, Reverse}, iter::successors, rc::Rc};
 use web_sys::{
     AudioNode, AnalyserNode,
     AudioContext,
@@ -14,9 +14,6 @@ use crate::{
     utils::{
         JsResult,
         Point,
-        HitZone,
-        HorizontalArrow,
-        Rhombus,
         JsResultUtils,
         BoolExt,
         SliceExt,
@@ -27,11 +24,10 @@ use crate::{
         ResultToJsResult,
         R64, R32,
         SaturatingInto,
-        RangeExt, Check, total_clamp},
+        RangeExt, Check, total_clamp, Take},
     input::{Switch, Slider, Button, ParamId},
-    MainCmd,
     loc,
-    r32, r64};
+    r32, r64, visual::{CanvasEvent, HintHandler}};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -320,7 +316,7 @@ impl Sound {
         })
     }
 
-    /// the-returned `R64` indicates the moment when the `end` method will be called on this sound
+    /// returns the time when the release phase will start
     fn start(&mut self, time: Secs, bpm: Beats) -> JsResult<Secs> {
         Ok(match self {
             &mut Self::Wave(ref ctrl, duration) => {
@@ -399,20 +395,6 @@ impl Sound {
     }
 }
 
-#[derive(Debug, Default)]
-enum Focus {
-    #[default] None,
-    Moving(Point),
-    Connecting(Point),
-}
-
-#[derive(Debug)]
-pub struct Element {
-    location: Point,
-    focus: Focus,
-    id: usize
-}
-
 /// used by the implementation of `SoundGen::Wave`
 #[derive(Debug, Clone, Copy)]
 pub struct WaveDef {
@@ -452,12 +434,6 @@ impl PatternBlock {
     }
 }
 
-pub struct GraphEvent {
-    pub shift: bool,
-    pub alt: bool,
-    pub point: Point
-}
-
 #[derive(Debug, Clone, Copy)]
 pub enum PatternInputFocus {
     DragStart(usize, Beats),
@@ -467,94 +443,60 @@ pub enum PatternInputFocus {
     DragWrapPoint(Beats)
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
-pub struct SoundEvent {
-    pub element_id: usize,
-    pub when: MSecs
-}
-
 /// represents a sound transformer that can have an optional input element
 /// and an optional output element
 #[derive(Debug)]
 pub enum SoundGen {
     /// emits a stub sound when it's time to start playing, doesn't accept any input
-    Input{base: Element},
+    Input,
     /// generates a wave combined from a variable number of primitive waves of customizable form
-    Wave{base: Element, waves: Vec<WaveDef>, n_waves: usize},
+    Wave{waves: Vec<WaveDef>, n_waves: usize},
     /// wraps the input sound in an "envelope": https://en.wikipedia.org/wiki/Envelope_(music)
-    Envelope{base: Element, attack: Beats, decay: Beats, sustain_level: R32, release: Beats},
+    Envelope{force_redraw: bool,
+        attack: Beats, decay: Beats, sustain_level: R32, release: Beats},
     /// emits the input note in a pattern with given durations, intervals and pitches
     /// can only be connected to the input node (for now)
-    Pattern{base: Element, pattern: Vec<PatternBlock>, cur_block_id: Option<usize>,
+    Pattern{pattern: Vec<PatternBlock>, cur_block_id: Option<usize>,
         input_focus: Option<PatternInputFocus>, last_duration: Beats,
         pattern_offset: i32, displayed_interval: Beats,
-        wrap_point: Beats, snap_step: Beats},
+        wrap_point: Beats, snap_step: Beats, force_redraw: bool},
     /// consumes the input sound, delegating it to the `SoundPlayer`
-    Output{base: Element, bpm: Beats, gain_level: R32},
-}
-
-impl Deref for SoundGen {
-    type Target = Element;
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Input{base} => base,
-            Self::Wave {base, ..} => base,
-            Self::Envelope{base, ..} => base,
-            Self::Pattern{base, ..} => base,
-            Self::Output{base, ..} => base}
-    }
-}
-
-impl DerefMut for SoundGen {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match self {
-            Self::Input{base} => base,
-            Self::Wave {base, ..} => base,
-            Self::Envelope{base, ..} => base,
-            Self::Pattern{base, ..} => base,
-            Self::Output{base, ..} => base}
-    }
+    Output{bpm: Beats, gain_level: R32},
 }
 
 /// used to visualise certain sound elements while editing them
 #[derive(Debug, Clone, Copy)]
 pub struct GraphSpec {
-    pub element_id: usize,
+    pub force_redraw: bool,
     pub ratio: R32,
     pub interactive: bool
 }
 
 impl SoundGen {
-    const VISUAL_SIZE: i32 = 32;
     const PATTERN_DEFAULT_BLOCK_DURATION: Beats = r64![4.0];
-    #[inline] pub fn new_input(location: Point) -> Self {
-        Self::Input{base: Element{location, focus: Focus::None, id: 0}}
+    #[inline] pub fn new_input() -> Self {
+        Self::Input
     }
 
-    #[inline] pub fn new_wave(location: Point) -> Self {
-        Self::Wave{waves: vec![], n_waves: 0,
-            base: Element{location, focus: Focus::None, id: 0}}
+    #[inline] pub fn new_wave() -> Self {
+        Self::Wave{waves: vec![], n_waves: 0}
     }
 
-    #[inline] pub fn new_envelope(location: Point) -> Self {
-        Self::Envelope{attack: r64![0.0], decay: r64![0.0], sustain_level: r32![0.0], release: r64![0.0],
-            base: Element{location, focus: Focus::None, id: 0}}
+    #[inline] pub fn new_envelope() -> Self {
+        Self::Envelope{force_redraw: true,
+            attack: r64![0.0], decay: r64![0.0], sustain_level: r32![0.0], release: r64![0.0]}
     }
 
-    #[inline] pub fn new_pattern(location: Point) -> Self {
+    #[inline] pub fn new_pattern() -> Self {
         Self::Pattern{pattern: vec![], cur_block_id: None,
             input_focus: None, last_duration: r64![4.0], wrap_point: r64![16.0],
             pattern_offset: 0, displayed_interval: r64![20.0], snap_step: r64![1.0],
-            base: Element{location, focus: Focus::None, id: 0}}
+            force_redraw: true}
     }
 
-    #[inline] pub fn new_output(location: Point, player: &mut SoundPlayer) -> Self {
-        Self::Output{bpm: player.bpm(), gain_level: player.gain_level(),
-            base: Element{location, focus: Focus::None, id: 0}}
+    #[inline] pub fn new_output(player: &mut SoundPlayer) -> Self {
+        Self::Output{bpm: player.bpm(), gain_level: player.gain_level()}
     }
-
-    #[inline] pub fn id(&self) -> usize {self.id}
-    #[inline] pub fn set_id(&mut self, id: usize) {self.id = id}
 
     #[inline] pub fn name(&self) -> &'static str {
         match self {
@@ -565,36 +507,24 @@ impl SoundGen {
             Self::Output{..} => "Output"}
     }
 
-    #[inline] pub fn graph_spec(&self) -> Option<GraphSpec> {
+    #[inline] pub fn graph_spec(&mut self) -> Option<GraphSpec> {
         match self {
-            Self::Envelope{base, ..} =>
-                Some(GraphSpec{element_id: base.id, ratio: r32![0.5], interactive: false}),
-            Self::Pattern{base, ..} =>
-                Some(GraphSpec{element_id: base.id, ratio: r32![1.5], interactive: true}),
+            Self::Envelope{force_redraw, ..} =>
+                Some(GraphSpec{force_redraw: force_redraw.take(), ratio: r32![0.5], interactive: false}),
+            Self::Pattern{force_redraw, ..} =>
+                Some(GraphSpec{force_redraw: force_redraw.take(), ratio: r32![1.5], interactive: true}),
             _ => None}
     }
 
     /// `self` is the source, `other` is the destination
     pub fn connectible(&self, other: &Self) -> bool {
-        if self.id == other.id || matches!(self, SoundGen::Output{..}) || matches!(other, SoundGen::Input{..}) {
+        if matches!(self, SoundGen::Output{..}) || matches!(other, SoundGen::Input{..}) {
             return false
         }
         if matches!(other, SoundGen::Pattern{..}) && !matches!(self, SoundGen::Input{..}) {
             return false
         }
         true
-    }
-
-    /// the outward connections of the component will visually start from the returned point
-    #[inline] pub fn output_point(&self) -> Option<Point> {
-        matches!(self, Self::Output{..}).not()
-            .then(|| self.location + Point{x: Self::VISUAL_SIZE, y: 0})
-    }
-
-    /// the inward connections of the component will visually end at the returned point
-    #[inline] pub fn input_point(&self) -> Option<Point> {
-        matches!(self, Self::Input{..}).not()
-            .then(|| self.location - Point{x: Self::VISUAL_SIZE, y: 0})
     }
 
     /// called right before starting to play the sounds
@@ -610,7 +540,9 @@ impl SoundGen {
         }
     }
 
-    pub fn transform(&mut self, player: &mut SoundPlayer, sound: Sound, time: MSecs) -> JsResult<(Option<Sound>, Option<SoundEvent>)> {
+    /// processes `sound` as an element within `player` polled at `time`
+    /// optionally returns the resulting sound & the time when it should be polled again
+    pub fn transform(&mut self, player: &mut SoundPlayer, sound: Sound, time: MSecs) -> JsResult<(Option<Sound>, Option<MSecs>)> {
         Ok(match self {
             Self::Wave{waves, ..} => (Some(sound.wave(player.audio_ctx(), waves).add_loc(loc!())?), None),
 
@@ -618,12 +550,12 @@ impl SoundGen {
                 (Some(sound.envelope(player.audio_ctx(), attack, decay, sustain_level, release).add_loc(loc!())?),
                     None),
 
-            Self::Pattern{base, pattern, cur_block_id, wrap_point, ..} => {
+            Self::Pattern{pattern, cur_block_id, wrap_point, ..} => {
                 let bpm = player.bpm();
                 let Some(cur_block_id) = cur_block_id else {
                     return if let Some(when) = pattern.first().map(|x| time + x.offset.to_msecs(bpm)) {
                         *cur_block_id = Some(0);
-                        Ok((None, Some(SoundEvent{element_id: base.id, when})))
+                        Ok((None, Some(when)))
                     } else {Ok((None, None))}
                 };
                 let cur = unsafe{pattern.get_unchecked(*cur_block_id)};
@@ -632,7 +564,7 @@ impl SoundGen {
                         |x| (*cur_block_id + 1, x.offset));
                 *cur_block_id = next_id;
                 (Some(Sound::InputNote(cur.note, Some(cur.duration))),
-                    Some(SoundEvent{element_id: base.id, when: time + offset.to_msecs(bpm) - cur.offset.to_msecs(bpm)}))
+                    Some(time + offset.to_msecs(bpm) - cur.offset.to_msecs(bpm)))
             }
 
             Self::Output{bpm, ..} => {
@@ -644,91 +576,53 @@ impl SoundGen {
             Self::Input{..} => (Some(sound), None)})
     }
 
-    #[inline] pub fn get_conn_creation_hitzone(&self) -> impl HitZone {
-        HorizontalArrow::new(self.location, Self::VISUAL_SIZE / 2, Self::VISUAL_SIZE / 2, false)
-            .shift_x(Self::VISUAL_SIZE / 2)
-    }
-
-    pub fn contains(&self, point: Point) -> bool {
-        match (self.output_point().is_some(), self.input_point().is_some()) {
-            (true,  true) => Rhombus::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE)
-                .contains(point),
-            (_, x) => HorizontalArrow::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE, x)
-                .contains(point) // the values may never be `(false, false)`
-        }
-    }
-
-    pub fn handle_movement(&mut self, coords: Point, is_last: bool) -> Option<MainCmd> {
-        let (focus, cmd) = match self.focus {
-            Focus::None =>
-                if self.output_point().is_some() && self.get_conn_creation_hitzone().contains(coords) {
-                    (Focus::Connecting(coords),
-                        Some(MainCmd::SetDesc(format!("{}: Connecting", self.name()))))
-                } else {
-                    (Focus::Moving(self.location - coords),
-                        Some(MainCmd::SetDesc(format!("{}: Moving", self.name()))))
-                }
-            Focus::Moving(offset) => {
-                self.location = coords + offset;
-                is_last.choose(
-                    (Focus::None, Some(MainCmd::Select(Some(self.id)))),
-                    (Focus::Moving(offset), None))
-            }
-            Focus::Connecting(dst) => is_last.choose(
-                (Focus::None, Some(MainCmd::TryConnect(self.id, dst))),
-                (Focus::Connecting(coords), None))
-        };
-        self.focus = focus;
-        cmd
-    }
-
-    pub fn params(&self) -> Html {
+    pub fn params(&self, id: usize, hint: &Rc<HintHandler>) -> Html {
         match self {
             Self::Wave{waves, n_waves, ..} => html!{<div id="inputs" style="grid-template-columns:repeat(3,1fr)">
                 {for waves.iter().enumerate().map(|(i, wave)| html!{<>
                     <div id="wave-options">
-                        <Button
+                        <Button {hint}
                         key={wave.id * 5 + 2}
-                        id={ParamId::RemoveWave(self.id, i as u32)}
-                        desc="Remove wave element">
+                        id={ParamId::RemoveWave(id, i)}
+                        name="Remove wave element">
                             <div>{"Remove"}</div>
                         </Button>
-                        <Button
+                        <Button {hint}
                         key={wave.id * 5 + 3}
-                        id={ParamId::ToggleWavePitchType(self.id, i as u32)}
-                        desc="Toggle pitch input mode">
+                        id={ParamId::ToggleWavePitchType(id, i)}
+                        name="Toggle pitch input mode">
                             <div>{if let Pitch::Freq(_) = wave.pitch {"Frequency"} else {"Note"}}</div>
                         </Button>
                     </div>
                     if let Pitch::Note(off) = wave.pitch {
-                        <Slider
+                        <Slider {hint}
                         key={wave.id * 5}
-                        id={ParamId::WavePitch(self.id, i as u32)}
+                        id={ParamId::WavePitch(id, i)}
                         max={R64::from(Note::MAX.index())} precision={0}
                         signed={true}
                         name={"Note"}
                         initial={R64::from(off)}/>
                     } else if let Pitch::Freq(off) = wave.pitch {
-                        <Slider
+                        <Slider {hint}
                         key={wave.id * 5 + 4}
-                        id={ParamId::WavePitch(self.id, i as u32)}
+                        id={ParamId::WavePitch(id, i)}
                         max={Sound::MAX_WAVE_FREQ} precision={0}
                         signed={true}
                         postfix={"Hz"}
                         name={"Frequency"}
                         initial={R64::from(off)}/>
                     }
-                    <Switch
+                    <Switch {hint}
                     key={wave.id * 5 + 1}
-                    id={ParamId::WaveType(self.id, i as u32)}
+                    id={ParamId::WaveType(id, i)}
                     options={Sound::WAVE_TYPE_NAMES.to_vec()}
                     name={"Wave type"}
                     initial={Sound::WAVE_TYPES.iter().position(|&x| x == wave.wave_type).unwrap_or(0)}/>
                 </>})}
-                <Button
+                <Button {hint}
                 key={n_waves * 5}
-                id={ParamId::AddWave(self.id)}
-                desc="Add new wave element"
+                id={ParamId::AddWave(id)}
+                name="Add new wave element"
                 class="add-wave-button">
                     <svg viewBox="0 0 100 100" style="height:100%">
                         <polygon points="45,25 55,25 55,45 75,45 75,55 55,55 55,75 45,75 45,55 25,55 25,45 45,45"/>
@@ -737,46 +631,46 @@ impl SoundGen {
             </div>},
 
             &Self::Envelope{attack, decay, sustain_level, release, ..} => html!{<div id="inputs">
-                <Slider key="att" name="Attack time"
-                    id={ParamId::EnvelopeAttack(self.id)}
+                <Slider {hint} key="att" name="Attack time"
+                    id={ParamId::EnvelopeAttack(id)}
                     max={Sound::MAX_INTERVAL}
                     postfix={"Beats"}
                     initial={attack}/>
-                <Slider key="dec" name="Decay time"
-                    id={ParamId::EnvelopeDecay(self.id)}
+                <Slider {hint} key="dec" name="Decay time"
+                    id={ParamId::EnvelopeDecay(id)}
                     max={Sound::MAX_INTERVAL}
                     postfix={"Beats"}
                     initial={decay}/>
-                <Slider key="sus" name="Sustain level"
-                    id={ParamId::EnvelopSustain(self.id)}
+                <Slider {hint} key="sus" name="Sustain level"
+                    id={ParamId::EnvelopSustain(id)}
                     max={r64![1.0]}
                     initial={R64::from(sustain_level)}/>
-                <Slider key="rel" name="Release time"
-                    id={ParamId::EnvelopeRelease(self.id)}
+                <Slider {hint} key="rel" name="Release time"
+                    id={ParamId::EnvelopeRelease(id)}
                     max={Sound::MAX_INTERVAL}
                     postfix="Beats"
                     initial={release}/>
             </div>},
 
             &Self::Output{gain_level, bpm, ..} => html!{<div id="inputs">
-                <Slider key="tmp" name="Tempo"
-                    id={ParamId::Bpm(self.id)}
+                <Slider {hint} key="tmp" name="Tempo"
+                    id={ParamId::Bpm(id)}
                     min={r64![30.0]} max={r64![240.0]}
                     postfix="BPM"
                     initial={bpm}/>
-                <Slider key="gain" name="Master gain level"
-                    id={ParamId::MasterGain(self.id)}
+                <Slider {hint} key="gain" name="Master gain level"
+                    id={ParamId::MasterGain(id)}
                     initial={R64::from(gain_level)}/>
             </div>},
 
             &Self::Pattern{displayed_interval, snap_step, ..} => html!{<div id="inputs">
-                <Slider key="int" name="Displayed interval"
-                    id={ParamId::DisplayInterval(self.id)}
+                <Slider {hint} key="int" name="Displayed interval"
+                    id={ParamId::DisplayInterval(id)}
                     min={r64![1.0]} max={r64![32.0]}
                     postfix="beats"
                     initial={displayed_interval}/>
-                <Switch key="snap" name="Interval for notes to snap to"
-                    id={ParamId::SnapStep(self.id)}
+                <Switch {hint} key="snap" name="Interval for notes to snap to"
+                    id={ParamId::SnapStep(id)}
                     options={vec!["None", "1", "1/2", "1/4", "1/8"]}
                     initial={if *snap_step == 0.0 {0} else {snap_step.recip().round() as usize}}/>
             </div>},
@@ -784,29 +678,28 @@ impl SoundGen {
             _ => Default::default()}
     }
 
-    /// the returned boolean marks whether the sound element's editor window should be rerendered
+    /// the returned boolean marks whether the element's editor window should be rerendered
     pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
         Ok(match self {
             Self::Wave{waves, n_waves, ..} => match id {
                 ParamId::ToggleWavePitchType(_, id) => value.is_sign_negative().then_try(|| {
-                    waves.get_mut(id as usize).to_js_result(loc!())
+                    waves.get_mut(id).to_js_result(loc!())
                         .map(|wave| wave.pitch.toggle())
                 })?.is_some(),
 
-                ParamId::WavePitch(_, id) => {
-                    match waves.get_mut(id as usize).to_js_result(loc!())?.pitch {
+                ParamId::WavePitch(_, id) => match waves.get_mut(id).to_js_result(loc!())?.pitch {
                         Pitch::Note(ref mut off) => *off = *value as i8,
-                        Pitch::Freq(ref mut off) => *off = value.into()}
-                    false}
+                        Pitch::Freq(ref mut off) => *off = value.into()
+                }.pipe(|_| false),
 
                 ParamId::WaveType(_, id) => {
-                    waves.get_mut(id as usize).to_js_result(loc!())?
+                    waves.get_mut(id).to_js_result(loc!())?
                         .wave_type = *Sound::WAVE_TYPES
                             .get(*value as usize).to_js_result(loc!())?;
                     false}
 
                 ParamId::RemoveWave(_, id) => value.is_sign_negative().then(||
-                    waves.remove(id as usize)).is_some(),
+                    waves.remove(id)).is_some(),
 
                 ParamId::AddWave(_) => value.is_sign_negative().then(|| {
                     waves.push(WaveDef::new(*n_waves));
@@ -816,58 +709,37 @@ impl SoundGen {
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
             }
 
-            Self::Envelope{attack, decay, sustain_level, release, ..} => match id {
-                ParamId::EnvelopeAttack(_) =>  {*attack  = value;              false}
-                ParamId::EnvelopeDecay(_)  =>  {*decay   = value;              false}
-                ParamId::EnvelopSustain(_) =>  {*sustain_level = value.into(); false}
-                ParamId::EnvelopeRelease(_) => {*release = value;              false}
+            Self::Envelope{attack, decay, sustain_level, release, force_redraw, ..} => match id {
+                ParamId::EnvelopeAttack(_)  => *attack = value,
+                ParamId::EnvelopeDecay(_)   => *decay = value,
+                ParamId::EnvelopSustain(_)  => *sustain_level = value.into(),
+                ParamId::EnvelopeRelease(_) => *release = value,
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
-            }
+            }.pipe(|_| {*force_redraw = true; false}),
 
             Self::Output{gain_level, bpm, ..} => match id {
-                ParamId::Bpm(_) => {*bpm = value; false}
-                ParamId::MasterGain(_) => {*gain_level = value.into(); false}
+                ParamId::Bpm(_) => *bpm = value,
+                ParamId::MasterGain(_) => *gain_level = value.into(),
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
-            }
+            }.pipe(|_| false),
 
-            Self::Pattern{last_duration, displayed_interval, snap_step, ..} => match id {
-                ParamId::DisplayInterval(_) => {*displayed_interval = value; false}
+            Self::Pattern{last_duration, displayed_interval, snap_step, force_redraw, ..} => match id {
+                ParamId::DisplayInterval(_) => {
+                    *displayed_interval = value;
+                    *force_redraw = true;
+                }
                 ParamId::SnapStep(_) => {
                     *snap_step = if *value == 0.0 {r64![0.0]} else {value.sub(1u8).exp2().recip()};
                     *last_duration = last_duration.floor_to(*snap_step);
-                    false
                 }
                 id => js_error(format!("`{}` sound element has no parameter `{:?}`", self.name(), id), loc!())?
-            }
+            }.pipe(|_| false),
 
             x => js_error(format!("cannot set a parameter on a `{}` sound element", x.name()), loc!())?
         })
     }
 
-    pub fn draw(&self, ctx: &CanvasRenderingContext2d, mut offset: Point) {
-        offset = -offset;
-        if self.output_point().is_some() {
-            if self.input_point().is_some() {
-                Rhombus::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE)
-                    .shift(offset).draw(ctx);
-            } else {
-                HorizontalArrow::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE, false)
-                    .shift(offset).draw(ctx);
-            }
-            let hitzone = self.get_conn_creation_hitzone().shift(offset);
-            hitzone.draw(ctx);
-            if let Focus::Connecting(mut conn) = self.focus {
-                conn += offset;
-                ctx.move_to(hitzone.right().into(), hitzone.center().y.into());
-                ctx.line_to(conn.x.into(), conn.y.into());
-            }
-        } else {
-            HorizontalArrow::new(self.location, Self::VISUAL_SIZE, Self::VISUAL_SIZE, true)
-                .shift(offset).draw(ctx);
-        }
-    }
-
-    pub fn graph(&mut self, width: u32, height: u32, ctx: &CanvasRenderingContext2d, event: Option<GraphEvent>) -> JsResult<()> {
+    pub fn graph(&mut self, width: u32, height: u32, ctx: &CanvasRenderingContext2d, event: Option<CanvasEvent>) -> JsResult<()> {
         Ok(match self {
             &mut Self::Envelope {attack, decay, sustain_level, release, ..} => {
                 let (width, height) = (width as f64, height as f64);
@@ -880,7 +752,7 @@ impl SoundGen {
             }
 
             Self::Pattern{wrap_point, last_duration, input_focus, pattern, pattern_offset, displayed_interval, snap_step, ..} => {
-                let hovered_note = if let Some(GraphEvent{shift, point, ..}) = event {
+                let hovered_note = if let Some(CanvasEvent{left: true, shift, point}) = event {
                     let offset_raw = R64::from(point.x + *pattern_offset) / R64::from(width) * *displayed_interval;
                     let offset = offset_raw.floor_to(*snap_step);
                     let note = Note::from_index(((1.0 - point.y as f32 / height as f32) * Note::ALL.len() as f32) as usize);
@@ -1064,9 +936,7 @@ impl SoundPlayer {
             SoundState::Pending)))
     }
 
-    #[inline] pub fn end_sounds(&mut self) {
-        self.ending_all = true;
-    }
+    #[inline] pub fn end_sounds(&mut self) {self.ending_all = true}
 
     #[inline] pub fn audio_ctx(&self) -> &AudioContext {&self.audio_ctx}
 

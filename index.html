@@ -18,6 +18,7 @@
 			.dark-bg {background-color: #181818}
 			.light-bg {background-color: #232328}
 			.blue-border {border: 3px solid #0069E1}
+			.blue-border[height="0"] {border-width: 0}
 			#ctrl-panel {
 				position: fixed;
 				left: 0;
@@ -30,12 +31,12 @@
 				gap: 1em;
 				flex-direction: column}
 			#ctrl-panel:has(#general-ctrl) {bottom: 10em}
-			#help-msg {
-				padding: 1em;
-				white-space: pre;
-				overflow: hidden;
+			#hint {
+				flex: none;
+				height: 4em;
 				min-height: 1em;
 				user-select: none}
+			#aux-hint {font-size: small}
 			#inputs {
 				display: grid;
 				grid-template-columns: repeat(2, 1fr)}
@@ -109,7 +110,6 @@
 				display: flex;
 				flex-direction: column}
 			#wave-options > .button {height: auto; flex: 1}
-			#graph[height="0"] {border-width: 0}
 		</style>
 	</head>
 	<body>
