@@ -16,7 +16,7 @@ use std::{
 use input::{ParamId, Button};
 use visual::{GraphHandler, SoundVisualiser, EditorPlaneHandler, CanvasEvent, HintHandler};
 use sequencer::Sequencer;
-use sound::{SoundGen, Note};
+use sound::{Sound, Note};
 use utils::{
     JsResultUtils, OptionExt, JsResult,
     Point,
@@ -68,21 +68,11 @@ impl Player {
             _ = window().request_animation_frame(js_callback).report_err(loc!());
         }
 
-        let mut editor_plane_handler = EditorPlaneHandler::new().add_loc(loc!())?;
-        let sequencer = Sequencer::new().add_loc(loc!())?;
-        let body = document().body().to_js_result(loc!())?;
-        let interval = body.client_width() / (sequencer.elements().len() as i32 + 1);
-        let mut point = Point{x: interval, y: body.client_height() / 2};
-        for _ in sequencer.elements() {
-            editor_plane_handler.add_element(point).add_loc(loc!())?;
-            point.x += interval;
-        }
-
         let js_callback = &GLOBAL_PLAYER.set(Self{
             graph_handler: GraphHandler::new().add_loc(loc!())?,
             sound_visualiser: SoundVisualiser::new().add_loc(loc!())?,
-            editor_plane_handler,
-            sequencer,
+            editor_plane_handler: EditorPlaneHandler::new().add_loc(loc!())?,
+            sequencer: Sequencer::new().add_loc(loc!())?,
             hint_handler: Rc::new(HintHandler::default()),
             js_callback: JsClosure::<dyn Fn(f64)>::new(render).into_js_value().unchecked_into()
         }).add_loc(loc!())?.js_callback;

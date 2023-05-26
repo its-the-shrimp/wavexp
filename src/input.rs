@@ -18,7 +18,7 @@ use crate::{
         HtmlCanvasExt,
         HtmlDocumentExt,
         OptionExt, BoolExt, R64, Point},
-    MainCmd, loc, sound::{Note, SoundGen}, visual::HintHandler};
+    MainCmd, loc, sound::{Note, Sound}, visual::HintHandler};
 
 #[derive(Debug)]
 pub enum Cmd {
@@ -35,7 +35,7 @@ pub enum ParamId {
     Select(Option<usize>),
     Connect(usize, usize),
     Disconnect(usize),
-    Add(fn() -> SoundGen, Point),
+    Add(fn() -> Sound, Point),
     Remove(usize),
     ToggleWavePitchType(usize, usize),
     WavePitch(usize, usize),
