@@ -1,24 +1,47 @@
-use std::{cmp::Reverse, fmt::Debug};
+use std::cmp::Ordering;
 use web_sys::{AnalyserNode as JsAnalyserNode, GainOptions, DynamicsCompressorOptions, DynamicsCompressorNode, GainNode, AudioContext};
 use crate::{
-    sound::{SoundGen, Note, SoundPlayer, Secs, Sound, MSecs, Beats},
-    utils::{JsResult, JsResultUtils, R64, OptionExt, VecExt, Take, ResultToJsResult},
+    sound::{Secs, Sound, Beats},
+    utils::{JsResult, JsResultUtils, R64, VecExt, Check, R32},
     input::ParamId,
-    loc, r32, r64
+    loc, r64
 };
 
-pub enum PatternBlock {
-    Sound{sound: Sound, layer: usize},
-    Delay(Beats)
+pub struct PatternBlock {
+    pub sound: Sound,
+    pub layer: i32,
+    pub offset: Beats
+}
+
+impl PartialEq for PatternBlock {
+    #[inline] fn eq(&self, other: &Self) -> bool {
+        self.offset.eq(&other.offset)
+    }
+}
+
+impl Eq for PatternBlock {}
+
+impl PartialOrd for PatternBlock {
+    #[inline] fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.offset.partial_cmp(&other.offset)
+    }
+}
+
+impl Ord for PatternBlock {
+    #[inline] fn cmp(&self, other: &Self) -> Ordering {
+        self.offset.cmp(&other.offset)
+    }
 }
 
 pub struct Sequencer {
     pattern: Vec<PatternBlock>,
     pending: Vec<(usize, Secs)>,
     state: Option<usize>,
+    start_time: Secs,
     visualiser: JsAnalyserNode,
     plug: DynamicsCompressorNode,
-    gain: GainNode
+    gain: GainNode,
+    bps: Beats
 }
 
 impl Sequencer {
@@ -35,49 +58,44 @@ impl Sequencer {
             .connect_with_audio_node(&audio_ctx.destination()).add_loc(loc!())?;
 
         Ok(Self{pattern: vec![], state: None, pending: vec![],
-            visualiser, plug, gain})
+            start_time: R64::INFINITY, visualiser, plug, gain, bps: r64![2.0]})
     }
 
     #[inline] pub fn visualiser(&self) -> &JsAnalyserNode {
         &self.visualiser
     }
 
+    #[inline] pub fn gain(&self) -> R32 {
+        R32::new_or(R32::ZERO, self.gain.gain().value())
+    }
+
+    /// Beats Per Second
+    #[inline] pub fn bps(&self) -> Beats {
+        self.bps
+    }
+
     #[inline] pub fn pattern(&self) -> &[PatternBlock] {
         &self.pattern
     }
 
-    pub fn add_block(&mut self, sound: Sound, layer: usize, offset: Beats) -> JsResult<()> {
-        let mut acc = Beats::ZERO;
-        for (i, x) in self.pattern.iter_mut().enumerate() {
-            if let PatternBlock::Delay(x) = x {
-                acc += *x;
-                if offset <= acc {
-                    if offset < acc {
-                        *x = offset - (acc - *x);
-                        self.pattern.try_insert(i + 1, PatternBlock::Delay(acc - offset))
-                            .to_js_result(loc!())?;
-                    }
-                    self.pattern.try_insert(i + 1, PatternBlock::Sound{sound, layer})
-                        .to_js_result(loc!())?;
-                    return Ok(())
-                }
-            }
-        }
-        self.pattern.push(PatternBlock::Delay(offset - acc));
-        self.pattern.push(PatternBlock::Sound{sound, layer});
-        Ok(())
+    #[inline] pub fn pattern_mut(&mut self) -> &mut [PatternBlock] {
+        &mut self.pattern
     }
 
-    #[inline] pub fn start(&mut self) {
-        self.state = Some(0);
+    pub fn add_block(&mut self, block: PatternBlock) {
+        self.pattern.push_sorted(block);
     }
 
     /// the returned `bool` indicates whether the selected element's editor window should be
     /// rerendered
     pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
         match id {
-            ParamId::Play(_) => 
-                self.state = value.is_sign_positive().then_some(0),
+            ParamId::Play(_) => {
+                self.state = value.is_sign_positive().then_some(0);
+                self.start_time = R64::INFINITY;
+            }
+            ParamId::Bpm => self.bps = value / 60u8,
+            ParamId::MasterGain => self.gain.gain().set_value(*value as f32),
             _ => ()
         }
         Ok(false)
@@ -85,21 +103,32 @@ impl Sequencer {
 
     pub fn poll(&mut self, time: Secs) -> JsResult<()> {
         if let Some(ref mut id) = self.state {
-            let mut iter = self.pattern.iter_mut().skip(*id);
-            while let Some(PatternBlock::Sound{sound, layer}) = iter.next() {
-                let when = sound.poll(time).add_loc(loc!())?;
+            self.start_time = self.start_time.check(R64::is_finite)
+                .unwrap_or(time);
+            let offset = time - self.start_time;
+            for PatternBlock{sound, ..} in self.pattern.iter_mut().skip(*id).take_while(|x| x.offset <= offset) {
+                let when = sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;
                 self.pending.push_sorted_by_key((*id, when), |x| x.0);
                 *id += 1;
             }
-            if iter.next().is_none() {
+            if *id >= self.pattern.len() {
+                // TODO: make it optionally loop around
                 self.state = None;
             }
         } else {
             for (id, _) in self.pending.drain(..) {
-                let Some(PatternBlock::Sound{sound, ..}) = self.pattern.get_mut(id)
-                    else {continue};
-                sound.stop(time).add_loc(loc!())?;
+                unsafe{self.pattern.get_unchecked_mut(id)}
+                    .sound.stop(time).add_loc(loc!())?;
             }
+        }
+
+        let n_due = self.pending.iter().position(|x| x.1 > time).unwrap_or(0);
+        let due: Vec<usize> = self.pending.drain(..n_due).map(|x| x.0).collect();
+        for id in due {
+            let when = unsafe{self.pattern.get_unchecked_mut(id)}
+                .sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;
+            if when.is_infinite() {continue}
+            self.pending.push_sorted_by_key((id, when), |x| x.0);
         }
         Ok(())
     }

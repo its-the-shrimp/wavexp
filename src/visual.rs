@@ -1,18 +1,19 @@
-use std::{iter::Iterator, slice::from_raw_parts, mem::{Discriminant, discriminant}};
-
+use std::{
+    iter::{Iterator, successors as succ},
+    slice::from_raw_parts,
+    mem::{Discriminant, discriminant},
+    ops::Add
+};
 use js_sys::Array as JsArray;
 use web_sys::{HtmlCanvasElement, AnalyserNode as JsAnalyserNode, ImageData as JsImageData, MouseEvent as JsMouseEvent, HtmlElement};
-use wasm_bindgen::{Clamped as JsClamped, JsValue, JsCast};
+use wasm_bindgen::{Clamped as JsClamped, JsValue};
 use yew::{TargetCast, NodeRef};
 use crate::{
     utils::{Check, SliceExt, Point,
-        JsResult, HtmlCanvasExt, JsResultUtils,
-        R32, R64, HitZone,
-        HorizontalArrow, OptionExt,
-        HtmlElementExt, VecExt, ResultToJsResult,
-        Pipe, LooseEq, BoolExt, Tee, Take, Rect, document},
-    sound::SoundGen,
-    loc, input::ParamId, js_assert, r32
+        JsResult, HtmlCanvasExt, JsResultUtils, R64, HitZone, OptionExt,
+        HtmlElementExt, 
+        Pipe, Tee, Rect, document},
+    loc, input::ParamId, sequencer::PatternBlock, sound::Beats
 };
 
 pub struct EveryNth<'a, T> {
@@ -188,7 +189,7 @@ impl TryFrom<&JsMouseEvent> for CanvasEvent {
     }
 }
 
-pub struct GraphHandler {
+/*pub struct GraphHandler {
     canvas: NodeRef,
     ratio: R32,
     event: Option<Option<CanvasEvent>>
@@ -246,23 +247,19 @@ impl GraphHandler {
         }
         Ok(())
     }
-}
+}*/
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     None,
     HoverPlane,
     HoverElement(usize),
-    HoverElementConnecting(usize, usize),
-    HoverConnector(usize),
     MovePlane(i32),
     MoveElement(usize, Point),
-    ConnectElement(usize, Point),
 }
 
 pub struct EditorPlaneHandler {
     canvas: NodeRef,
-    positions: Vec<Point>,
     selected_id: Option<usize>,
     focus: Focus,
     last_focus: Discriminant<Focus>,
@@ -277,24 +274,12 @@ impl EditorPlaneHandler {
     const FONT: &str = "20px consolas";
     const BG_STYLE: &str = "#232328";
     const FG_STYLE: &str = "#0069E1";
+    // TODO: make customizable
+    /// X is the time interval in beats, Y is the amount of layers
+    const SCALE: Rect = Rect::zero(Point{x: 20, y: 10});
 
     #[inline] pub fn new() -> JsResult<Self> {
-        let doc = document();
-        let canvas = doc.create_element("canvas").add_loc(loc!())?
-            .unchecked_into::<HtmlCanvasElement>();
-        let body = doc.body().to_js_result(loc!())?;
-        canvas.set_width(body.client_width() as u32);
-        canvas.set_height(body.client_height() as u32);
-
-        let ctx = canvas.get_2d_context(loc!())?;
-        ctx.set_text_align("middle");
-        ctx.set_text_baseline("top");
-        ctx.set_fill_style(&Self::BG_STYLE.into());
-        ctx.set_stroke_style(&Self::FG_STYLE.into());
-        ctx.set_line_width(3.0);
-        ctx.set_font(Self::FONT);
-        Ok(Self{canvas: NodeRef::default(),
-            positions: vec![], selected_id: None,
+        Ok(Self{canvas: NodeRef::default(), selected_id: None,
             offset: Point::ZERO, redraw: true,
             focus: Focus::None, last_focus: discriminant(&Focus::HoverPlane),
             solid_line: JsArray::new().into(),
@@ -305,41 +290,17 @@ impl EditorPlaneHandler {
         &self.canvas
     }
     
-    #[inline] pub fn add_element(&mut self, pos: Point) -> JsResult<()> {
-        self.positions.push(pos);
-        self.redraw = true;
-        Ok(())
-    }
-
-    #[inline] pub fn remove_element(&mut self, id: usize) -> JsResult<()> {
-        self.positions.try_swap_remove(id).to_js_result(loc!())?;
-        self.redraw = true;
-        Ok(())
-    }
-
-    /// the returned `bool` indicates whether the selected element's editor window should be
-    /// rerendered
-    pub fn set_param(&mut self, id: ParamId, _value: R64) -> JsResult<bool> {
-        match id {
-            ParamId::Remove(id) => self.remove_element(id).map(|_| true),
-            ParamId::Add(_, pos) => self.add_element(pos).map(|_| false),
-            ParamId::Select(_) => Ok(true),
-            _ => Ok(false)
-        }
-    }
-
     #[inline] pub fn selected_element_id(&self) -> Option<usize> {
         self.selected_id
     }
 
-    #[inline] fn in_conn_creation_area(element_pos: Point, point: Point) -> bool {
-        HorizontalArrow::new(element_pos, Self::ELEMENT_BB.x, Self::ELEMENT_BB.x, true)
-            .shift_x(Self::ELEMENT_BB.x) 
-            .contains(point)
+    #[inline] fn in_block(block: &PatternBlock, offset: Beats, layer: i32) -> bool {
+        layer == block.layer
+            && (*block.offset .. *block.sound.len()).contains(&*offset)
     }
 
-    #[inline] fn id_by_pos(&mut self, point: Point) -> Option<usize> {
-        self.positions.iter().position(|x| x.loose_eq(point, Self::ELEMENT_BB))
+    #[inline] fn id_by_pos(offset: Beats, layer: i32, pattern: &[PatternBlock]) -> Option<usize> {
+        pattern.iter().position(|x| Self::in_block(x, offset, layer))
     }
 
     #[inline] fn set_focus(&mut self, focus: Focus) {
@@ -347,65 +308,33 @@ impl EditorPlaneHandler {
         self.redraw = true;
     }
 
-    pub fn set_event(&mut self, event: Option<CanvasEvent>) -> Option<(ParamId, R64)> {
+    pub fn set_event(&mut self, event: Option<CanvasEvent>, pattern: &mut [PatternBlock]) -> Option<(ParamId, R64)> {
         let Some(mut event) = event else {
             self.focus = Focus::None;
             self.last_focus = discriminant(&self.focus);
             return None
         };
         event.point += self.offset;
+        let rect = self.canvas.cast::<HtmlCanvasElement>()?.rect();
+        let (offset, layer) = event.point.normalise(rect, Self::SCALE).pipe(|x| (Beats::from(x.x), x.y));
+
         match self.focus {
             Focus::None => self.set_focus(Focus::HoverPlane).pipe(|_| None),
-            Focus::HoverPlane => match (event.left, self.id_by_pos(event.point)) {
-                (true, None) => Some(Focus::MovePlane(event.point.x - self.offset.x)),
-                (true, Some(id)) =>
-                    Some(Self::in_conn_creation_area(unsafe{*self.positions.get_unchecked(id)}, event.point)
-                        .choose(Focus::ConnectElement(id, event.point), Focus::MoveElement(id, event.point))),
-                (false, None) => None,
-                (false, Some(id)) => Some(Focus::HoverElement(id))
-            }.map(|x| self.set_focus(x)).pipe(|_| None),
 
-            Focus::HoverElement(id) => {
-                let pos = unsafe{self.positions.get_unchecked(id)};
-                match (event.left, Self::in_conn_creation_area(*pos, event.point)) {
-                    (true, true) => Some(Focus::ConnectElement(id, event.point)),
-                    (true, false) => Some(Focus::MoveElement(id, event.point)),
-                    (false, true) => Some(Focus::HoverConnector(id)),
-                    (false, false) => pos.loose_ne(event.point, Self::ELEMENT_BB)
-                        .then_some(Focus::HoverPlane)
-                }.map(|x| self.set_focus(x));
-                None
-            }
+            Focus::HoverPlane => match (event.left, Self::id_by_pos(offset, layer, pattern)) {
+                (true, None) => Focus::MovePlane(event.point.x - self.offset.x),
+                (true, Some(id)) => Focus::MoveElement(id, event.point),
+                (false, None) => return None,
+                (false, Some(id)) => Focus::HoverElement(id)
+            }.pipe(|x| {self.set_focus(x); None}),
 
-            Focus::HoverElementConnecting(src_id, dst_id) => {
-                let dst = unsafe{self.positions.get_unchecked(dst_id)};
-                self.redraw = true;
-                match (event.left, dst.loose_eq(event.point, Self::ELEMENT_BB)) {
-                    (true, true) => (),
-                    (true, false) =>
-                        self.focus = Focus::ConnectElement(src_id, event.point),
-                    (false, false) =>
-                        self.focus = Focus::HoverPlane,
-                    (false, true) => {
-                        self.focus = Focus::HoverElement(dst_id);
-                        self.selected_id = Some(dst_id);
-                        return Some((ParamId::Connect(src_id, dst_id), R64::INFINITY))
-                    }
-                };
-                None
-            }
-
-            Focus::HoverConnector(id) => {
-                let pos = unsafe{self.positions.get_unchecked(id)};
-                match (event.left, Self::in_conn_creation_area(*pos, event.point)) {
-                    (true, true) => Some(Focus::ConnectElement(id, event.point)),
-                    (true, false) => Some(Focus::MoveElement(id, event.point)),
-                    (false, true) => None,
-                    (false, false) => Some(pos.loose_ne(event.point, Self::ELEMENT_BB)
-                        .choose(Focus::HoverElement(id), Focus::HoverPlane))
-                }.map(|x| self.set_focus(x));
-                None
-            }
+            Focus::HoverElement(id) => if event.left {
+                Focus::MoveElement(id, event.point)
+            } else if !Self::in_block(unsafe{pattern.get_unchecked(id)}, offset, layer) {
+                Focus::HoverPlane
+            } else {
+                return None
+            }.pipe(|x| {self.set_focus(x); None}),
 
             Focus::MovePlane(ref mut last_x) => if event.left {
                 event.point.x -= self.offset.x;
@@ -416,141 +345,46 @@ impl EditorPlaneHandler {
             }.pipe(|_| {self.redraw = true; None}),
 
             Focus::MoveElement(id, ref mut point) => if event.left {
-                *unsafe{self.positions.get_unchecked_mut(id)} += event.point - *point;
+                let block = unsafe{pattern.get_unchecked_mut(id)};
+                block.offset += Beats::from(event.point.x - point.x) / rect.width() * Self::SCALE.width();
+                block.layer = (block.layer as f32
+                    + (event.point.y - point.y) as f32 / rect.height() as f32 * Self::SCALE.height() as f32)
+                    as i32;
                 *point = event.point;
                 None
             } else {
                 self.focus = Focus::HoverElement(id);
                 self.selected_id = (self.selected_id != Some(id)).then_some(id);
                 Some((ParamId::Select(self.selected_id), R64::INFINITY))
-            }.tee(|_| self.redraw = true),
-
-            Focus::ConnectElement(id, ref mut point) => {
-                self.redraw = true;
-                *point = event.point;
-                match (event.left, self.id_by_pos(event.point).filter(|x| *x != id)) {
-                    (true, None) => (),
-                    (true, Some(id2)) =>
-                        self.focus = Focus::HoverElementConnecting(id, id2),
-                    (false, None) =>
-                        self.focus = Focus::HoverPlane,
-                    (false, Some(id2)) => {
-                        self.focus = Focus::HoverElement(id2);
-                        self.selected_id = Some(id2);
-                        return Some((ParamId::Connect(id, id2), R64::INFINITY))
-                    }
-                }
-                None
-            }
+            }.tee(|_| self.redraw = true)
         }
     }
 
-    pub fn poll(&mut self, elements: &[SoundGen], conns: &[Vec<usize>], hint_handler: &HintHandler) -> JsResult<()> {
-        if !self.redraw.take() {return Ok(())}
-        js_assert!(self.positions.len() == elements.len())?;
-        let canvas = self.canvas.cast::<HtmlCanvasElement>().to_js_result(loc!())?;
-        let change_hint = if self.last_focus != discriminant(&self.focus) {
+    pub fn poll(&mut self, pattern: &[PatternBlock], hint_handler: &HintHandler) -> JsResult<()> {
+        let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
+        let (w, h, ctx) = if discriminant(&self.focus) != self.last_focus {
             let body = document().body().to_js_result(loc!())?;
-            canvas.set_width(body.client_width() as u32);
-            canvas.set_height(body.client_height() as u32);
+            let (w, h) = (body.client_width(), body.client_height());
             let ctx = canvas.get_2d_context(loc!())?;
-            ctx.set_text_align("middle");
-            ctx.set_text_baseline("top");
-            ctx.set_fill_style(&Self::BG_STYLE.into());
-            ctx.set_stroke_style(&Self::FG_STYLE.into());
+            canvas.set_width(w as u32);
+            canvas.set_height(h as u32);
             ctx.set_line_width(3.0);
-            ctx.set_font(Self::FONT);
-            self.last_focus = discriminant(&self.focus);
-            true
-        } else {false};
+            (w as f64, h as f64, ctx)
+        } else {
+            (canvas.width() as f64, canvas.height() as f64, canvas.get_2d_context(loc!())?)
+        };
 
-        let ctx = canvas.get_2d_context(loc!())?;
-        let (w, h) = (canvas.width() as f64, canvas.height() as f64);
+        ctx.set_stroke_style(&Self::FG_STYLE.into());
         ctx.set_fill_style(&Self::BG_STYLE.into());
         ctx.fill_rect(0.0, 0.0, w, h);
         ctx.set_fill_style(&Self::FG_STYLE.into());
-        ctx.begin_path();
-        for (&(mut pos), conns) in self.positions.iter().zip(conns) {
-            pos -= self.offset;
-            Rect::center(pos, Self::ELEMENT_BB).draw(&ctx);
-            let src = pos + Point{x: Self::ELEMENT_BB.x, y: 0};
-            for &dst_id in conns {
-                ctx.move_to(src.x as f64, src.y as f64);
-                let dst = unsafe{*self.positions.get_unchecked(dst_id)}
-                    - self.offset - Point{x: Self::ELEMENT_BB.x, y: 0};
-                ctx.line_to(dst.x as f64, dst.y as f64);
-            }
+
+        let step = w / Self::SCALE.width() as f64;
+        for i in succ(Some(0.0), |x| x.add(step).check_in(..w).ok()) {
+            ctx.move_to(i, 0.0);
+            ctx.line_to(i, h);
         }
-        ctx.stroke();
-
-        #[inline]
-        unsafe fn fmt_element(prefix: &str, elements: &[SoundGen], id: usize, postfix: &str) -> String {
-            format!("{prefix}{} [ID: {id}]{postfix}", elements.get_unchecked(id).name())
-        }
-
-        match self.focus {
-            Focus::None => (),
-            Focus::HoverPlane => if change_hint {
-                hint_handler.set_hint("Editor plane", "").add_loc(loc!())?;
-            }
-
-            Focus::HoverElement(id) => if change_hint {
-                unsafe{hint_handler.set_hint(
-                    &fmt_element("", elements, id, ""),
-                    "Press and hold to start moving")}.add_loc(loc!())?
-            }
-
-            Focus::HoverConnector(id) => if change_hint {
-                unsafe{hint_handler.set_hint(
-                    &fmt_element("", elements, id, ""),
-                    "Press and hold to start connecting")}.add_loc(loc!())?
-            }
-
-            Focus::HoverElementConnecting(src_id, dst_id) => {
-                if change_hint {
-                    unsafe{hint_handler.set_hint(
-                        &fmt_element("", elements, src_id, ": connecting"),
-                        &fmt_element("Release to connect to ", elements, dst_id, "")
-                    )}.add_loc(loc!())?
-                }
-                ctx.set_line_dash(&self.dotted_line).add_loc(loc!())?;
-                let src = unsafe{*self.positions.get_unchecked(src_id)}
-                    - self.offset + Point{x: Self::ELEMENT_BB.x, y: 0};
-                ctx.move_to(src.x as f64, src.y as f64);
-                let dst = unsafe{*self.positions.get_unchecked(dst_id)}
-                    - self.offset - Point{x: Self::ELEMENT_BB.x, y: 0};
-                ctx.line_to(dst.x as f64, dst.y as f64);
-                ctx.stroke();
-                ctx.set_line_dash(&self.solid_line).add_loc(loc!())?;
-            }
-
-            Focus::MovePlane(_) => if change_hint {
-                hint_handler.set_hint("Editor plane: moving", "").add_loc(loc!())?;
-            }
-
-            Focus::MoveElement(id, _) => if change_hint {
-                unsafe{hint_handler.set_hint(
-                    &fmt_element("", elements, id, ": moving"),
-                    "")}.add_loc(loc!())?
-            }
-
-            Focus::ConnectElement(id, point) => {
-                if change_hint {
-                    unsafe{hint_handler.set_hint(
-                        &fmt_element("", elements, id, ": connecting"),
-                        "Release to cancel")}.add_loc(loc!())?
-                }
-                ctx.set_line_dash(&self.dotted_line).add_loc(loc!())?;
-                let src = unsafe{*self.positions.get_unchecked(id)}
-                    - self.offset + Point{x: Self::ELEMENT_BB.x, y: 0};
-                ctx.move_to(src.x as f64, src.y as f64);
-                let dst = point - self.offset;
-                ctx.line_to(dst.x as f64, dst.y as f64);
-                ctx.stroke();
-                ctx.set_line_dash(&self.solid_line).add_loc(loc!())?;
-            }
-        };
-        Ok(())
+        Ok(ctx.stroke())
     }
 }
 

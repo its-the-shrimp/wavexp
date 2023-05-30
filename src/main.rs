@@ -2,6 +2,9 @@
 #![feature(never_type)]
 #![feature(unwrap_infallible)]
 #![feature(const_slice_index)]
+#![feature(const_float_classify)]
+#![feature(const_trait_impl)]
+#![feature(const_mut_refs)]
 #![allow(clippy::unit_arg)]
 #![allow(clippy::option_map_unit_fn)]
 
@@ -12,16 +15,15 @@ mod sound;
 mod sequencer;
 use std::{
     fmt::Debug,
-    rc::Rc};
-use input::{ParamId, Button};
-use visual::{GraphHandler, SoundVisualiser, EditorPlaneHandler, CanvasEvent, HintHandler};
+    rc::Rc, cell::RefMut};
+use input::{ParamId, Button, Slider};
+use visual::{SoundVisualiser, EditorPlaneHandler, CanvasEvent, HintHandler};
 use sequencer::Sequencer;
-use sound::{Sound, Note};
+use sound::{Note};
 use utils::{
-    JsResultUtils, OptionExt, JsResult,
-    Point,
+    JsResultUtils, JsResult,
     MaybeCell, WasmCell,
-    document, window, R64, Pipe};
+    window, R64, Pipe};
 use web_sys::{
     console::warn_1,
     HtmlCanvasElement, PointerEvent};
@@ -39,7 +41,7 @@ use yew::{
 /// responsible for playing sounds and frame-by-frame animations
 struct Player {
     pub sound_visualiser: SoundVisualiser,
-    pub graph_handler: GraphHandler,
+    //pub graph_handler: GraphHandler,
     pub editor_plane_handler: EditorPlaneHandler,
     pub sequencer: Sequencer,
     pub hint_handler: Rc<HintHandler>,
@@ -49,41 +51,41 @@ struct Player {
 static GLOBAL_PLAYER: WasmCell<MaybeCell<Player>> = WasmCell::new(MaybeCell::new());
 
 impl Player {
-    fn init_global() -> JsResult<()> {
+    fn init_global() -> JsResult<RefMut<'static, Self>> {
         fn render(time: f64) {
             let Ok(time) = R64::try_from(time).map_err(|x| x.to_string().into()).report_err(loc!())
                 else {return};
             let Ok(mut handle) = GLOBAL_PLAYER.get_mut().report_err(loc!())
                 else {return};
-            let Player{ref mut editor_plane_handler, ref mut graph_handler, ref mut sound_visualiser,
+            let Player{ref mut editor_plane_handler, ref mut sound_visualiser,
                 ref mut sequencer, ref mut hint_handler, ref js_callback} = *handle;
 
             _ = sequencer.poll(time).report_err(loc!());
             _ = sound_visualiser.poll(sequencer.visualiser()).report_err(loc!());
-            let sel = editor_plane_handler.selected_element_id()
+            /*let sel = editor_plane_handler.selected_element_id()
                 .map(|x| unsafe{sequencer.elements_mut().get_unchecked_mut(x)});
-            _ = graph_handler.poll(sel).report_err(loc!());
+            _ = graph_handler.poll(sel).report_err(loc!());*/
             _ = editor_plane_handler
-                .poll(sequencer.elements(), sequencer.connections(), hint_handler).report_err(loc!());
+                .poll(sequencer.pattern(), hint_handler).report_err(loc!());
             _ = window().request_animation_frame(js_callback).report_err(loc!());
         }
 
-        let js_callback = &GLOBAL_PLAYER.set(Self{
-            graph_handler: GraphHandler::new().add_loc(loc!())?,
+        let res = GLOBAL_PLAYER.set(Self{
+            //graph_handler: GraphHandler::new().add_loc(loc!())?,
             sound_visualiser: SoundVisualiser::new().add_loc(loc!())?,
             editor_plane_handler: EditorPlaneHandler::new().add_loc(loc!())?,
             sequencer: Sequencer::new().add_loc(loc!())?,
             hint_handler: Rc::new(HintHandler::default()),
             js_callback: JsClosure::<dyn Fn(f64)>::new(render).into_js_value().unchecked_into()
-        }).add_loc(loc!())?.js_callback;
+        }).add_loc(loc!())?;
 
-        window().request_animation_frame(js_callback).add_loc(loc!()).map(|_|())
+        window().request_animation_frame(&res.js_callback).add_loc(loc!()).map(|_| res)
     }
 
     pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
-        Ok(self.sequencer.set_param(id, value).add_loc(loc!())?
-            | self.editor_plane_handler.set_param(id, value).add_loc(loc!())?
-            | self.graph_handler.set_param(id, value))
+        self.sequencer.set_param(id, value).add_loc(loc!())
+            //| self.editor_plane_handler.set_param(id, value).add_loc(loc!())?
+            //| self.graph_handler.set_param(id, value))
     }
 }
 
@@ -124,9 +126,6 @@ impl Component for Main {
     fn create(ctx: &Context<Self>) -> Self {
         *unsafe{&mut MAINCMD_SENDER} = Some(ctx.link().callback(|msg| msg));
         Player::init_global().add_loc(loc!()).unwrap_throw(loc!());
-        ctx.link().send_message(ParamId::Add(SoundGen::new_wave, Point{x: 350, y: 441}));
-        ctx.link().send_message(ParamId::Add(SoundGen::new_envelope, Point{x: 550, y: 441}));
-        ctx.link().send_message(ParamId::Add(SoundGen::new_pattern, Point{x: 450, y: 278}));
         Self{error_count: 0}
     }
 
@@ -140,56 +139,58 @@ impl Component for Main {
         let err = js_try!{type = !:
             return match msg {
                 MainCmd::Hover(e) => {
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                    if let Some((id, value)) = player.editor_plane_handler.set_event(Some(e)) {
-                        player.set_param(id, value).add_loc(loc!())?;
-                    }
-                    false
+                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                    let Player{ref mut editor_plane_handler, ref mut sequencer, ..} = *player;
+                    if let Some((id, value)) = editor_plane_handler.set_event(Some(e), sequencer.pattern_mut()) {
+                        player.set_param(id, value).add_loc(loc!())?
+                    } else {false}
                 }
 
-                MainCmd::HoverGraph(e) => {
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                MainCmd::HoverGraph(_) => {
+                    /*let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                    player.graph_handler.set_event(e);
+                    player.graph_handler.set_event(e);*/
                     false
                 }
 
                 MainCmd::Focus(e) => {
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     e.target_unchecked_into::<HtmlCanvasElement>()
                         .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
                     let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                    if let Some((id, value)) = player.editor_plane_handler.set_event(Some(e)) {
+                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                    let Player{ref mut editor_plane_handler, ref mut sequencer, ..} = *player;
+                    if let Some((id, value)) = editor_plane_handler.set_event(Some(e), sequencer.pattern_mut()) {
                         player.set_param(id, value).add_loc(loc!())?
                     } else {false}
                 }
 
                 MainCmd::Unfocus(e) => {
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     e.target_unchecked_into::<HtmlCanvasElement>()
                         .release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
                     let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                    if let Some((id, value)) = player.editor_plane_handler.set_event(Some(e)) {
+                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                    let Player{ref mut editor_plane_handler, ref mut sequencer, ..} = *player;
+                    if let Some((id, value)) = editor_plane_handler.set_event(Some(e), sequencer.pattern_mut()) {
                         player.set_param(id, value).add_loc(loc!())?
                     } else {false}
                 }
 
-                MainCmd::FocusGraph(e) => {
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                MainCmd::FocusGraph(_) => {
+                    /*let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     e.target_unchecked_into::<HtmlCanvasElement>()
                         .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
                     let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                    player.graph_handler.set_event(e);
+                    player.graph_handler.set_event(e);*/
                     false
                 }
 
-                MainCmd::UnfocusGraph(e) => {
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                MainCmd::UnfocusGraph(_) => {
+                    /*let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     e.target_unchecked_into::<HtmlCanvasElement>()
                         .release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
                     let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                    player.graph_handler.set_event(e);
+                    player.graph_handler.set_event(e);*/
                     false
                 }
 
@@ -266,11 +267,24 @@ impl Component for Main {
                         <br/>
                         <span id="aux-hint" ref={player.hint_handler.aux_bar().clone()}/>
                     </div>
-                    {comp_id.map(|x| unsafe{player.sequencer.elements().get_unchecked(x).params(x, hint)})}
-                    <canvas ref={player.graph_handler.canvas().clone()} class="blue-border" height=0
+                    if let Some(comp_id) = comp_id {
+                        {unsafe{player.sequencer.pattern().get_unchecked(comp_id).sound.params(comp_id, hint)}}
+                    } else {
+                        <div id="inputs">
+                            <Slider {hint} key="tmp" name="Tempo"
+                                id={ParamId::Bpm}
+                                min={r64![30.0]} max={r64![240.0]}
+                                postfix="BPM"
+                                initial={player.sequencer.bps() * r64![60.0]}/>
+                            <Slider {hint} key="gain" name="Master gain level"
+                                id={ParamId::MasterGain}
+                                initial={R64::from(player.sequencer.gain())}/>
+                        </div>
+                    }
+                    /*<canvas ref={player.graph_handler.canvas().clone()} class="blue-border" height=0
                     onpointerdown={ctx.link().callback(MainCmd::FocusGraph)}
                     onpointerup={ctx.link().callback(MainCmd::UnfocusGraph)}
-                    onpointermove={ctx.link().callback(MainCmd::HoverGraph)}/>
+                    onpointermove={ctx.link().callback(MainCmd::HoverGraph)}/>*/
                     if let Some(comp_id) = comp_id {
                         <div id="general-ctrl" class="dark-bg">
                             <Button {hint}

@@ -726,35 +726,42 @@ pub fn total_clamp<T: Ord>(x: T, mut min: T, mut max: T) -> T {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {pub x: i32, pub y: i32}
 
-impl From<Point> for [i32; 2] {
+impl const From<Point> for [i32; 2] {
     #[inline] fn from(value: Point) -> Self {
         [value.x, value.y]
     }
 }
 
-impl Add for Point {
+impl const Add for Point {
     type Output = Self;
     #[inline] fn add(self, rhs: Self) -> Self::Output {
         Self{x: self.x + rhs.x, y: self.y + rhs.y}
     }
 }
 
-impl AddAssign for Point {
+impl const AddAssign for Point {
     #[inline] fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs
     }
 }
 
-impl Sub for Point {
+impl const Sub for Point {
     type Output = Self;
     #[inline] fn sub(self, rhs: Self) -> Self::Output {
         Self{x: self.x - rhs.x, y: self.y - rhs.y}
     }
 }
 
-impl SubAssign for Point {
+impl const SubAssign for Point {
     #[inline] fn sub_assign(&mut self, rhs: Self) {
         *self = *self - rhs
+    }
+}
+
+impl const Neg for Point {
+    type Output = Self;
+    #[inline] fn neg(self) -> Self::Output {
+        Self{x: -self.x, y: -self.y}
     }
 }
 
@@ -762,13 +769,6 @@ impl LooseEq for Point {
     #[inline] fn loose_eq(&self, value: Self, off: Self) -> bool {
         self.x.loose_eq(value.x, off.x)
             && self.y.loose_eq(value.y, off.y)
-    }
-}
-
-impl Neg for Point {
-    type Output = Self;
-    fn neg(self) -> Self::Output {
-        Self{x: -self.x, y: -self.y}
     }
 }
 
@@ -844,37 +844,44 @@ impl HitZone for Rect {
     }
 }
 
+impl From<Point> for Rect {
+    /// same as `Rect::zero`
+    #[inline] fn from(value: Point) -> Self {
+        Rect::zero(value)
+    }
+}
+
 impl Rect {
-    #[inline] pub fn new(top_left: Point, bottom_right: Point) -> Self {
+    #[inline] pub const fn new(top_left: Point, bottom_right: Point) -> Self {
         Self(top_left, bottom_right)
     }
 
-    #[inline] pub fn zero(bottom_right: Point) -> Self {
+    #[inline] pub const fn zero(bottom_right: Point) -> Self {
         Self(Point::ZERO, bottom_right)
     }
 
-    #[inline] pub fn center(center: Point, half_sides: Point) -> Self {
+    #[inline] pub const fn center(center: Point, half_sides: Point) -> Self {
         Self(center - half_sides, center + half_sides)
     }
 
-    #[inline] pub fn zero_center(center: Point) -> Self {
+    #[inline] pub const fn zero_center(center: Point) -> Self {
         Self(Point::ZERO, center + center)
     }
 
-    #[inline] pub fn square(src: Point, side: i32) -> Self {
+    #[inline] pub const fn square(src: Point, side: i32) -> Self {
         Self(src, src + Point{x: side, y: side})
     }
 
-    #[inline] pub fn square_center(center: Point, half_side: i32) -> Self {
+    #[inline] pub const fn square_center(center: Point, half_side: i32) -> Self {
         let half_sides = Point{x: half_side, y: half_side};
         Self(center - half_sides, center + half_sides)
     }
 
-    #[inline] pub fn square_zero(side: i32) -> Self {
+    #[inline] pub const fn square_zero(side: i32) -> Self {
         Self(Point::ZERO, Point{x: side, y: side})
     }
 
-    #[inline] pub fn square_zero_center(half_side: i32) -> Self {
+    #[inline] pub const fn square_zero_center(half_side: i32) -> Self {
         let side = half_side * 2;
         Self(Point::ZERO, Point{x: side, y: side})
     }
@@ -1219,6 +1226,11 @@ macro_rules! real_impl {
             pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
 
             #[inline]
+            pub const fn new_or(default: Self, x: $float) -> Self {
+                if x.is_nan() {default} else {Self(x)}
+            }
+
+            #[inline]
             pub fn rem_euclid(self, rhs: Self) -> Option<Self> {
                 let res = self.0.rem_euclid(rhs.0);
                 if res.is_nan() {return None}
@@ -1242,13 +1254,15 @@ macro_rules! real_impl {
             #[inline]
             pub fn ceil(self) -> Self {Self(self.0.ceil())}
 
-            #[inline]
-            pub fn floor_to(self, step: Self) -> Self {
+            #[inline] pub fn floor_to(self, step: Self) -> Self {
                 match Self::try_from(self.0 - self.0.rem_euclid(*step)) {
                     Ok(x) => x,
                     Err(_) => if step.is_infinite() {step} else {self}
                 }
             }
+
+            #[inline]
+            pub fn is_finite(&self) -> bool {self.0.is_finite()}
         }
     };
 }

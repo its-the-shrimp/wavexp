@@ -1,49 +1,37 @@
 use std::{
-    ops::{Range, Add, Sub, Neg},
-    fmt::{self, Display, Formatter},
-    cmp::{Ordering, Reverse}, iter::successors, rc::Rc};
+    ops::{Add, Sub, Neg},
+    fmt::{self, Display, Formatter}, rc::Rc};
 use web_sys::{
-    AudioNode, AnalyserNode,
+    AudioNode,
     AudioContext,
-    GainNode, GainOptions,
-    OscillatorNode, OscillatorOptions, OscillatorType,
-    CanvasRenderingContext2d,
-    DynamicsCompressorNode, DynamicsCompressorOptions};
+    OscillatorNode};
 use yew::{html, Html};
 use crate::{
     utils::{
         JsResult,
-        Point,
         JsResultUtils,
-        BoolExt,
         SliceExt,
-        VecExt,
-        js_error,
-        Pipe,
-        OptionExt,
-        ResultToJsResult,
         R64, R32,
-        SaturatingInto,
-        RangeExt, Check, total_clamp, Take},
-    input::{Switch, Slider, Button, ParamId},
+        SaturatingInto},
+    input::{Switch, ParamId, Slider},
     loc,
-    r32, r64, visual::{CanvasEvent, HintHandler}};
+    r32, r64, visual::HintHandler};
 
 pub type MSecs = R64;
 pub type Secs = R64;
 pub type Beats = R64;
 
 pub trait FromBeats {
-    fn to_msecs(self, bpm: Self) -> MSecs;
-    fn to_secs(self, bpm: Self) -> Secs;
+    fn to_msecs(self, bps: Self) -> MSecs;
+    fn to_secs(self, bps: Self) -> Secs;
 }
 
 impl FromBeats for Beats {
     #[inline]
-    fn to_secs(self, bpm: Self) -> Secs {r64![60.0] / bpm * self}
+    fn to_secs(self, bps: Self) -> Secs {self / bps}
 
     #[inline]
-    fn to_msecs(self, bpm: Self) -> MSecs {r64![60000.0] / bpm * self}
+    fn to_msecs(self, bps: Self) -> MSecs {self / bps * r64![1000.0]}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord)]
@@ -225,19 +213,63 @@ impl Pitch {
 }
 
 pub enum Sound {
-    Note(Note, Beats)
+    Note{note: Note, len: Beats, gen: OscillatorNode}
 }
 
 impl Sound {
-    #[inline] fn new_note() -> Self {
-        Self::Note(Note::MAX, Beats::ZERO)
+    #[inline] fn new_note(ctx: &AudioContext) -> JsResult<Self> {
+        let gen = OscillatorNode::new(ctx).add_loc(loc!())?;
+        gen.start().add_loc(loc!())?;
+        Ok(Self::Note{note: Note::MAX, len: Beats::ZERO,
+            gen})
     }
 
-    #[inline] pub fn poll(&mut self, time: Secs) -> JsResult<Secs> {
-        todo!()
+    #[inline] pub fn poll(&mut self, time: Secs, plug: &AudioNode, bps: Beats) -> JsResult<Secs> {
+        Ok(match self {
+            Sound::Note{note, len, gen} => if len.is_sign_positive() {
+                gen.connect_with_audio_node(plug).add_loc(loc!())?;
+                gen.frequency().set_value(*note.freq());
+                let res = len.to_secs(bps);
+                *len = -*len;
+                res
+            } else {
+                self.stop(time).add_loc(loc!())?;
+                Secs::INFINITY
+            }
+        })
     }
 
     #[inline] pub fn stop(&mut self, time: Secs) -> JsResult<()> {
-        todo!()
+        Ok(match self {
+            Sound::Note{gen, ..} => {
+                gen.frequency()
+                    .exponential_ramp_to_value_at_time(f32::MIN_POSITIVE, *time + 0.2).add_loc(loc!())?;
+            }
+        })
+    }
+
+    #[inline] pub fn len(&self) -> Beats {
+        match self {
+            &Sound::Note{len, ..} => len
+        }
+    }
+
+    #[inline] pub fn params(&self, id: usize, hint: &Rc<HintHandler>) -> Html {
+        match self {
+            &Sound::Note{note, len, ..} => html!{<div id="inputs">
+                <Switch {hint}
+                key="note"
+                id={ParamId::Note(id)}
+                options={Note::NAMES.to_vec()}
+                name="Note"
+                initial={note.index()}/>
+                <Slider {hint}
+                key="note-len"
+                id={ParamId::NoteLength(id)}
+                max={r64![100.0]}
+                name="Note Length" postfix="Beats"
+                initial={len}/>
+            </div>}
+        }
     }
 }

@@ -37,19 +37,10 @@ pub enum ParamId {
     Disconnect(usize),
     Add(fn() -> Sound, Point),
     Remove(usize),
-    ToggleWavePitchType(usize, usize),
-    WavePitch(usize, usize),
-    WaveType(usize, usize),
-    RemoveWave(usize, usize),
-    AddWave(usize),
-    EnvelopeAttack(usize),
-    EnvelopeDecay(usize),
-    EnvelopSustain(usize),
-    EnvelopeRelease(usize),
-    Bpm(usize),
-    DisplayInterval(usize),
-    SnapStep(usize),
-    MasterGain(usize),
+    Note(usize),
+    NoteLength(usize),
+    Bpm,
+    MasterGain,
 }
 
 impl ParamId {
@@ -62,19 +53,10 @@ impl ParamId {
             ParamId::Disconnect(_)              => None,
             ParamId::Add(_, _)                  => None,
             ParamId::Remove(_)                  => None,
-            ParamId::ToggleWavePitchType(id, _) => Some(*id),
-            ParamId::WavePitch(id, _)           => Some(*id),
-            ParamId::WaveType(id, _)            => Some(*id),
-            ParamId::RemoveWave(id, _)          => Some(*id),
-            ParamId::AddWave(id)                => Some(*id),
-            ParamId::EnvelopeAttack(id)         => Some(*id),
-            ParamId::EnvelopeDecay(id)          => Some(*id),
-            ParamId::EnvelopSustain(id)         => Some(*id),
-            ParamId::EnvelopeRelease(id)        => Some(*id),
-            ParamId::Bpm(id)                    => Some(*id),
-            ParamId::DisplayInterval(id)        => Some(*id),
-            ParamId::SnapStep(id)               => Some(*id),
-            ParamId::MasterGain(id)             => Some(*id)
+            ParamId::Bpm                        => None,
+            ParamId::MasterGain                 => None,
+            ParamId::Note(id)                   => Some(*id),
+            ParamId::NoteLength(id)             => Some(*id)
         }
     }
 }
