@@ -212,11 +212,20 @@ impl Pitch {
     }
 }
 
+pub struct SoundTypeDecl {
+    pub name: &'static str,
+    pub init: fn(&AudioContext) -> JsResult<Sound>
+}
+
 pub enum Sound {
     Note{note: Note, len: Beats, gen: OscillatorNode}
 }
 
 impl Sound {
+    pub const TYPES: [SoundTypeDecl; 1] = [
+        SoundTypeDecl{name: "Note", init: Self::new_note}
+    ];
+
     #[inline] fn new_note(ctx: &AudioContext) -> JsResult<Self> {
         let gen = OscillatorNode::new(ctx).add_loc(loc!())?;
         gen.start().add_loc(loc!())?;

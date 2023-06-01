@@ -14,7 +14,8 @@
 				font-family: consolas;
 				display: flex;
 				z-index: 1;
-				height: 100%}
+				height: 100%
+			}
 			.dark-bg {background-color: #181818}
 			.light-bg {background-color: #232328}
 			.blue-border {border: 3px solid #0069E1}
@@ -23,23 +24,29 @@
 				position: fixed;
 				left: 0;
 				top: 0;
+				bottom: 10em;
 				padding: 1em;
+				width: 20%;
 				box-sizing: border-box;
 				display: flex;
 				justify-content: flex-start;
 				overflow-y: scroll;
 				gap: 1em;
-				flex-direction: column}
-			#ctrl-panel:has(#general-ctrl) {bottom: 10em}
+				flex-direction: column
+			}
 			#hint {
+				position: sticky;
+				top: 0;
 				flex: none;
 				height: 4em;
 				min-height: 1em;
-				user-select: none}
+				user-select: none
+			}
 			#aux-hint {font-size: small}
 			#inputs {
 				display: grid;
-				grid-template-columns: repeat(2, 1fr)}
+				grid-template-columns: repeat(2, 1fr)
+			}
 			#io-panel {
 				position: fixed;
 				bottom: 0;
@@ -47,69 +54,126 @@
 				left: 0;
 				height: 10em;
 				background-color: #181818;
-				display: flex}
+				display: flex
+			}
 			#piano {
 				flex-grow: 3;
-				margin: 1em}
+				margin: 1em
+			}
 			#sound-visualiser {margin: 1em}
 			.input {
 				width: 6em;
-				height: 6em}
+				height: 6em
+			}
 			.button {
 				font: 1em consolas;
 				color: #0069E1;
-				border: solid 3px transparent}
-			.button:hover {
-				border: solid 3px #0069E1}
+				border: solid 3px transparent
+			}
+			.button:hover { border: solid 3px #0069E1}
 			.button > svg {
 				stroke: #0069E1;
 				stroke-width: 4px;
 				fill: none;
-				height: 100%}
-			.button:hover > svg {
-				fill: #0069E1}
+				height: 100%
+			}
+			.button:hover > svg {fill: #0069E1}
 			.button > div {
 				margin-top: 12.5%;
-				user-select: none}
+				user-select: none
+			}
 			.piano-note {
 				position: relative;
 				stroke: #0069E1;
 				stroke-width: 3;
-				fill: #232328}
+				fill: #232328
+			}
 			.piano-note:hover {
 				fill: #0069E1;
-				stroke: #0069E1}
+				stroke: #0069E1
+			}
 			.sharp-note {
 				fill: #0069E1;
-				stroke: #232328}
+				stroke: #232328
+			}
 			.component {
 				fill: #232328;
 				stroke: #0069E1;
-				stroke-width: 2}
+				stroke-width: 2
+			}
 			.add-wave-button {
 				grid-column: 1 / -1;
-				width: auto}
+				width: auto
+			}
 			#error-count {
 				position: fixed;
 				left: 0;
 				bottom: 0;
 				padding: 1em;
-				color: red}
+				color: red
+			}
 			#general-ctrl {
 				display: flex;
-				margin-top: auto}
+				margin-top: auto
+			}
 			#general-ctrl > * {
 				width: auto;
 				height: 4em;
-				flex: 1}
+				flex: 1
+			}
 			#general-ctrl > .button:nth-child(2):hover {border-color: #E10000}
 			#general-ctrl > .button:nth-child(2):hover > svg {
 				fill: #E10000;
-				stroke: #E10000}
+				stroke: #E10000
+			}
 			#wave-options {
 				display: flex;
-				flex-direction: column}
-			#wave-options > .button {height: auto; flex: 1}
+				flex-direction: column
+			}
+			#wave-options > .button {
+				height: auto;
+				flex: 1
+			}
+			#plane {
+				position: fixed;
+				top: 0; bottom: 0;
+				left: 0; right: 0
+			}
+			#tab-list {
+				display: flex;
+				height: 3em;
+				justify-content: space-evenly
+			}
+			#tab-list > * {
+				flex: 1;
+				border-inline: none;
+				border: 3px solid transparent;
+				border-bottom: 3px solid #0069E1
+			}
+			#tab-list div:not(#selected-tab):hover {
+				border-style: dashed;
+				border-color: #0069E1;
+				border-bottom-color: #0069E1
+			}
+			#selected-tab {
+				border-color: #0069E1;
+				border-bottom-color: transparent
+			}
+			#block-add-menu {
+				display: flex;
+				flex-direction: column;
+				justify-content: start
+			}
+			#block-add-menu div {
+				flex: 1;
+				border: 3px solid transparent;
+				border-top-color: #0069E1;
+				border-bottom-color: #0069E1
+			}
+			#block-add-menu div:hover {
+				border-style: dashed;
+				border-color: #0069E1
+			}
 		</style>
 	</head>
 	<body>

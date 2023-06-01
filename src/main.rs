@@ -38,6 +38,8 @@ use yew::{
     Component,
     Context, Html, html, AttrValue, TargetCast};
 
+use crate::sound::Sound;
+
 /// responsible for playing sounds and frame-by-frame animations
 struct Player {
     pub sound_visualiser: SoundVisualiser,
@@ -91,6 +93,7 @@ impl Player {
 
 pub struct Main {
     error_count: usize,
+    editor_tab_id: usize
 }
 
 #[derive(Debug)]
@@ -104,7 +107,8 @@ pub enum MainCmd {
     SetParam(ParamId, R64),
     ReportError(JsValue),
     SetHint(AttrValue, AttrValue),
-    ClearHint
+    ClearHint,
+    SetTab(usize),
 }
 
 impl From<ParamId> for MainCmd {
@@ -126,7 +130,7 @@ impl Component for Main {
     fn create(ctx: &Context<Self>) -> Self {
         *unsafe{&mut MAINCMD_SENDER} = Some(ctx.link().callback(|msg| msg));
         Player::init_global().add_loc(loc!()).unwrap_throw(loc!());
-        Self{error_count: 0}
+        Self{error_count: 0, editor_tab_id: 0}
     }
 
     fn update(&mut self, _: &Context<Self>, msg: Self::Message) -> bool {
@@ -206,6 +210,11 @@ impl Component for Main {
                     GLOBAL_PLAYER.get_mut().add_loc(loc!())?
                         .set_param(id, value).add_loc(loc!())?,
 
+                MainCmd::SetTab(id) => {
+                    self.editor_tab_id = id;
+                    true
+                }
+
                 MainCmd::ReportError(err) => return on_new_error(self, err)
             }
         };
@@ -255,9 +264,8 @@ impl Component for Main {
             let comp_id = player.editor_plane_handler.selected_element_id();
             let hint = &player.hint_handler;
 
-            // TODO: stop hint bar from stretching out because of a long hint
             html! {<>
-                <canvas ref={player.editor_plane_handler.canvas().clone()} width="100%" height="100%"
+                <canvas ref={player.editor_plane_handler.canvas().clone()} id="plane"
                 onpointerdown={ctx.link().callback(MainCmd::Focus)}
                 onpointerup={ctx.link().callback(MainCmd::Unfocus)}
                 onpointermove={ctx.link().callback(MainCmd::Hover)}/>
@@ -270,16 +278,36 @@ impl Component for Main {
                     if let Some(comp_id) = comp_id {
                         {unsafe{player.sequencer.pattern().get_unchecked(comp_id).sound.params(comp_id, hint)}}
                     } else {
-                        <div id="inputs">
-                            <Slider {hint} key="tmp" name="Tempo"
-                                id={ParamId::Bpm}
-                                min={r64![30.0]} max={r64![240.0]}
-                                postfix="BPM"
-                                initial={player.sequencer.bps() * r64![60.0]}/>
-                            <Slider {hint} key="gain" name="Master gain level"
-                                id={ParamId::MasterGain}
-                                initial={R64::from(player.sequencer.gain())}/>
+                        // TODO: fix tilted edges of the borders of the tab menu
+                        // TODO: add hint setters to all the elements
+                        <div id="tab-list">
+                            <div id={(self.editor_tab_id == 0).then_some("selected-tab")}
+                            onpointerdown={ctx.link().callback(|_| MainCmd::SetTab(0))}>
+                                <p>{"General"}</p>
+                            </div>
+                            <div id={(self.editor_tab_id == 1).then_some("selected-tab")}
+                            onpointerdown={ctx.link().callback(|_| MainCmd::SetTab(1))}>
+                                <p>{"Add Block"}</p>
+                            </div>
                         </div>
+                        if self.editor_tab_id == 0 {
+                            <div id="inputs">
+                                <Slider {hint} key="tmp" name="Tempo"
+                                    id={ParamId::Bpm}
+                                    min={r64![30.0]} max={r64![240.0]}
+                                    postfix="BPM"
+                                    initial={player.sequencer.bps() * r64![60.0]}/>
+                                <Slider {hint} key="gain" name="Master gain level"
+                                    id={ParamId::MasterGain}
+                                    initial={R64::from(player.sequencer.gain())}/>
+                            </div>
+                        } else if self.editor_tab_id == 1 {
+                            <div id="block-add-menu">
+                                {for Sound::TYPES.iter().map(|x| html!{
+                                    <div><p>{x.name}</p></div>
+                                })}
+                            </div>
+                        }
                     }
                     /*<canvas ref={player.graph_handler.canvas().clone()} class="blue-border" height=0
                     onpointerdown={ctx.link().callback(MainCmd::FocusGraph)}
@@ -287,15 +315,6 @@ impl Component for Main {
                     onpointermove={ctx.link().callback(MainCmd::HoverGraph)}/>*/
                     if let Some(comp_id) = comp_id {
                         <div id="general-ctrl" class="dark-bg">
-                            <Button {hint}
-                            id={ParamId::Disconnect(comp_id)}
-                            name={"Disconnect component"}>
-                                <svg viewBox="0 0 100 100">
-                                    <polygon points="10,40 10,60 40,60 30,40"/>
-                                    <polygon points="30,20 60,80 70,80 40,20"/>
-                                    <polygon points="50,40 80,40 80,60 60,60"/>
-                                </svg>
-                            </Button>
                             <Button {hint}
                             id={ParamId::Remove(comp_id)}
                             name={"Remove component"}>
