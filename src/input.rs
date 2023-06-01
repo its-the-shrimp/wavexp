@@ -33,7 +33,6 @@ pub enum Cmd {
 pub enum ParamId {
     Play(Note),
     Select(Option<usize>),
-    Connect(usize, usize),
     Add(fn() -> Sound, Point),
     Remove(usize),
     Note(usize),
@@ -48,7 +47,6 @@ impl ParamId {
         match self {
             ParamId::Play(_)                    => None,
             ParamId::Select(_)                  => None,
-            ParamId::Connect(_, _)              => None,
             ParamId::Add(_, _)                  => None,
             ParamId::Remove(_)                  => None,
             ParamId::Bpm                        => None,
