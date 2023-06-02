@@ -201,6 +201,7 @@ pub trait OptionExt<T> {
     fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T>;
     fn report_err(self, loc: (&str, u32, u32)) -> Self;
     fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
+    fn choose<U>(&self, on_true: U, on_false: U) -> U;
     fn drop(self) -> Option<()>;
 }
 
@@ -246,6 +247,10 @@ impl<T> OptionExt<T> for Option<T> {
 
     #[inline] fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
         match self {Some(x) => f(x), None => U::default()}
+    }
+
+    #[inline] fn choose<U>(&self, on_true: U, on_false: U) -> U {
+        if self.is_some() {on_true} else {on_false}
     }
 
     #[allow(clippy::manual_map)]
@@ -295,6 +300,7 @@ impl<T> JsResultUtils<T> for JsResult<T> {
 pub trait HtmlCanvasExt {
     fn get_2d_context(&self, loc: (&str, u32, u32)) -> JsResult<CanvasRenderingContext2d>;
     fn rect(&self) -> Rect;
+    fn size(&self) -> [u32; 2];
     fn sync(&self);
 }
 
@@ -308,6 +314,8 @@ impl HtmlCanvasExt for HtmlCanvasElement {
     fn rect(&self) -> Rect {
         Rect(Point::ZERO, Point{x: self.width() as i32, y: self.height() as i32})
     }
+
+    fn size(&self) -> [u32; 2] {[self.width(), self.height()]}
 
     fn sync(&self) {
         self.set_height((self.client_height() as f64 / self.client_width() as f64 * self.width() as f64) as u32);
@@ -329,11 +337,16 @@ impl HtmlDocumentExt for HtmlDocument {
 
 pub trait HtmlElementExt {
     fn client_rect(&self) -> Rect;
+    fn client_size(&self) -> [i32; 2];
 }
 
 impl HtmlElementExt for Element {
     fn client_rect(&self) -> Rect {
         Rect(Point::ZERO, Point{x: self.client_width(), y: self.client_height()})
+    }
+
+    fn client_size(&self) -> [i32; 2] {
+        [self.client_width(), self.client_height()]
     }
 }
 

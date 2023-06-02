@@ -39,20 +39,24 @@ pub enum ParamId {
     NoteLength(usize),
     Bpm,
     MasterGain,
+    PlaneScale,
+    SnapStep
 }
 
 impl ParamId {
-    /// returns `Some(id)` when the parameter ID belongs to a specific element
-    pub fn element_id(&self) -> Option<usize> {
+    /// returns `Some(id)` when the parameter ID belongs to a specific sound block
+    pub fn block_id(&self) -> Option<usize> {
         match self {
-            ParamId::Play(_)                    => None,
-            ParamId::Select(_)                  => None,
-            ParamId::Add(_, _)                  => None,
-            ParamId::Remove(_)                  => None,
-            ParamId::Bpm                        => None,
-            ParamId::MasterGain                 => None,
-            ParamId::Note(id)                   => Some(*id),
-            ParamId::NoteLength(id)             => Some(*id)
+            ParamId::Play(_)        => None,
+            ParamId::Select(_)      => None,
+            ParamId::Add(_, _)      => None,
+            ParamId::Remove(_)      => None,
+            ParamId::Bpm            => None,
+            ParamId::MasterGain     => None,
+            ParamId::PlaneScale     => None,
+            ParamId::SnapStep       => None,
+            ParamId::Note(id)       => Some(*id),
+            ParamId::NoteLength(id) => Some(*id)
         }
     }
 }

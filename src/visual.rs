@@ -2,18 +2,18 @@ use std::{
     iter::{Iterator, successors as succ},
     slice::from_raw_parts,
     mem::{Discriminant, discriminant},
-    ops::Add
+    ops::Add, rc::Rc
 };
 use js_sys::Array as JsArray;
 use web_sys::{HtmlCanvasElement, AnalyserNode as JsAnalyserNode, ImageData as JsImageData, MouseEvent as JsMouseEvent, HtmlElement};
 use wasm_bindgen::{Clamped as JsClamped, JsValue};
-use yew::{TargetCast, NodeRef};
+use yew::{TargetCast, NodeRef, html, Html};
 use crate::{
     utils::{Check, SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, R64, HitZone, OptionExt,
         HtmlElementExt, 
-        Pipe, Tee, Rect, document},
-    loc, input::ParamId, sequencer::PatternBlock, sound::Beats
+        Pipe, Tee, Rect, document, Take},
+    loc, input::{ParamId, Slider, Switch}, sequencer::PatternBlock, sound::Beats, r64, js_log
 };
 
 pub struct EveryNth<'a, T> {
@@ -139,8 +139,20 @@ impl SoundVisualiser {
         &self.canvas
     }
 
+    pub fn handle_resize(&mut self) -> JsResult<()> {
+        let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
+        let [w, h] = canvas.client_size().map(|x| x as u32);
+        canvas.set_width(w);
+        canvas.set_height(h);
+        self.width = w;
+        self.height = h;
+        self.in_data.resize(w as usize, 0);
+        self.out_data.resize(w as usize * w as usize, Self::BG);
+        Ok(())
+    }
+
     // TODO: make it actually work
-	pub fn poll(&mut self, input: &JsAnalyserNode) -> JsResult<()> {
+	pub fn poll(&mut self, input: Option<&JsAnalyserNode>) -> JsResult<()> {
 		// TODO: correctly readjust the graph when shrinked in the UI
         let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
         canvas.sync();
@@ -152,21 +164,21 @@ impl SoundVisualiser {
             self.out_data.resize(new_width as usize * new_height as usize, Self::BG);
         }
 
-		let len = self.out_data.len();
-		self.out_data.copy_within(.. len - self.height as usize, self.height as usize);
-
-        input.get_byte_frequency_data(&mut self.in_data);
-
-		for (&src, dst) in self.in_data.iter().zip(self.out_data.every_nth_mut(self.width as usize)) {
-            *dst = unsafe {*self.gradient.get_unchecked(src as usize)};
+        if let Some(input) = input {
+            let len = self.out_data.len();
+            self.out_data.copy_within(.. len - self.height as usize, self.height as usize);
+            input.get_byte_frequency_data(&mut self.in_data);
+            for (&src, dst) in self.in_data.iter().zip(self.out_data.every_nth_mut(self.width as usize)) {
+                *dst = unsafe {*self.gradient.get_unchecked(src as usize)};
+            }
+            let out = JsClamped(unsafe{from_raw_parts(
+                self.out_data.as_ptr().cast::<u8>(),
+                self.out_data.len() * 4)});
+            canvas.get_2d_context(loc!())?.put_image_data(
+                    &JsImageData::new_with_u8_clamped_array(out, self.width).add_loc(loc!())?,
+                    0.0, 0.0).add_loc(loc!())?;
         }
 
-        let out = JsClamped(unsafe{from_raw_parts(
-            self.out_data.as_ptr().cast::<u8>(),
-            self.out_data.len() * 4)});
-        canvas.get_2d_context(loc!())?.put_image_data(
-                &JsImageData::new_with_u8_clamped_array(out, self.width).add_loc(loc!())?,
-                0.0, 0.0).add_loc(loc!())?;
         Ok(())
 	}
 }
@@ -267,23 +279,24 @@ pub struct EditorPlaneHandler {
     redraw: bool,
     solid_line: JsValue,
     dotted_line: JsValue,
+    scale_x: Beats,
+    scale_y: i32,
+    snap_step: R64
 }
 
 impl EditorPlaneHandler {
-    const ELEMENT_BB: Point = Point{x: 16, y: 16};
     const FONT: &str = "20px consolas";
     const BG_STYLE: &str = "#232328";
+    const MG_STYLE: &str = "#333338";
     const FG_STYLE: &str = "#0069E1";
-    // TODO: make customizable
-    /// X is the time interval in beats, Y is the amount of layers
-    const SCALE: Rect = Rect::zero(Point{x: 20, y: 10});
 
     #[inline] pub fn new() -> JsResult<Self> {
         Ok(Self{canvas: NodeRef::default(), selected_id: None,
             offset: Point::ZERO, redraw: true,
             focus: Focus::None, last_focus: discriminant(&Focus::HoverPlane),
             solid_line: JsArray::new().into(),
-            dotted_line: JsArray::of2(&JsValue::from(10.0), &JsValue::from(10.0)).into()})
+            dotted_line: JsArray::of2(&JsValue::from(10.0), &JsValue::from(10.0)).into(),
+            scale_x: r64![20.0], scale_y: 10, snap_step: r64![1.0]})
     }
 
     #[inline] pub fn canvas(&self) -> &NodeRef {
@@ -292,6 +305,45 @@ impl EditorPlaneHandler {
     
     #[inline] pub fn selected_element_id(&self) -> Option<usize> {
         self.selected_id
+    }
+
+    pub fn params(&self, hint: &Rc<HintHandler>) -> Html {
+        html!{
+            <div id="plane-settings" onpointerover={hint.setter("Editor plane settings", "")}>
+                <Switch {hint} key="snap" name="Interval for blocks to snap to"
+                    id={ParamId::SnapStep}
+                    options={vec!["None", "1", "1/2", "1/4", "1/8"]}
+                    initial={match *self.snap_step {
+                        x if x == 1.0   => 1,
+                        x if x == 0.5   => 2,
+                        x if x == 0.25  => 3,
+                        x if x == 0.125 => 4,
+                        _ => 0
+                    }}/>
+            </div>
+        }
+    }
+
+    /// the returned `bool` indicates whether the selected block's editor window should be
+    /// rerendered
+    pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
+        if let ParamId::SnapStep = id {
+            self.snap_step = *[r64![0.0], r64![1.0], r64![0.5], r64![0.25], r64![0.125]]
+                .get_wrapping(*value as usize);
+        }
+        Ok(false)
+    }
+
+    pub fn handle_resize(&mut self) -> JsResult<()> {
+        let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
+        let body = document().body().to_js_result(loc!())?;
+        let [w, h] = body.client_size();
+        let ctx = canvas.get_2d_context(loc!())?;
+        canvas.set_width(w as u32);
+        canvas.set_height(h as u32);
+        ctx.set_line_width(3.0);
+        self.redraw = true;
+        Ok(())
     }
 
     #[inline] fn in_block(block: &PatternBlock, offset: Beats, layer: i32) -> bool {
@@ -315,8 +367,9 @@ impl EditorPlaneHandler {
             return None
         };
         event.point += self.offset;
-        let rect = self.canvas.cast::<HtmlCanvasElement>()?.rect();
-        let (offset, layer) = event.point.normalise(rect, Self::SCALE).pipe(|x| (Beats::from(x.x), x.y));
+        let [w, h] = self.canvas.cast::<HtmlCanvasElement>()?.size();
+        let offset = Beats::from(event.point.x) / w * self.scale_x;
+        let layer = (event.point.x as f32 / h as f32 * self.scale_y as f32) as i32;
 
         match self.focus {
             Focus::None => self.set_focus(Focus::HoverPlane).pipe(|_| None),
@@ -346,9 +399,9 @@ impl EditorPlaneHandler {
 
             Focus::MoveElement(id, ref mut point) => if event.left {
                 let block = unsafe{pattern.get_unchecked_mut(id)};
-                block.offset += Beats::from(event.point.x - point.x) / rect.width() * Self::SCALE.width();
+                block.offset += Beats::from(event.point.x - point.x) / w * self.scale_x;
                 block.layer = (block.layer as f32
-                    + (event.point.y - point.y) as f32 / rect.height() as f32 * Self::SCALE.height() as f32)
+                    + (event.point.y - point.y) as f32 / h as f32 * self.scale_y as f32)
                     as i32;
                 *point = event.point;
                 None
@@ -361,26 +414,38 @@ impl EditorPlaneHandler {
     }
 
     pub fn poll(&mut self, pattern: &[PatternBlock], hint_handler: &HintHandler) -> JsResult<()> {
-        let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
-        let (w, h, ctx) = if discriminant(&self.focus) != self.last_focus {
-            let body = document().body().to_js_result(loc!())?;
-            let (w, h) = (body.client_width(), body.client_height());
-            let ctx = canvas.get_2d_context(loc!())?;
-            canvas.set_width(w as u32);
-            canvas.set_height(h as u32);
-            ctx.set_line_width(3.0);
-            (w as f64, h as f64, ctx)
-        } else {
-            (canvas.width() as f64, canvas.height() as f64, canvas.get_2d_context(loc!())?)
-        };
+        if discriminant(&self.focus) != self.last_focus {
+            self.last_focus = discriminant(&self.focus);
+            match self.focus {
+                Focus::None => (),
+                Focus::HoverPlane =>
+                    hint_handler.set_hint("Editor plane", "").add_loc(loc!())?,
+                Focus::HoverElement(id) =>
+                    hint_handler.set_hint(&pattern.get(id).to_js_result(loc!())?.name(),
+                        "Press and hold to drag").add_loc(loc!())?,
+                Focus::MovePlane(_) =>
+                    hint_handler.set_hint("Editor plane", "Dragging").add_loc(loc!())?,
+                Focus::MoveElement(id, _) =>
+                    hint_handler.set_hint(&pattern.get(id).to_js_result(loc!())?.name(),
+                        "Dragging").add_loc(loc!())?,
+            }
+        }
 
-        ctx.set_stroke_style(&Self::FG_STYLE.into());
+        if !self.redraw.take() {return Ok(())}
+
+        let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
+        let [w, h] = canvas.size().map(|x| x as f64);
+        let ctx = canvas.get_2d_context(loc!())?;
+
         ctx.set_fill_style(&Self::BG_STYLE.into());
         ctx.fill_rect(0.0, 0.0, w, h);
         ctx.set_fill_style(&Self::FG_STYLE.into());
 
-        let step = w / Self::SCALE.width() as f64;
-        for i in succ(Some(0.0), |x| x.add(step).check_in(..w).ok()) {
+        ctx.set_stroke_style(&Self::MG_STYLE.into());
+        ctx.begin_path();
+        let step = w / *self.scale_x;
+        for mut i in succ(Some(0.0), |x| x.add(step).check_in(..w).ok()) {
+            i -= self.offset.x as f64;
             ctx.move_to(i, 0.0);
             ctx.line_to(i, h);
         }
@@ -412,6 +477,12 @@ impl HintHandler {
         self.aux_bar.cast::<HtmlElement>().to_js_result(loc!())?
             .set_inner_text(Self::DEFAULT_AUX);
         Ok(())
+    }
+
+    pub fn setter<T>(self: &Rc<Self>, main: impl AsRef<str>, aux: impl AsRef<str>)
+    -> impl Fn(T) {
+        let res = Rc::clone(self);
+        move |_| _ = res.set_hint(main.as_ref(), aux.as_ref()).report_err(loc!())
     }
 
     #[inline] pub fn main_bar(&self) -> &NodeRef {

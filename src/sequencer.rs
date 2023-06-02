@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use web_sys::{AnalyserNode as JsAnalyserNode, GainOptions, DynamicsCompressorOptions, DynamicsCompressorNode, GainNode, AudioContext};
 use crate::{
     sound::{Secs, Sound, Beats},
-    utils::{JsResult, JsResultUtils, R64, VecExt, Check, R32},
+    utils::{JsResult, JsResultUtils, R64, VecExt, Check, R32, OptionExt},
     input::ParamId,
     loc, r64
 };
@@ -30,6 +30,13 @@ impl PartialOrd for PatternBlock {
 impl Ord for PatternBlock {
     #[inline] fn cmp(&self, other: &Self) -> Ordering {
         self.offset.cmp(&other.offset)
+    }
+}
+
+impl PatternBlock {
+    pub fn name(&self) -> String {
+        format!("{} @{:.3}, layer {}",
+            self.sound.name(), *self.offset, self.layer)
     }
 }
 
@@ -61,8 +68,8 @@ impl Sequencer {
             start_time: R64::INFINITY, visualiser, plug, gain, bps: r64![2.0]})
     }
 
-    #[inline] pub fn visualiser(&self) -> &JsAnalyserNode {
-        &self.visualiser
+    #[inline] pub fn visualiser(&self) -> Option<&JsAnalyserNode> {
+        self.state.is_some().then_some(&self.visualiser)
     }
 
     #[inline] pub fn gain(&self) -> R32 {
@@ -96,7 +103,10 @@ impl Sequencer {
             }
             ParamId::Bpm => self.bps = value / 60u8,
             ParamId::MasterGain => self.gain.gain().set_value(*value as f32),
-            _ => ()
+            param_id => if let Some(block_id) = param_id.block_id() {
+                return Ok(self.pattern.get_mut(block_id).to_js_result(loc!())?
+                    .sound.set_param(param_id, value))
+            }
         }
         Ok(false)
     }

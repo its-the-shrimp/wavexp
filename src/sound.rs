@@ -233,6 +233,12 @@ impl Sound {
             gen})
     }
 
+    #[inline] pub fn name(&self) -> &'static str {
+        match self {
+            Sound::Note{..} => "Note"
+        }
+    }
+
     #[inline] pub fn poll(&mut self, time: Secs, plug: &AudioNode, bps: Beats) -> JsResult<Secs> {
         Ok(match self {
             Sound::Note{note, len, gen} => if len.is_sign_positive() {
@@ -280,5 +286,9 @@ impl Sound {
                 initial={len}/>
             </div>}
         }
+    }
+
+    pub fn set_param(&self, param_id: ParamId, value: R64) -> bool {
+        todo!()
     }
 }
