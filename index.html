@@ -6,27 +6,29 @@
 		<style>
 			html {height: 100%}
 			body {
-				z-index: 1;
 				background-color: #232328;
 				color: #0069E1;
 				overflow: hidden;
 				text-align: center;
 				font-family: consolas;
-				display: flex;
 				z-index: 1;
-				height: 100%
+				width: 100%;
+				height: 100%;
+				display: flex;
+				flex-direction: column;
 			}
 			.dark-bg {background-color: #181818}
 			.light-bg {background-color: #232328}
 			.blue-border {border: 3px solid #0069E1}
 			.blue-border[height="0"] {border-width: 0}
+			#main-panel {
+				display: flex;
+				flex: 1;
+				justify-content: space-between
+			}
 			#ctrl-panel {
-				position: fixed;
-				left: 0;
-				top: 0;
-				bottom: 10em;
 				padding: 1em;
-				width: 20%;
+				min-width: 20em;
 				box-sizing: border-box;
 				display: flex;
 				justify-content: flex-start;
@@ -48,10 +50,6 @@
 				grid-template-columns: repeat(2, 1fr)
 			}
 			#io-panel {
-				position: fixed;
-				bottom: 0;
-				right: 0;
-				left: 0;
 				height: 10em;
 				background-color: #181818;
 				display: flex;
@@ -139,12 +137,8 @@
 				height: auto;
 				flex: 1
 			}
-			#plane {
-				position: fixed;
-				top: 0; bottom: 0;
-				left: 0; right: 0
-			}
 			#tab-list {
+				user-select: none;
 				display: flex;
 				height: 3em;
 				justify-content: space-evenly
@@ -173,7 +167,9 @@
 				flex: 1;
 				border: 3px solid transparent;
 				border-top-color: #0069E1;
-				border-bottom-color: #0069E1
+				border-bottom-color: #0069E1;
+				cursor: move;
+				user-select: none;
 			}
 			#block-add-menu div:hover {
 				border-style: dashed;

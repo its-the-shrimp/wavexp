@@ -17,15 +17,16 @@ use std::{
     fmt::Debug,
     rc::Rc, cell::RefMut};
 use input::{ParamId, Button, Slider};
+use sound::SoundType;
 use visual::{SoundVisualiser, EditorPlaneHandler, CanvasEvent, HintHandler};
 use sequencer::Sequencer;
 use utils::{
     JsResultUtils, JsResult,
     MaybeCell, WasmCell,
-    window, R64, Pipe};
+    window, R64, Pipe, Point};
 use web_sys::{
     console::warn_1,
-    HtmlCanvasElement, PointerEvent};
+    HtmlCanvasElement, PointerEvent, DragEvent};
 use wasm_bindgen::{
     JsCast,
     JsValue,
@@ -105,7 +106,9 @@ pub enum MainCmd {
     SetHint(AttrValue, AttrValue),
     ClearHint,
     SetTab(usize),
-    Resize
+    Resize,
+    BlockAddStart(SoundType),
+    BlockAddEnd(DragEvent)
 }
 
 impl From<ParamId> for MainCmd {
@@ -143,7 +146,7 @@ impl Component for Main {
                     let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
                     let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     let Player{ref mut editor_plane_handler, ref mut sequencer, ..} = *player;
-                    if let Some((id, value)) = editor_plane_handler.set_event(Some(e), sequencer.pattern_mut()) {
+                    if let Some((id, value)) = editor_plane_handler.handle_hover(Some(e), sequencer.pattern_mut()) {
                         player.set_param(id, value).add_loc(loc!())?
                     } else {false}
                 }
@@ -154,7 +157,7 @@ impl Component for Main {
                     let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
                     let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     let Player{ref mut editor_plane_handler, ref mut sequencer, ..} = *player;
-                    if let Some((id, value)) = editor_plane_handler.set_event(Some(e), sequencer.pattern_mut()) {
+                    if let Some((id, value)) = editor_plane_handler.handle_hover(Some(e), sequencer.pattern_mut()) {
                         player.set_param(id, value).add_loc(loc!())?
                     } else {false}
                 }
@@ -165,7 +168,7 @@ impl Component for Main {
                     let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
                     let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     let Player{ref mut editor_plane_handler, ref mut sequencer, ..} = *player;
-                    if let Some((id, value)) = editor_plane_handler.set_event(Some(e), sequencer.pattern_mut()) {
+                    if let Some((id, value)) = editor_plane_handler.handle_hover(Some(e), sequencer.pattern_mut()) {
                         player.set_param(id, value).add_loc(loc!())?
                     } else {false}
                 }
@@ -173,7 +176,7 @@ impl Component for Main {
                 MainCmd::Leave => {
                     let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     let Player{ref mut editor_plane_handler, ref mut sequencer, ..} = *player;
-                    if let Some((id, value)) = editor_plane_handler.set_event(None, sequencer.pattern_mut()) {
+                    if let Some((id, value)) = editor_plane_handler.handle_hover(None, sequencer.pattern_mut()) {
                         player.set_param(id, value).add_loc(loc!())?
                     } else {false}
                 }
@@ -201,6 +204,20 @@ impl Component for Main {
                     true
                 }
 
+                MainCmd::BlockAddStart(decl) => {
+                    GLOBAL_PLAYER.get_mut().add_loc(loc!())?
+                        .editor_plane_handler.handle_block_add(Some(decl), None);
+                    false
+                }
+
+                MainCmd::BlockAddEnd(e) => {
+                    let at = Some(Point{x: e.offset_x(), y: e.offset_y()});
+                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                    if let Some((id, val)) = player.editor_plane_handler.handle_block_add(None, at) {
+                        player.set_param(id, val).add_loc(loc!())?
+                    } else {false}
+                }
+
                 MainCmd::ReportError(err) => return on_new_error(self, err)
             }
         };
@@ -215,66 +232,70 @@ impl Component for Main {
             let hint = &player.hint_handler;
 
             html! {<>
-                <canvas ref={player.editor_plane_handler.canvas().clone()} id="plane"
-                onpointerdown={ctx.link().callback(MainCmd::Focus)}
-                onpointerup={ctx.link().callback(MainCmd::Unfocus)}
-                onpointermove={ctx.link().callback(MainCmd::Hover)}
-                onpointerout={ctx.link().callback(|_| MainCmd::Leave)}/>
-                <div id="ctrl-panel" class="dark-bg"
-                onpointerover={hint.setter("Settings", block.map_or("General".to_owned(), |(_, x)| x.name()))}>
-                    <div id="hint" class="light-bg"
-                    onpointerover={hint.setter("Hint bar", "for useful messages about the app's controls")}>
-                        <span id="main-hint" ref={player.hint_handler.main_bar().clone()}/>
-                        <br/>
-                        <span id="aux-hint" ref={player.hint_handler.aux_bar().clone()}/>
-                    </div>
-                    if let Some((id, block)) = block {
-                        {block.sound.params(id, hint)}
-                        <div id="general-ctrl" class="dark-bg">
-                            <Button {hint}
-                            id={ParamId::Remove(id)}
-                            name={"Remove component"}>
-                                <svg viewBox="0 0 100 100">
-                                    <polygon points="27,35 35,27 50,42 65,27 73,35 58,50 73,65 65,73 50,58 35,73 27,65 42,50"/>
-                                </svg>
-                            </Button>
+                <div id="main-panel">
+                    <div id="ctrl-panel" class="dark-bg"
+                    onpointerover={hint.setter("Settings", block.map_or("General".to_owned(), |(_, x)| x.desc()))}>
+                        <div id="hint" class="light-bg"
+                        onpointerover={hint.setter("Hint bar", "for useful messages about the app's controls")}>
+                            <span id="main-hint" ref={player.hint_handler.main_bar().clone()}/>
+                            <br/>
+                            <span id="aux-hint" ref={player.hint_handler.aux_bar().clone()}/>
                         </div>
-                    } else {
-                        // TODO: fix tilted edges of the borders of the tab menu
-                        // TODO: add hint setters to all the elements
-                        <div id="tab-list">
-                            <div id={(self.editor_tab_id == 0).then_some("selected-tab")}
-                            onpointerup={ctx.link().callback(|_| MainCmd::SetTab(0))}
-                            onpointerover={hint.setter("General", "Settings tab")}>
-                                <p>{"General"}</p>
+                        if let Some((id, block)) = block {
+                            {block.sound.params(id, hint)}
+                            <div id="general-ctrl" class="dark-bg">
+                                <Button {hint}
+                                id={ParamId::Remove(id)}
+                                name={"Remove component"}>
+                                    <svg viewBox="0 0 100 100">
+                                        <polygon points="27,35 35,27 50,42 65,27 73,35 58,50 73,65 65,73 50,58 35,73 27,65 42,50"/>
+                                    </svg>
+                                </Button>
                             </div>
-                            <div id={(self.editor_tab_id == 1).then_some("selected-tab")}
-                            onpointerup={ctx.link().callback(|_| MainCmd::SetTab(1))}
-                            onpointerover={hint.setter("Add Block", "Settings tab")}>
-                                <p>{"Add Block"}</p>
+                        } else {
+                            // TODO: fix tilted edges of the borders of the tab menu
+                            <div id="tab-list">
+                                <div id={(self.editor_tab_id == 0).then_some("selected-tab")}
+                                onpointerup={ctx.link().callback(|_| MainCmd::SetTab(0))}
+                                onpointerover={hint.setter("General", "Settings tab")}>
+                                    <p onpointerup={ctx.link().callback(|_| MainCmd::SetTab(0))}>{"General"}</p>
+                                </div>
+                                <div id={(self.editor_tab_id == 1).then_some("selected-tab")}
+                                onpointerup={ctx.link().callback(|_| MainCmd::SetTab(1))}
+                                onpointerover={hint.setter("Add Block", "Settings tab")}>
+                                    <p onpointerup={ctx.link().callback(|_| MainCmd::SetTab(1))}>{"Add Block"}</p>
+                                </div>
                             </div>
-                        </div>
-                        if self.editor_tab_id == 0 {
-                            <div id="inputs">
-                                <Slider {hint} key="tmp" name="Tempo"
-                                    id={ParamId::Bpm}
-                                    min={r64![30.0]} max={r64![240.0]}
-                                    postfix="BPM"
-                                    initial={player.sequencer.bps() * r64![60.0]}/>
-                                <Slider {hint} key="gain" name="Master gain level"
-                                    id={ParamId::MasterGain}
-                                    initial={R64::from(player.sequencer.gain())}/>
-                            </div>
-                        } else if self.editor_tab_id == 1 {
-                            <div id="block-add-menu">
-                                {for Sound::TYPES.iter().map(|x| html!{
-                                    <div onpointerover={hint.setter(x.name, "Click to add block to plane")}>
-                                        <p>{x.name}</p>
-                                    </div>
-                                })}
-                            </div>
+                            if self.editor_tab_id == 0 {
+                                <div id="inputs">
+                                    <Slider {hint} key="tmp" name="Tempo"
+                                        id={ParamId::Bpm}
+                                        min={r64![30.0]} max={r64![240.0]}
+                                        postfix="BPM"
+                                        initial={player.sequencer.bps() * r64![60.0]}/>
+                                    <Slider {hint} key="gain" name="Master gain level"
+                                        id={ParamId::MasterGain}
+                                        initial={R64::from(player.sequencer.gain())}/>
+                                </div>
+                            } else if self.editor_tab_id == 1 {
+                                <div id="block-add-menu">
+                                    {for Sound::TYPES.iter().map(|x| html!{
+                                        <div draggable="true"
+                                        onpointerover={hint.setter(x.name(), "Click to add block to plane")}
+                                        ondragstart={ctx.link().callback(|_| MainCmd::BlockAddStart(*x))}
+                                        ondragend={ctx.link().callback(MainCmd::BlockAddEnd)}>
+                                            <p>{x.name()}</p>
+                                        </div>
+                                    })}
+                                </div>
+                            }
                         }
-                    }
+                    </div>
+                    <canvas ref={player.editor_plane_handler.canvas().clone()} id="plane"
+                    onpointerdown={ctx.link().callback(MainCmd::Focus)}
+                    onpointerup={ctx.link().callback(MainCmd::Unfocus)}
+                    onpointermove={ctx.link().callback(MainCmd::Hover)}
+                    onpointerout={ctx.link().callback(|_| MainCmd::Leave)}/>
                 </div>
                 <div id="io-panel" onpointerover={hint.setter("Editor plane settings", "")}>
                     {player.editor_plane_handler.params(hint)}

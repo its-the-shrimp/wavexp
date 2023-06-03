@@ -12,8 +12,8 @@ use crate::{
     utils::{Check, SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, R64, HitZone, OptionExt,
         HtmlElementExt, 
-        Pipe, Tee, Rect, document, Take},
-    loc, input::{ParamId, Slider, Switch}, sequencer::PatternBlock, sound::Beats, r64, js_log
+        Pipe, Tee, Rect, document, Take, HtmlDocumentExt, ResultToJsResult},
+    loc, input::{ParamId, Slider, Switch}, sequencer::PatternBlock, sound::{Beats, SoundType}, r64, js_log
 };
 
 pub struct EveryNth<'a, T> {
@@ -268,6 +268,8 @@ enum Focus {
     HoverElement(usize),
     MovePlane(i32),
     MoveElement(usize, Point),
+    AwaitNewBlock,
+    MoveNewBlock(SoundType, Point)
 }
 
 pub struct EditorPlaneHandler {
@@ -336,11 +338,14 @@ impl EditorPlaneHandler {
 
     pub fn handle_resize(&mut self) -> JsResult<()> {
         let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
-        let body = document().body().to_js_result(loc!())?;
-        let [w, h] = body.client_size();
+        let doc = document();
+        let [body_w, body_h] = doc.body().to_js_result(loc!())?
+            .client_size();
+        let [sidepanel_w, sidepanel_h] = doc.element_dyn_into::<HtmlElement>("ctrl-panel", loc!())?
+            .client_size();
+        canvas.set_width(body_w as u32 - sidepanel_w as u32);
+        canvas.set_height(body_h as u32 - sidepanel_h as u32);
         let ctx = canvas.get_2d_context(loc!())?;
-        canvas.set_width(w as u32);
-        canvas.set_height(h as u32);
         ctx.set_line_width(3.0);
         self.redraw = true;
         Ok(())
@@ -360,7 +365,7 @@ impl EditorPlaneHandler {
         self.redraw = true;
     }
 
-    pub fn set_event(&mut self, event: Option<CanvasEvent>, pattern: &mut [PatternBlock]) -> Option<(ParamId, R64)> {
+    pub fn handle_hover(&mut self, event: Option<CanvasEvent>, pattern: &mut [PatternBlock]) -> Option<(ParamId, R64)> {
         let Some(mut event) = event else {
             self.focus = Focus::None;
             self.last_focus = discriminant(&self.focus);
@@ -372,8 +377,6 @@ impl EditorPlaneHandler {
         let layer = (event.point.x as f32 / h as f32 * self.scale_y as f32) as i32;
 
         match self.focus {
-            Focus::None => self.set_focus(Focus::HoverPlane).pipe(|_| None),
-
             Focus::HoverPlane => match (event.left, Self::id_by_pos(offset, layer, pattern)) {
                 (true, None) => Focus::MovePlane(event.point.x - self.offset.x),
                 (true, Some(id)) => Focus::MoveElement(id, event.point),
@@ -409,28 +412,39 @@ impl EditorPlaneHandler {
                 self.focus = Focus::HoverElement(id);
                 self.selected_id = (self.selected_id != Some(id)).then_some(id);
                 Some((ParamId::Select(self.selected_id), R64::INFINITY))
-            }.tee(|_| self.redraw = true)
+            }.tee(|_| self.redraw = true),
+
+            _ => self.set_focus(Focus::HoverPlane).pipe(|_| None),
+        }
+    }
+
+    pub fn handle_block_add(&mut self, ty: Option<SoundType>, at: Option<Point>) -> Option<(ParamId, R64)> {
+        match (at, ty) {
+            (None, None) => self.set_focus(Focus::None)
+                .pipe(|_| None),
+
+            (None, Some(_)) => self.set_focus(Focus::AwaitNewBlock)
+                .pipe(|_| None),
+
+            (Some(at), None) => if let Focus::MoveNewBlock(ty, _) = self.focus {
+                let [w, h] = self.canvas.cast::<HtmlCanvasElement>()?.size();
+                let layer = (at.y as f32 / h as f32 * self.scale_y as f32) as i32;
+                let offset = Beats::from(at.x) / w * self.scale_x;
+                Some((ParamId::Add(ty, layer), offset))
+            } else {
+                self.set_focus(Focus::None);
+                None
+            }
+
+            (Some(new_at), Some(ty)) => if let Focus::MoveNewBlock(_, at) = &mut self.focus {
+                *at = new_at + self.offset;
+            } else {
+                self.focus = Focus::MoveNewBlock(ty, new_at);
+            }.pipe(|_| {self.redraw = true; None}),
         }
     }
 
     pub fn poll(&mut self, pattern: &[PatternBlock], hint_handler: &HintHandler) -> JsResult<()> {
-        if discriminant(&self.focus) != self.last_focus {
-            self.last_focus = discriminant(&self.focus);
-            match self.focus {
-                Focus::None => (),
-                Focus::HoverPlane =>
-                    hint_handler.set_hint("Editor plane", "").add_loc(loc!())?,
-                Focus::HoverElement(id) =>
-                    hint_handler.set_hint(&pattern.get(id).to_js_result(loc!())?.name(),
-                        "Press and hold to drag").add_loc(loc!())?,
-                Focus::MovePlane(_) =>
-                    hint_handler.set_hint("Editor plane", "Dragging").add_loc(loc!())?,
-                Focus::MoveElement(id, _) =>
-                    hint_handler.set_hint(&pattern.get(id).to_js_result(loc!())?.name(),
-                        "Dragging").add_loc(loc!())?,
-            }
-        }
-
         if !self.redraw.take() {return Ok(())}
 
         let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
@@ -449,6 +463,41 @@ impl EditorPlaneHandler {
             ctx.move_to(i, 0.0);
             ctx.line_to(i, h);
         }
+
+        if discriminant(&self.focus) != self.last_focus {
+            self.last_focus = discriminant(&self.focus);
+            match self.focus {
+                Focus::None => (),
+
+                Focus::HoverPlane =>
+                    hint_handler.set_hint("Editor plane", "").add_loc(loc!())?,
+
+                Focus::HoverElement(id) =>
+                    hint_handler.set_hint(&pattern.get(id).to_js_result(loc!())?.desc(),
+                        "Press and hold to drag").add_loc(loc!())?,
+
+                Focus::MovePlane(_) =>
+                    hint_handler.set_hint("Editor plane", "Dragging").add_loc(loc!())?,
+
+                Focus::MoveElement(id, _) =>
+                    hint_handler.set_hint(&pattern.get(id).to_js_result(loc!())?.desc(),
+                        "Dragging").add_loc(loc!())?,
+
+                Focus::AwaitNewBlock =>
+                    hint_handler.set_hint("Adding new block",
+                        "Drag the block into the editor plane to add it").add_loc(loc!())?,
+
+                Focus::MoveNewBlock(ty, at) => {
+                    // TODO: render the potential new block
+                    let layer = (at.y as f64 / h * self.scale_y as f64) as i32;
+                    let offset = Beats::from(at.x) / w * self.scale_x;
+                    hint_handler.set_hint("Adding new block",
+                        &format!("Release to add {}", ty.desc(offset, layer)))
+                        .add_loc(loc!())?;
+                }
+            }
+        }
+
         Ok(ctx.stroke())
     }
 }

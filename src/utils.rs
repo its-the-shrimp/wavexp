@@ -200,8 +200,9 @@ pub trait ResultToJsResult<T, E> {
 pub trait OptionExt<T> {
     fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T>;
     fn report_err(self, loc: (&str, u32, u32)) -> Self;
+    fn unwrap_throw(self, loc: (&str, u32, u32)) -> T;
     fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
-    fn choose<U>(&self, on_true: U, on_false: U) -> U;
+    fn choose<U>(&self, on_some: U, on_none: U) -> U;
     fn drop(self) -> Option<()>;
 }
 
@@ -245,12 +246,16 @@ impl<T> OptionExt<T> for Option<T> {
         self
     }
 
+    #[inline] fn unwrap_throw(self, loc: (&str, u32, u32)) -> T {
+        self.to_js_result(loc).unwrap_or_else(|x| throw_val(x))
+    }
+
     #[inline] fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
         match self {Some(x) => f(x), None => U::default()}
     }
 
-    #[inline] fn choose<U>(&self, on_true: U, on_false: U) -> U {
-        if self.is_some() {on_true} else {on_false}
+    #[inline] fn choose<U>(&self, on_some: U, on_none: U) -> U {
+        if self.is_some() {on_some} else {on_none}
     }
 
     #[allow(clippy::manual_map)]
@@ -941,46 +946,6 @@ impl HitZone for Rhombus {
 impl Rhombus {
     #[inline] pub fn new(center: Point, half_w: i32, half_h: i32) -> Self {
         Self{center, half_w, half_h}
-    }
-}
-
-#[derive(Debug)]
-pub struct HorizontalArrow {
-    back_center: Point,
-    w: i32, half_h: i32,
-    is_left: bool
-}
-
-impl HitZone for HorizontalArrow {
-    fn contains(&self, point: Point) -> bool {
-        let offset = self.back_center - point;
-        if self.is_left.then_negate(offset.x) > 0 {return false}
-        offset.x.abs() as f64 / self.w as f64 + offset.y.abs() as f64 / self.half_h as f64 <= 1.0
-    }
-
-    #[inline] fn   left(&self) -> i32 {self.back_center.x - self.w * self.is_left as i32}
-    #[inline] fn    top(&self) -> i32 {self.back_center.y - self.half_h}
-    #[inline] fn  right(&self) -> i32 {self.back_center.x + self.w * !self.is_left as i32}
-    #[inline] fn bottom(&self) -> i32 {self.back_center.y + self.half_h}
-    #[inline] fn center_point(&self) -> Point {self.back_center}
-
-    #[inline] fn shift(mut self, offset: Point) -> Self {
-        self.back_center += offset;
-        self
-    }
-
-    fn draw(&self, ctx: &CanvasRenderingContext2d) {
-        ctx.move_to(self.back_center.x.into(), self.top().into());
-        ctx.line_to((self.back_center.x + self.is_left.then_negate(self.w)).into(),
-            self.back_center.y.into());
-        ctx.line_to(self.back_center.x.into(), self.bottom().into());
-        ctx.close_path();
-    }
-}
-
-impl HorizontalArrow {
-    #[inline] pub fn new(back_center: Point, w: i32, half_h: i32, is_left: bool) -> Self {
-        Self{back_center, w, half_h, is_left}
     }
 }
 

@@ -1,6 +1,6 @@
 use std::{
     ops::{Add, Sub, Neg},
-    fmt::{self, Display, Formatter}, rc::Rc};
+    fmt::{self, Display, Formatter, Debug}, rc::Rc};
 use web_sys::{
     AudioNode,
     AudioContext,
@@ -12,7 +12,7 @@ use crate::{
         JsResultUtils,
         SliceExt,
         R64, R32,
-        SaturatingInto},
+        SaturatingInto, Pipe},
     input::{Switch, ParamId, Slider},
     loc,
     r32, r64, visual::HintHandler};
@@ -212,9 +212,27 @@ impl Pitch {
     }
 }
 
-pub struct SoundTypeDecl {
-    pub name: &'static str,
-    pub init: fn(&AudioContext) -> JsResult<Sound>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoundType {
+    Note
+}
+
+impl SoundType {
+    #[inline] pub fn name(&self) -> &'static str {
+        match self {
+            SoundType::Note => "Note"
+        }
+    }
+
+    #[inline] pub fn init(&self, ctx: &AudioContext) -> JsResult<Sound> {
+        match self {
+            SoundType::Note => Sound::new_note(ctx)
+        }
+    }
+
+    pub fn desc(&self, offset: Beats, layer: i32) -> String {
+        format!("{} @{:.3}, layer {}", self.name(), *offset, layer)
+    }
 }
 
 pub enum Sound {
@@ -222,8 +240,8 @@ pub enum Sound {
 }
 
 impl Sound {
-    pub const TYPES: [SoundTypeDecl; 1] = [
-        SoundTypeDecl{name: "Note", init: Self::new_note}
+    pub const TYPES: [SoundType; 1] = [
+        SoundType::Note
     ];
 
     #[inline] fn new_note(ctx: &AudioContext) -> JsResult<Self> {
@@ -288,7 +306,15 @@ impl Sound {
         }
     }
 
-    pub fn set_param(&self, param_id: ParamId, value: R64) -> bool {
-        todo!()
+    pub fn set_param(&mut self, id: ParamId, value: R64) -> bool {
+        match self {
+            Sound::Note{note, len, ..} => match id {
+                ParamId::Note(_) =>
+                    *note = Note::from_index(*value as usize),
+                ParamId::NoteLength(_) =>
+                    *len = value,
+                _ => ()
+            }.pipe(|_| false)
+        }
     }
 }

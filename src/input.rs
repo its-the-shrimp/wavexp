@@ -1,10 +1,13 @@
 #![allow(non_camel_case_types)] // because derive(yew::Properties) generates them
 
-use std::{f64::consts::{PI, TAU}, ops::{Div, Mul, Add}, rc::Rc};
-
+use std::{
+    f64::consts::{PI, TAU},
+    ops::{Div, Mul, Add},
+    rc::Rc};
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{Element, HtmlCanvasElement, PointerEvent, HtmlElement};
-use yew::{html, 
+use yew::{
+    html, 
     Component,
     Context,
     Html,
@@ -17,8 +20,11 @@ use crate::{
         JsResultUtils,
         HtmlCanvasExt,
         HtmlDocumentExt,
-        OptionExt, BoolExt, R64, Point},
-    MainCmd, loc, sound::{Note, Sound}, visual::HintHandler};
+        OptionExt, BoolExt, R64},
+    sound::{Note, SoundType},
+    visual::HintHandler,
+    MainCmd,
+    loc};
 
 #[derive(Debug)]
 pub enum Cmd {
@@ -33,7 +39,7 @@ pub enum Cmd {
 pub enum ParamId {
     Play(Note),
     Select(Option<usize>),
-    Add(fn() -> Sound, Point),
+    Add(SoundType, i32),
     Remove(usize),
     Note(usize),
     NoteLength(usize),
@@ -49,7 +55,7 @@ impl ParamId {
         match self {
             ParamId::Play(_)        => None,
             ParamId::Select(_)      => None,
-            ParamId::Add(_, _)      => None,
+            ParamId::Add(_, _)   => None,
             ParamId::Remove(_)      => None,
             ParamId::Bpm            => None,
             ParamId::MasterGain     => None,

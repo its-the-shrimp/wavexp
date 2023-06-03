@@ -34,7 +34,7 @@ impl Ord for PatternBlock {
 }
 
 impl PatternBlock {
-    pub fn name(&self) -> String {
+    pub fn desc(&self) -> String {
         format!("{} @{:.3}, layer {}",
             self.sound.name(), *self.offset, self.layer)
     }
@@ -45,6 +45,7 @@ pub struct Sequencer {
     pending: Vec<(usize, Secs)>,
     state: Option<usize>,
     start_time: Secs,
+    audio_ctx: AudioContext,
     visualiser: JsAnalyserNode,
     plug: DynamicsCompressorNode,
     gain: GainNode,
@@ -64,7 +65,7 @@ impl Sequencer {
             .connect_with_audio_node(&gain).add_loc(loc!())?
             .connect_with_audio_node(&audio_ctx.destination()).add_loc(loc!())?;
 
-        Ok(Self{pattern: vec![], state: None, pending: vec![],
+        Ok(Self{pattern: vec![], state: None, pending: vec![], audio_ctx,
             start_time: R64::INFINITY, visualiser, plug, gain, bps: r64![2.0]})
     }
 
@@ -89,20 +90,28 @@ impl Sequencer {
         &mut self.pattern
     }
 
-    pub fn add_block(&mut self, block: PatternBlock) {
-        self.pattern.push_sorted(block);
-    }
-
     /// the returned `bool` indicates whether the selected element's editor window should be
     /// rerendered
     pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
         match id {
+            ParamId::Add(ty, layer) => {
+                let block = PatternBlock{
+                    sound: ty.init(&self.audio_ctx).add_loc(loc!())?,
+                    layer, offset: value};
+                self.pattern.push_sorted(block);
+            }
+
             ParamId::Play(_) => {
                 self.state = value.is_sign_positive().then_some(0);
                 self.start_time = R64::INFINITY;
             }
-            ParamId::Bpm => self.bps = value / 60u8,
-            ParamId::MasterGain => self.gain.gain().set_value(*value as f32),
+
+            ParamId::Bpm =>
+                self.bps = value / 60u8,
+
+            ParamId::MasterGain =>
+                self.gain.gain().set_value(*value as f32),
+
             param_id => if let Some(block_id) = param_id.block_id() {
                 return Ok(self.pattern.get_mut(block_id).to_js_result(loc!())?
                     .sound.set_param(param_id, value))
