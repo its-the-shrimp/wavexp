@@ -92,7 +92,8 @@ impl Player {
 
 pub struct Main {
     error_count: usize,
-    editor_tab_id: usize
+    editor_tab_id: usize,
+    new_block_type: Option<SoundType>
 }
 
 #[derive(Debug)]
@@ -108,7 +109,9 @@ pub enum MainCmd {
     SetTab(usize),
     Resize,
     BlockAddStart(SoundType),
-    BlockAddEnd(DragEvent)
+    BlockAddEnd(Option<DragEvent>),
+    HoverNewBlock(DragEvent),
+    DragNewBlockOut,
 }
 
 impl From<ParamId> for MainCmd {
@@ -130,7 +133,7 @@ impl Component for Main {
     fn create(ctx: &Context<Self>) -> Self {
         *unsafe{&mut MAINCMD_SENDER} = Some(ctx.link().callback(|msg| msg));
         Player::init_global().add_loc(loc!()).unwrap_throw(loc!());
-        Self{error_count: 0, editor_tab_id: 0}
+        Self{error_count: 0, editor_tab_id: 0, new_block_type: None}
     }
 
     fn update(&mut self, _: &Context<Self>, msg: Self::Message) -> bool {
@@ -205,15 +208,34 @@ impl Component for Main {
                 }
 
                 MainCmd::BlockAddStart(decl) => {
+                    self.new_block_type = Some(decl);
                     GLOBAL_PLAYER.get_mut().add_loc(loc!())?
                         .editor_plane_handler.handle_block_add(Some(decl), None);
                     false
                 }
 
                 MainCmd::BlockAddEnd(e) => {
-                    let at = Some(Point{x: e.offset_x(), y: e.offset_y()});
+                    self.new_block_type = None;
+                    let at = e.map(|e| Point{x: e.offset_x(), y: e.offset_y()});
                     let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                     if let Some((id, val)) = player.editor_plane_handler.handle_block_add(None, at) {
+                        player.set_param(id, val).add_loc(loc!())?
+                    } else {false}
+                }
+
+                MainCmd::HoverNewBlock(e) => {
+                    // TODO: somehow hide the moved copy of the element being dragged
+                    e.prevent_default();
+                    let at = Some(Point{x: e.offset_x(), y: e.offset_y()});
+                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                    if let Some((id, val)) = player.editor_plane_handler.handle_block_add(self.new_block_type, at) {
+                        player.set_param(id, val).add_loc(loc!())?
+                    } else {false}
+                }
+
+                MainCmd::DragNewBlockOut => {
+                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
+                    if let Some((id, val)) = player.editor_plane_handler.handle_block_add(self.new_block_type, None) {
                         player.set_param(id, val).add_loc(loc!())?
                     } else {false}
                 }
@@ -283,7 +305,7 @@ impl Component for Main {
                                         <div draggable="true"
                                         onpointerover={hint.setter(x.name(), "Click to add block to plane")}
                                         ondragstart={ctx.link().callback(|_| MainCmd::BlockAddStart(*x))}
-                                        ondragend={ctx.link().callback(MainCmd::BlockAddEnd)}>
+                                        ondragend={ctx.link().callback(|_| MainCmd::BlockAddEnd(None))}>
                                             <p>{x.name()}</p>
                                         </div>
                                     })}
@@ -295,7 +317,10 @@ impl Component for Main {
                     onpointerdown={ctx.link().callback(MainCmd::Focus)}
                     onpointerup={ctx.link().callback(MainCmd::Unfocus)}
                     onpointermove={ctx.link().callback(MainCmd::Hover)}
-                    onpointerout={ctx.link().callback(|_| MainCmd::Leave)}/>
+                    onpointerout={ctx.link().callback(|_| MainCmd::Leave)}
+                    ondragover={ctx.link().callback(MainCmd::HoverNewBlock)}
+                    ondragleave={ctx.link().callback(|_| MainCmd::DragNewBlockOut)}
+                    ondrop={ctx.link().callback(|e| MainCmd::BlockAddEnd(Some(e)))}/>
                 </div>
                 <div id="io-panel" onpointerover={hint.setter("Editor plane settings", "")}>
                     {player.editor_plane_handler.params(hint)}

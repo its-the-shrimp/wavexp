@@ -190,28 +190,6 @@ impl Note {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Pitch {
-    Freq(R32),
-    Note(i8)
-}
-
-impl Pitch {
-    fn toggle(&mut self) {
-        *self = match *self {
-            Self::Freq(_) => Self::Note(0),
-            Self::Note(_) => Self::Freq(R32::ZERO)}
-    }
-
-    fn apply(&self, note: Note) -> R32 {
-        match self {
-            Self::Freq(freq) => note.freq() + *freq,
-            Self::Note(off)  =>
-                Note(note.0.saturating_add_signed(*off).min(Note::MAX.0)).freq()
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SoundType {
     Note
@@ -235,6 +213,7 @@ impl SoundType {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sound {
     Note{note: Note, len: Beats, gen: OscillatorNode}
 }
@@ -247,7 +226,7 @@ impl Sound {
     #[inline] fn new_note(ctx: &AudioContext) -> JsResult<Self> {
         let gen = OscillatorNode::new(ctx).add_loc(loc!())?;
         gen.start().add_loc(loc!())?;
-        Ok(Self::Note{note: Note::MAX, len: Beats::ZERO,
+        Ok(Self::Note{note: Note::MAX, len: r64![1.0],
             gen})
     }
 

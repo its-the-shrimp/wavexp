@@ -4,16 +4,18 @@ use std::{
     mem::{Discriminant, discriminant},
     ops::Add, rc::Rc
 };
-use js_sys::Array as JsArray;
-use web_sys::{HtmlCanvasElement, AnalyserNode as JsAnalyserNode, ImageData as JsImageData, MouseEvent as JsMouseEvent, HtmlElement};
-use wasm_bindgen::{Clamped as JsClamped, JsValue};
+use web_sys::{HtmlCanvasElement, AnalyserNode, ImageData, MouseEvent, HtmlElement};
+use wasm_bindgen::{Clamped, JsValue};
 use yew::{TargetCast, NodeRef, html, Html};
 use crate::{
     utils::{Check, SliceExt, Point,
-        JsResult, HtmlCanvasExt, JsResultUtils, R64, HitZone, OptionExt,
+        JsResult, HtmlCanvasExt, JsResultUtils, R64, OptionExt,
         HtmlElementExt, 
-        Pipe, Tee, Rect, document, Take, HtmlDocumentExt, ResultToJsResult},
-    loc, input::{ParamId, Slider, Switch}, sequencer::PatternBlock, sound::{Beats, SoundType}, r64, js_log
+        Pipe, Tee, document, Take, HtmlDocumentExt},
+    loc, r64,
+    input::{ParamId, Switch},
+    sequencer::PatternBlock,
+    sound::{Beats, SoundType}
 };
 
 pub struct EveryNth<'a, T> {
@@ -152,7 +154,7 @@ impl SoundVisualiser {
     }
 
     // TODO: make it actually work
-	pub fn poll(&mut self, input: Option<&JsAnalyserNode>) -> JsResult<()> {
+	pub fn poll(&mut self, input: Option<&AnalyserNode>) -> JsResult<()> {
 		// TODO: correctly readjust the graph when shrinked in the UI
         let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
         canvas.sync();
@@ -171,11 +173,11 @@ impl SoundVisualiser {
             for (&src, dst) in self.in_data.iter().zip(self.out_data.every_nth_mut(self.width as usize)) {
                 *dst = unsafe {*self.gradient.get_unchecked(src as usize)};
             }
-            let out = JsClamped(unsafe{from_raw_parts(
+            let out = Clamped(unsafe{from_raw_parts(
                 self.out_data.as_ptr().cast::<u8>(),
                 self.out_data.len() * 4)});
             canvas.get_2d_context(loc!())?.put_image_data(
-                    &JsImageData::new_with_u8_clamped_array(out, self.width).add_loc(loc!())?,
+                    &ImageData::new_with_u8_clamped_array(out, self.width).add_loc(loc!())?,
                     0.0, 0.0).add_loc(loc!())?;
         }
 
@@ -191,75 +193,15 @@ pub struct CanvasEvent {
     pub shift: bool
 }
 
-impl TryFrom<&JsMouseEvent> for CanvasEvent {
+impl TryFrom<&MouseEvent> for CanvasEvent {
     type Error = JsValue;
-    fn try_from(value: &JsMouseEvent) -> Result<Self, Self::Error> {
+    fn try_from(value: &MouseEvent) -> Result<Self, Self::Error> {
         let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result(loc!())?;
         let point = Point{x: value.offset_x(), y: value.offset_y()}
             .normalise(canvas.client_rect(), canvas.rect());
         Ok(Self{point, left: value.buttons() & 1 == 1, shift: value.shift_key()})
     }
 }
-
-/*pub struct GraphHandler {
-    canvas: NodeRef,
-    ratio: R32,
-    event: Option<Option<CanvasEvent>>
-}
-
-impl GraphHandler {
-    #[inline] pub fn new() -> JsResult<Self> {
-        Ok(Self{canvas: NodeRef::default(), ratio: R32::INFINITY, event: None})
-    }
-
-    #[inline] pub fn canvas(&self) -> &NodeRef {
-        &self.canvas
-    }
-
-    #[inline] pub fn set_event(&mut self, event: CanvasEvent) {
-        self.event = Some(Some(event));
-    }
-
-    /// the returned `bool` indicates whether the selected element's editor window should be
-    /// rerendered
-    pub fn set_param(&mut self, id: ParamId, _value: R64) -> bool {
-        if let ParamId::Select(_) = id {
-            self.event = Some(None);
-            true
-        } else {false}
-    }
-
-    #[inline] pub fn poll(&mut self, element: Option<&mut SoundGen>) -> JsResult<()> {
-        if let Some((Some(spec), element)) = element.map(|x| (x.graph_spec(), x)) {
-            let canvas = self.canvas.cast::<HtmlCanvasElement>().to_js_result(loc!())?;
-            if spec.ratio != self.ratio {
-                if *self.ratio == 0.0 {
-                    self.event = self.event.or(None);
-                }
-                canvas.set_height((canvas.width() as f32 * *spec.ratio) as u32);
-                self.ratio = spec.ratio;
-            }
-            if !spec.interactive {
-                self.event = None;
-            }
-            if let Some(event) = self.event.take().or_else(|| spec.force_redraw.then_some(None)) {
-                let ctx = canvas.get_2d_context(loc!())?;
-                let (w, h) = (canvas.width(), canvas.height());
-                ctx.set_fill_style(&"#181818".into());
-                ctx.set_stroke_style(&"#0069E1".into());
-                ctx.set_line_width(3.0);
-                ctx.fill_rect(0.0, 0.0, w as f64, h as f64);
-                ctx.begin_path();
-                element.graph(w, h, &ctx, event).add_loc(loc!())?;
-                ctx.stroke();
-            }
-        } else if *self.ratio != 0.0 {
-            self.ratio = r32![0.0];
-            self.canvas.cast::<HtmlCanvasElement>().to_js_result(loc!())?.set_height(0);
-        }
-        Ok(())
-    }
-}*/
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
@@ -268,7 +210,7 @@ enum Focus {
     HoverElement(usize),
     MovePlane(i32),
     MoveElement(usize, Point),
-    AwaitNewBlock,
+    AwaitNewBlock(SoundType),
     MoveNewBlock(SoundType, Point)
 }
 
@@ -279,15 +221,13 @@ pub struct EditorPlaneHandler {
     last_focus: Discriminant<Focus>,
     offset: Point,
     redraw: bool,
-    solid_line: JsValue,
-    dotted_line: JsValue,
     scale_x: Beats,
     scale_y: i32,
     snap_step: R64
 }
 
 impl EditorPlaneHandler {
-    const FONT: &str = "20px consolas";
+    const FONT: &str = "40px consolas";
     const BG_STYLE: &str = "#232328";
     const MG_STYLE: &str = "#333338";
     const FG_STYLE: &str = "#0069E1";
@@ -296,8 +236,6 @@ impl EditorPlaneHandler {
         Ok(Self{canvas: NodeRef::default(), selected_id: None,
             offset: Point::ZERO, redraw: true,
             focus: Focus::None, last_focus: discriminant(&Focus::HoverPlane),
-            solid_line: JsArray::new().into(),
-            dotted_line: JsArray::of2(&JsValue::from(10.0), &JsValue::from(10.0)).into(),
             scale_x: r64![20.0], scale_y: 10, snap_step: r64![1.0]})
     }
 
@@ -339,14 +277,16 @@ impl EditorPlaneHandler {
     pub fn handle_resize(&mut self) -> JsResult<()> {
         let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
         let doc = document();
-        let [body_w, body_h] = doc.body().to_js_result(loc!())?
-            .client_size();
-        let [sidepanel_w, sidepanel_h] = doc.element_dyn_into::<HtmlElement>("ctrl-panel", loc!())?
-            .client_size();
-        canvas.set_width(body_w as u32 - sidepanel_w as u32);
-        canvas.set_height(body_h as u32 - sidepanel_h as u32);
+        let w = doc.body().to_js_result(loc!())?.client_width()
+            - doc.element_dyn_into::<HtmlElement>("ctrl-panel", loc!())?.client_width();
+        canvas.set_width(w as u32);
+        let h = canvas.client_height();
+        canvas.set_height(h as u32);
         let ctx = canvas.get_2d_context(loc!())?;
         ctx.set_line_width(3.0);
+        ctx.set_font(Self::FONT);
+        ctx.set_text_align("center");
+        ctx.set_text_baseline("middle");
         self.redraw = true;
         Ok(())
     }
@@ -400,6 +340,7 @@ impl EditorPlaneHandler {
                 self.focus = Focus::HoverPlane;
             }.pipe(|_| {self.redraw = true; None}),
 
+            // TODO: make it actually detect hover over a block
             Focus::MoveElement(id, ref mut point) => if event.left {
                 let block = unsafe{pattern.get_unchecked_mut(id)};
                 block.offset += Beats::from(event.point.x - point.x) / w * self.scale_x;
@@ -423,10 +364,11 @@ impl EditorPlaneHandler {
             (None, None) => self.set_focus(Focus::None)
                 .pipe(|_| None),
 
-            (None, Some(_)) => self.set_focus(Focus::AwaitNewBlock)
+            (None, Some(ty)) => self.set_focus(Focus::AwaitNewBlock(ty))
                 .pipe(|_| None),
 
-            (Some(at), None) => if let Focus::MoveNewBlock(ty, _) = self.focus {
+            (Some(mut at), None) => if let Focus::MoveNewBlock(ty, _) = self.focus {
+                at += self.offset;
                 let [w, h] = self.canvas.cast::<HtmlCanvasElement>()?.size();
                 let layer = (at.y as f32 / h as f32 * self.scale_y as f32) as i32;
                 let offset = Beats::from(at.x) / w * self.scale_x;
@@ -453,18 +395,31 @@ impl EditorPlaneHandler {
 
         ctx.set_fill_style(&Self::BG_STYLE.into());
         ctx.fill_rect(0.0, 0.0, w, h);
-        ctx.set_fill_style(&Self::FG_STYLE.into());
 
-        ctx.set_stroke_style(&Self::MG_STYLE.into());
         ctx.begin_path();
         let step = w / *self.scale_x;
+        let offset = self.offset.x as f64 % step;
         for mut i in succ(Some(0.0), |x| x.add(step).check_in(..w).ok()) {
-            i -= self.offset.x as f64;
+            i -= offset;
+            // TODO: don't draw guidelines on top of sound blocks
             ctx.move_to(i, 0.0);
             ctx.line_to(i, h);
         }
+        ctx.set_stroke_style(&Self::MG_STYLE.into());
+        ctx.stroke();
 
-        if discriminant(&self.focus) != self.last_focus {
+        ctx.begin_path();
+        let layer_h = h / self.scale_y as f64;
+        let beat_w = w / *self.scale_x;
+        for block in pattern {
+            ctx.rect(*block.offset * beat_w - self.offset.x as f64,
+                block.layer as f64 * layer_h - self.offset.y as f64,
+                *block.sound.len() * beat_w, layer_h);
+        }
+        ctx.set_stroke_style(&Self::FG_STYLE.into());
+        ctx.stroke();
+
+        if discriminant(&self.focus) != self.last_focus || matches!(self.focus, Focus::MoveNewBlock(..)) {
             self.last_focus = discriminant(&self.focus);
             match self.focus {
                 Focus::None => (),
@@ -483,22 +438,48 @@ impl EditorPlaneHandler {
                     hint_handler.set_hint(&pattern.get(id).to_js_result(loc!())?.desc(),
                         "Dragging").add_loc(loc!())?,
 
-                Focus::AwaitNewBlock =>
+                Focus::AwaitNewBlock(ty) => {
                     hint_handler.set_hint("Adding new block",
-                        "Drag the block into the editor plane to add it").add_loc(loc!())?,
+                        &format!("Drag {} into the editor plane to add it", ty.name()))
+                        .add_loc(loc!())?;
+                    ctx.rect(0.0, 0.0, w, 5.0);
+                    ctx.rect(0.0, 0.0, 5.0, h);
+                    ctx.rect(0.0, h - 5.0, w, 5.0);
+                    ctx.rect(w - 5.0, 0.0, 5.0, h);
+                    ctx.set_fill_style(&Self::FG_STYLE.into());
+                    ctx.fill();
+                    ctx.fill_text("Drag here", w / 2.0, h / 2.0).add_loc(loc!())?;
+                }
 
                 Focus::MoveNewBlock(ty, at) => {
-                    // TODO: render the potential new block
-                    let layer = (at.y as f64 / h * self.scale_y as f64) as i32;
+                    let layer = (at.y as f64 / layer_h) as i32;
                     let offset = Beats::from(at.x) / w * self.scale_x;
                     hint_handler.set_hint("Adding new block",
                         &format!("Release to add {}", ty.desc(offset, layer)))
                         .add_loc(loc!())?;
+
+                    ctx.begin_path();
+                    let mut y = layer as f64 * layer_h;
+                    ctx.move_to((at.x - 5) as f64, y);
+                    ctx.line_to((at.x + 5) as f64, y);
+                    ctx.move_to(at.x       as f64, y);
+                    y += layer_h;
+                    ctx.line_to(at.x       as f64, y);
+                    ctx.move_to((at.x - 5) as f64, y);
+                    ctx.line_to((at.x + 5) as f64, y);
+                    ctx.stroke();
+
+                    ctx.rect(0.0, 0.0, w, 5.0);
+                    ctx.rect(0.0, 0.0, 5.0, h);
+                    ctx.rect(0.0, h - 5.0, w, 5.0);
+                    ctx.rect(w - 5.0, 0.0, 5.0, h);
+                    ctx.set_fill_style(&Self::FG_STYLE.into());
+                    ctx.fill();
                 }
             }
         }
 
-        Ok(ctx.stroke())
+        Ok(())
     }
 }
 
