@@ -45,7 +45,6 @@ pub enum ParamId {
     NoteLength(usize),
     Bpm,
     MasterGain,
-    PlaneScale,
     SnapStep
 }
 
@@ -53,16 +52,33 @@ impl ParamId {
     /// returns `Some(id)` when the parameter ID belongs to a specific sound block
     pub fn block_id(&self) -> Option<usize> {
         match self {
-            ParamId::Play(_)        => None,
-            ParamId::Select(_)      => None,
-            ParamId::Add(_, _)   => None,
-            ParamId::Remove(_)      => None,
-            ParamId::Bpm            => None,
-            ParamId::MasterGain     => None,
-            ParamId::PlaneScale     => None,
-            ParamId::SnapStep       => None,
-            ParamId::Note(id)       => Some(*id),
-            ParamId::NoteLength(id) => Some(*id)
+            ParamId::Play(..)
+            | ParamId::Select(..)
+            | ParamId::Add(..)
+            | ParamId::Remove(..)
+            | ParamId::Bpm
+            | ParamId::MasterGain
+            | ParamId::SnapStep => None,
+
+            ParamId::Note(id)
+            | ParamId::NoteLength(id) => Some(*id)
+        }
+    }
+
+    /// returns `true` if the editor plane needs to be re-rendered
+    /// after setting the parameter
+    pub fn need_plane_rerender(&self) -> bool {
+        match self {
+            ParamId::Select(..)
+            | ParamId::Add(..)
+            | ParamId::Remove(..)
+            | ParamId::NoteLength(..) => true,
+
+            ParamId::Note(..)
+            | ParamId::Play(..)
+            | ParamId::Bpm
+            | ParamId::MasterGain
+            | ParamId::SnapStep => false,
         }
     }
 }
@@ -236,8 +252,8 @@ impl Component for Switch {
                 Cmd::Drag(e) => {
                     let old_value = *self.value as usize;
                     let h = e.target_dyn_into::<Element>().to_js_result(loc!())?.client_height();
-                    self.value = R64::rem_euclid(self.value + R64::from(e.movement_y()) / R64::from(h / -4 * options.len() as i32),
-                        R64::from(options.len())).to_js_result(loc!())?;
+                    self.value = (self.value + R64::from(e.movement_y()) / h / -4i8 * options.len())
+                        .rem_euclid(options.len().into()).to_js_result(loc!())?;
                     if old_value != *self.value as usize {
                         MainCmd::SetParam(*id, self.value.floor()).send()
                     }
@@ -342,7 +358,7 @@ impl Component for Button {
                 Cmd::Focus(_) => MainCmd::SetParam(*id, R64::INFINITY).send(),
                 Cmd::Unfocus(_) => MainCmd::SetParam(*id, R64::NEG_INFINITY).send(),
                 Cmd::HoverIn(_) => hint.set_hint(name, "").add_loc(loc!())?,
-                Cmd::HoverOut(_) => hint.clear_hint().add_loc(loc!())?
+                Cmd::HoverOut(_) => ()
             }
         }.report_err(loc!());
         false

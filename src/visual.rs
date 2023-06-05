@@ -2,7 +2,8 @@ use std::{
     iter::{Iterator, successors as succ},
     slice::from_raw_parts,
     mem::{Discriminant, discriminant},
-    ops::Add, rc::Rc
+    ops::Add,
+    rc::Rc
 };
 use web_sys::{HtmlCanvasElement, AnalyserNode, ImageData, MouseEvent, HtmlElement};
 use wasm_bindgen::{Clamped, JsValue};
@@ -15,7 +16,7 @@ use crate::{
     loc, r64,
     input::{ParamId, Switch},
     sequencer::PatternBlock,
-    sound::{Beats, SoundType}
+    sound::{Beats, SoundType}, js_log
 };
 
 pub struct EveryNth<'a, T> {
@@ -211,7 +212,18 @@ enum Focus {
     MovePlane(i32),
     MoveElement(usize, Point),
     AwaitNewBlock(SoundType),
-    MoveNewBlock(SoundType, Point)
+    MoveNewBlock(SoundType, Point),
+    HoverPlaneWShift(Point),
+    ZoomPlane(Point)
+}
+
+impl Focus {
+    #[inline] pub fn always_update(&self) -> bool {
+        matches!(self, Self::MoveNewBlock(..)
+            | Self::MoveElement(..)
+            | Self::ZoomPlane(..)
+            | Self::HoverPlaneWShift(..))
+    }
 }
 
 pub struct EditorPlaneHandler {
@@ -266,12 +278,21 @@ impl EditorPlaneHandler {
 
     /// the returned `bool` indicates whether the selected block's editor window should be
     /// rerendered
-    pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
-        if let ParamId::SnapStep = id {
-            self.snap_step = *[r64![0.0], r64![1.0], r64![0.5], r64![0.25], r64![0.125]]
-                .get_wrapping(*value as usize);
+    pub fn set_param(&mut self, id: ParamId, value: R64) -> bool {
+        match id {
+            ParamId::SnapStep => {
+                self.snap_step = *[r64![0.0], r64![1.0], r64![0.5], r64![0.25], r64![0.125]]
+                    .get_wrapping(*value as usize);
+                false
+            }
+
+            ParamId::Select(id) => {
+                self.selected_id = id;
+                true
+            }
+
+            id => id.need_plane_rerender().then(|| self.redraw = true).is_some()
         }
-        Ok(false)
     }
 
     pub fn handle_resize(&mut self) -> JsResult<()> {
@@ -285,15 +306,13 @@ impl EditorPlaneHandler {
         let ctx = canvas.get_2d_context(loc!())?;
         ctx.set_line_width(3.0);
         ctx.set_font(Self::FONT);
-        ctx.set_text_align("center");
-        ctx.set_text_baseline("middle");
         self.redraw = true;
         Ok(())
     }
 
     #[inline] fn in_block(block: &PatternBlock, offset: Beats, layer: i32) -> bool {
         layer == block.layer
-            && (*block.offset .. *block.sound.len()).contains(&*offset)
+            && (*block.offset .. *block.offset + *block.sound.len()).contains(&*offset)
     }
 
     #[inline] fn id_by_pos(offset: Beats, layer: i32, pattern: &[PatternBlock]) -> Option<usize> {
@@ -305,7 +324,8 @@ impl EditorPlaneHandler {
         self.redraw = true;
     }
 
-    pub fn handle_hover(&mut self, event: Option<CanvasEvent>, pattern: &mut [PatternBlock]) -> Option<(ParamId, R64)> {
+    pub fn handle_hover(&mut self, event: Option<CanvasEvent>, pattern: &mut [PatternBlock])
+    -> Option<(ParamId, R64)> {
         let Some(mut event) = event else {
             self.focus = Focus::None;
             self.last_focus = discriminant(&self.focus);
@@ -314,46 +334,81 @@ impl EditorPlaneHandler {
         event.point += self.offset;
         let [w, h] = self.canvas.cast::<HtmlCanvasElement>()?.size();
         let offset = Beats::from(event.point.x) / w * self.scale_x;
-        let layer = (event.point.x as f32 / h as f32 * self.scale_y as f32) as i32;
+        let layer = (event.point.y as f32 / h as f32 * self.scale_y as f32) as i32;
 
         match self.focus {
-            Focus::HoverPlane => match (event.left, Self::id_by_pos(offset, layer, pattern)) {
-                (true, None) => Focus::MovePlane(event.point.x - self.offset.x),
-                (true, Some(id)) => Focus::MoveElement(id, event.point),
-                (false, None) => return None,
-                (false, Some(id)) => Focus::HoverElement(id)
-            }.pipe(|x| {self.set_focus(x); None}),
+            Focus::HoverPlane => match (event.left, event.shift) {
+                (true, true) =>
+                    Some(Focus::ZoomPlane(event.point - self.offset)),
+                (true, false) =>
+                    Self::id_by_pos(offset, layer, pattern)
+                        .map_or(Focus::MovePlane(event.point.x - self.offset.x),
+                            |id| Focus::MoveElement(id, event.point)).into(),
+                (false, true) =>
+                    Some(Focus::HoverPlaneWShift(event.point)),
+                (false, false) =>
+                    Self::id_by_pos(offset, layer, pattern)
+                        .map(Focus::HoverElement)
+            }.map(|x| self.set_focus(x)).pipe(|_| None),
 
             Focus::HoverElement(id) => if event.left {
-                Focus::MoveElement(id, event.point)
+                Some(Focus::MoveElement(id, event.point))
             } else if !Self::in_block(unsafe{pattern.get_unchecked(id)}, offset, layer) {
-                Focus::HoverPlane
+                Some(Focus::HoverPlane)
             } else {
-                return None
-            }.pipe(|x| {self.set_focus(x); None}),
+                None
+            }.map(|x| self.set_focus(x)).pipe(|_| None),
 
             Focus::MovePlane(ref mut last_x) => if event.left {
                 event.point.x -= self.offset.x;
-                self.offset.x += *last_x - event.point.x;
+                self.offset.x = (self.offset.x + *last_x - event.point.x).max(0);
                 *last_x = event.point.x;
+                None
             } else {
                 self.focus = Focus::HoverPlane;
-            }.pipe(|_| {self.redraw = true; None}),
+                Some((ParamId::Select(None), R64::INFINITY))
+            }.tee(|_| self.redraw = true),
 
-            // TODO: make it actually detect hover over a block
             Focus::MoveElement(id, ref mut point) => if event.left {
                 let block = unsafe{pattern.get_unchecked_mut(id)};
                 block.offset += Beats::from(event.point.x - point.x) / w * self.scale_x;
-                block.layer = (block.layer as f32
-                    + (event.point.y - point.y) as f32 / h as f32 * self.scale_y as f32)
-                    as i32;
+                block.offset = block.offset.max(Beats::ZERO);
+                block.layer = (event.point.y as f32 / h as f32 * self.scale_y as f32) as i32;
+                block.layer = block.layer.max(0);
                 *point = event.point;
                 None
             } else {
                 self.focus = Focus::HoverElement(id);
-                self.selected_id = (self.selected_id != Some(id)).then_some(id);
-                Some((ParamId::Select(self.selected_id), R64::INFINITY))
+                Some((ParamId::Select((self.selected_id != Some(id)).then_some(id)), R64::INFINITY))
             }.tee(|_| self.redraw = true),
+
+            Focus::HoverPlaneWShift(ref mut point) => match (event.left, event.shift) {
+                (true, true) => 
+                    self.focus = Focus::ZoomPlane(event.point - self.offset),
+                (true, false) =>
+                    self.focus = Self::id_by_pos(offset, layer, pattern)
+                        .map_or(Focus::MovePlane(event.point.x - self.offset.x),
+                            |id| Focus::MoveElement(id, event.point)),
+                (false, true) => *point = event.point,
+                (false, false) => self.focus = Focus::HoverPlane,
+            }.pipe(|_| {self.redraw = true; None}),
+
+            Focus::ZoomPlane(src) => match (event.left, event.shift) {
+                (true, _) => {
+                    let old = self.scale_x;
+                    self.scale_x = Beats::from(event.point.y - self.offset.y) / h * 95i8 + 5i8;
+                    js_log!("new: {}, old: {}, diff: {}", self.scale_x, old, self.scale_x - old);
+                    let old_off = self.offset.x;
+                    self.offset.x -= *((self.scale_x - old) / self.scale_x * w) as i32;
+                    js_log!("new: {}, old: {}, diff: {}", self.offset.x, old_off, self.offset.x - old_off);
+                    //self.offset.x -= (src.x as f64 * w as f64 * *(self.scale_x - old) / *old / *self.scale_x)
+                    //.js_log("") as i32;
+                }
+
+                (false, true) => self.focus = Focus::HoverPlaneWShift(event.point),
+
+                (false, false) => self.focus = Focus::HoverPlane
+            }.pipe(|_| {self.redraw = true; None}),
 
             _ => self.set_focus(Focus::HoverPlane).pipe(|_| None),
         }
@@ -419,7 +474,7 @@ impl EditorPlaneHandler {
         ctx.set_stroke_style(&Self::FG_STYLE.into());
         ctx.stroke();
 
-        if discriminant(&self.focus) != self.last_focus || matches!(self.focus, Focus::MoveNewBlock(..)) {
+        if discriminant(&self.focus) != self.last_focus || self.focus.always_update() {
             self.last_focus = discriminant(&self.focus);
             match self.focus {
                 Focus::None => (),
@@ -448,12 +503,14 @@ impl EditorPlaneHandler {
                     ctx.rect(w - 5.0, 0.0, 5.0, h);
                     ctx.set_fill_style(&Self::FG_STYLE.into());
                     ctx.fill();
+                    ctx.set_text_align("center");
+                    ctx.set_text_baseline("middle");
                     ctx.fill_text("Drag here", w / 2.0, h / 2.0).add_loc(loc!())?;
                 }
 
                 Focus::MoveNewBlock(ty, at) => {
                     let layer = (at.y as f64 / layer_h) as i32;
-                    let offset = Beats::from(at.x) / w * self.scale_x;
+                    let offset = Beats::from(at.x) / beat_w;
                     hint_handler.set_hint("Adding new block",
                         &format!("Release to add {}", ty.desc(offset, layer)))
                         .add_loc(loc!())?;
@@ -475,6 +532,29 @@ impl EditorPlaneHandler {
                     ctx.rect(w - 5.0, 0.0, 5.0, h);
                     ctx.set_fill_style(&Self::FG_STYLE.into());
                     ctx.fill();
+                }
+
+                Focus::HoverPlaneWShift(at) => {
+                    hint_handler.set_hint("Editor plane", "Press and hold to zoom").add_loc(loc!())?;
+                    let layer = (at.y as f64 / layer_h) as i32;
+                    let offset = at.x as f64 / beat_w;
+                    ctx.set_text_align("left");
+                    ctx.set_text_baseline("bottom");
+                    ctx.set_fill_style(&Self::FG_STYLE.into());
+                    ctx.fill_text(&format!("@{offset:.3}, layer {layer}"),
+                        5.0, h - 5.0).add_loc(loc!())?;
+                }
+
+                Focus::ZoomPlane(src) => {
+                    hint_handler.set_hint("Editor plane: zooming", "Release to stop")
+                        .add_loc(loc!())?;
+                    ctx.begin_path();
+                    ctx.move_to(src.x as f64 - 10.0, src.y as f64);
+                    ctx.line_to(src.x as f64 + 10.0, src.y as f64);
+                    ctx.move_to(src.x as f64, src.y as f64 - 10.0);
+                    ctx.line_to(src.x as f64, src.y as f64 + 10.0);
+                    ctx.set_stroke_style(&Self::FG_STYLE.into());
+                    ctx.stroke();
                 }
             }
         }

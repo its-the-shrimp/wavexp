@@ -13,6 +13,7 @@ mod utils;
 mod input;
 mod sound;
 mod sequencer;
+
 use std::{
     fmt::Debug,
     rc::Rc, cell::RefMut};
@@ -36,7 +37,6 @@ use yew::{
     Callback,
     Component,
     Context, Html, html, AttrValue, TargetCast};
-
 use crate::{sound::Sound, utils::ResultToJsResult};
 
 /// responsible for playing sounds and frame-by-frame animations
@@ -80,7 +80,7 @@ impl Player {
 
     pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
         Ok(self.sequencer.set_param(id, value).add_loc(loc!())?
-            | self.editor_plane_handler.set_param(id, value).add_loc(loc!())?)
+            | self.editor_plane_handler.set_param(id, value))
     }
 
     pub fn handle_resize(&mut self) -> JsResult<()> {
