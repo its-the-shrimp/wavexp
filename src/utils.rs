@@ -527,18 +527,18 @@ impl<T> SliceExt<T> for [T] {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct SwapRemoveError {
+pub struct RemoveError {
     index: usize,
     len: usize
 }
 
-impl Display for SwapRemoveError {
+impl Display for RemoveError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "swap_remove index (is {}) should be < len (is {})", self.index, self.len)
+        write!(f, "removal index (is {}) should be < len (is {})", self.index, self.len)
     }
 }
 
-impl Error for SwapRemoveError {}
+impl Error for RemoveError {}
 
 #[derive(Debug)]
 pub enum InsertError {
@@ -558,7 +558,8 @@ impl Display for InsertError {
 impl Error for InsertError {}
 
 pub trait VecExt<T> {
-    fn try_swap_remove(&mut self, index: usize) -> Result<T, SwapRemoveError>;
+    fn try_remove(&mut self, index: usize) -> Result<T, RemoveError>;
+    fn try_swap_remove(&mut self, index: usize) -> Result<T, RemoveError>;
     fn try_insert(&mut self, index: usize, element: T) -> Result<&mut T, InsertError>;
     fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool;
     fn push_sorted(&mut self, value: T) -> usize where T: Ord;
@@ -567,10 +568,24 @@ pub trait VecExt<T> {
 }
 
 impl<T> VecExt<T> for Vec<T> {
-    fn try_swap_remove(&mut self, index: usize) -> Result<T, SwapRemoveError> {
+    fn try_remove(&mut self, index: usize) -> Result<T, RemoveError> {
         let len = self.len();
         if index >= len {
-            return Err(SwapRemoveError{index, len});
+            return Err(RemoveError{index, len})
+        }
+        unsafe {
+            let ptr = self.as_mut_ptr().add(index);
+            let ret = ptr::read(ptr);
+            ptr::copy(ptr.add(1), ptr, len - index - 1);
+            self.set_len(len - 1);
+            Ok(ret)
+        }
+    }
+
+    fn try_swap_remove(&mut self, index: usize) -> Result<T, RemoveError> {
+        let len = self.len();
+        if index >= len {
+            return Err(RemoveError{index, len});
         }
         unsafe {
             let value = ptr::read(self.as_ptr().add(index));
@@ -814,6 +829,10 @@ impl Point {
             * new_space.width() as f32) as i32 + new_space.left();
         self
     }
+
+    #[inline] pub fn map<T>(self, mut f: impl FnMut(i32) -> T) -> [T; 2] {
+        [f(self.x), f(self.y)]
+    }
 }
 
 pub trait HitZone: Sized + Debug {
@@ -969,46 +988,46 @@ macro_rules! real_from_ints_impl {
 }
 
 macro_rules! real_float_operator_impl {
-    ($real:ty { $float:ty } : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
+    ($real:ty { $float:ty } , $other_float:ty : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
         $(
-            impl $op<$float> for $real {
+            impl $op<$other_float> for $real {
                 type Output = Self;
-                #[inline(always)] fn $method(self, rhs: $float) -> Self {
-                    let res = Self(self.0.$method(rhs));
+                #[inline(always)] fn $method(self, rhs: $other_float) -> Self {
+                    let res = Self(self.0.$method(rhs as $float));
                     assert!(!res.0.is_nan());
                     res
                 }
             }
 
-            impl $op<&$float> for $real {
+            impl $op<&$other_float> for $real {
                 type Output = $real;
                 #[inline(always)]
-                fn $method(self, rhs: &$float) -> $real {$op::$method(self, *rhs)}
+                fn $method(self, rhs: &$other_float) -> $real {$op::$method(self, *rhs)}
             }
 
-            impl<'a> $op<$float> for &'a $real {
+            impl<'a> $op<$other_float> for &'a $real {
                 type Output = $real;
                 #[inline(always)]
-                fn $method(self, rhs: $float) -> $real {$op::$method(*self, rhs)}
+                fn $method(self, rhs: $other_float) -> $real {$op::$method(*self, rhs)}
             }
 
-            impl<'a> $op<&$float> for &'a $real {
+            impl<'a> $op<&$other_float> for &'a $real {
                 type Output = $real;
                 #[inline(always)]
-                fn $method(self, rhs: &$float) -> $real {$op::$method(*self, *rhs)}
+                fn $method(self, rhs: &$other_float) -> $real {$op::$method(*self, *rhs)}
             }
 
-            impl $assign_op<$float> for $real {
-                #[inline(always)] fn $assign_method(&mut self, rhs: $float) {
-                    let res = Self(self.0.$method(rhs));
+            impl $assign_op<$other_float> for $real {
+                #[inline(always)] fn $assign_method(&mut self, rhs: $other_float) {
+                    let res = Self(self.0.$method(rhs as $float));
                     assert!(!res.0.is_nan());
                     *self = res;
                 }
             }
 
-            impl $assign_op<&$float> for $real {
+            impl $assign_op<&$other_float> for $real {
                 #[inline(always)]
-                fn $assign_method(&mut self, rhs: &$float) {$assign_op::$assign_method(self, *rhs)}
+                fn $assign_method(&mut self, rhs: &$other_float) {$assign_op::$assign_method(self, *rhs)}
             }
         )+
     }
@@ -1182,7 +1201,10 @@ macro_rules! real_impl {
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
 
-        real_float_operator_impl!($real{$float}:
+        real_float_operator_impl!($real{$float}, $float:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+        real_float_operator_impl!($real{$float}, $other_float:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
         real_real_operator_impl!($real{$float}, $real{$float}:
@@ -1267,6 +1289,49 @@ fn real_floor_to() {
     assert!(r64![1.3].floor_to(r64![0.2]).loose_eq(r64![1.2], 0.005));
     assert!(r64![-1.3].floor_to(r64![0.2]).loose_eq(r64![-1.4], 0.005));
 }
+
+pub trait RatioToInt<Int> {
+    fn to_int_in(self, min: Int, max: Int) -> Int;
+    fn to_int_from(self, min: Int) -> Int;
+    fn to_int_to(self, max: Int) -> Int;
+    fn to_int(self) -> Int;
+}
+
+macro_rules! impl_ratio2int {
+    ($ratio:ty, $float:ty : $($int:ty),+) => {
+        $(
+            impl RatioToInt<$int> for $ratio {
+                fn to_int_in(self, mut min: $int, mut max: $int) -> $int {
+                    if min > max {swap(&mut min, &mut max)}
+                    if      self.0 > max as $float {max}
+                    else if self.0 < min as $float {min}
+                    else   {self.0 as $int}
+                }
+
+                fn to_int_from(self, min: $int) -> $int {
+                    if      self.0 > <$int>::MAX as $float {<$int>::MAX}
+                    else if self.0 <         min as $float {min}
+                    else   {self.0 as $int}
+                }
+
+                fn to_int_to(self, max: $int) -> $int {
+                    if      self.0 >         max as $float {max}
+                    else if self.0 < <$int>::MIN as $float {<$int>::MIN}
+                    else   {self.0 as $int}
+                }
+
+                fn to_int(self) -> $int {
+                    if      self.0 > <$int>::MAX as $float {<$int>::MAX}
+                    else if self.0 < <$int>::MIN as $float {<$int>::MIN}
+                    else   {self.0 as $int}
+                }
+            }
+        )+
+    };
+}
+
+impl_ratio2int!(R32, f32: u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
+impl_ratio2int!(R64, f64: u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
 
 pub trait SaturatingFrom<T> {
     fn saturating_from(x: T) -> Self;

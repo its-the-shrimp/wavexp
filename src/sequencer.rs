@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use web_sys::{AnalyserNode as JsAnalyserNode, GainOptions, DynamicsCompressorOptions, DynamicsCompressorNode, GainNode, AudioContext};
 use crate::{
     sound::{Secs, Sound, Beats},
-    utils::{JsResult, JsResultUtils, R64, VecExt, Check, R32, OptionExt},
+    utils::{JsResult, JsResultUtils, R64, VecExt, Check, R32, OptionExt, ResultToJsResult},
     input::ParamId,
     loc, r64
 };
@@ -99,6 +99,11 @@ impl Sequencer {
                     sound: ty.init(&self.audio_ctx).add_loc(loc!())?,
                     layer, offset: value};
                 self.pattern.push_sorted(block);
+            }
+
+            ParamId::Remove(id) => if value.is_sign_negative() {
+                self.pattern.try_remove(id)
+                    .to_js_result(loc!())?;
             }
 
             ParamId::Play(_) => {
