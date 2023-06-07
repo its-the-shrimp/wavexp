@@ -55,7 +55,10 @@
 				display: flex;
 				justify-content: space-evenly
 			}
-			#io-panel div {flex: 1}
+			#io-panel div {
+				flex: 1;
+				align-self: center;
+			}
 			#piano {
 				flex-grow: 3;
 				margin: 1em
@@ -71,9 +74,11 @@
 			.button {
 				font: 1em consolas;
 				color: #0069E1;
-				border: solid 3px transparent
+				border: solid 3px transparent;
+				align-self: center;
+				background: #181818
 			}
-			.button:hover { border: solid 3px #0069E1}
+			.button:hover {border: solid 3px #0069E1}
 			.button > svg {
 				stroke: #0069E1;
 				stroke-width: 4px;

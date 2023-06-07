@@ -2,9 +2,9 @@ use std::{
     iter::{Iterator, successors as succ},
     slice::from_raw_parts,
     mem::{Discriminant, discriminant},
-    rc::Rc
+    rc::Rc, ops::{Mul, Neg, Not}, cell::Cell
 };
-use web_sys::{HtmlCanvasElement, AnalyserNode, ImageData, MouseEvent, HtmlElement};
+use web_sys::{HtmlCanvasElement, AnalyserNode, ImageData, MouseEvent, HtmlElement, Event};
 use wasm_bindgen::{Clamped, JsValue};
 use yew::{TargetCast, NodeRef, html, Html};
 use crate::{
@@ -213,7 +213,7 @@ enum Focus {
     AwaitNewBlock(SoundType),
     MoveNewBlock(SoundType, Point),
     HoverPlaneWShift(Point),
-    ZoomPlane{init_offset: Point, init_scale_x: Beats, init_scale_y: R32, pivot: Point}
+    ZoomPlane{init_offset: Point, pivot: Point, init_scale_x: Beats, init_scale_y: R32}
 }
 
 impl Focus {
@@ -326,6 +326,7 @@ impl EditorPlaneHandler {
 
     pub fn handle_hover(&mut self, event: Option<CanvasEvent>, pattern: &mut [PatternBlock])
     -> Option<(ParamId, R64)> {
+
         let Some(mut event) = event else {
             self.focus = Focus::None;
             self.last_focus = discriminant(&self.focus);
@@ -333,8 +334,19 @@ impl EditorPlaneHandler {
         };
         event.point += self.offset;
         let [w, h] = self.canvas.cast::<HtmlCanvasElement>()?.size();
-        let offset = Beats::from(event.point.x) / w * self.scale_x;
-        let layer = (R32::from(event.point.y) / h * self.scale_y).to_int();
+        let beat_w  = Beats::from(w) / self.scale_x;
+        let layer_h = R32::from(h) / self.scale_y;
+        let offset  = Beats::from(event.point.x) / beat_w;
+        let layer   = (R32::from(event.point.y) / layer_h).to_int();
+
+        let move_element_focus = |id: usize| {
+            let off = unsafe{pattern.get_unchecked(id)}.offset;
+            Focus::MoveElement(id, event.point.shift_x(off.mul(beat_w).neg().to_int()))
+        };
+
+        let zoom_plane_focus = || Focus::ZoomPlane{
+            init_offset: self.offset, pivot: event.point,
+            init_scale_x: self.scale_x, init_scale_y: self.scale_y};
 
         match self.focus {
             Focus::HoverPlane => match (event.left, event.shift) {
@@ -343,8 +355,8 @@ impl EditorPlaneHandler {
                         init_scale_x: self.scale_x, init_scale_y: self.scale_y}),
                 (true, false) =>
                     Self::id_by_pos(offset, layer, pattern)
-                        .map_or(Focus::MovePlane(event.point - self.offset),
-                            |id| Focus::MoveElement(id, event.point)).into(),
+                        .map_or_else(|| Focus::MovePlane(event.point - self.offset),
+                            move_element_focus).into(),
                 (false, true) =>
                     Some(Focus::HoverPlaneWShift(event.point)),
                 (false, false) =>
@@ -352,12 +364,13 @@ impl EditorPlaneHandler {
                         .map(Focus::HoverElement)
             }.map(|x| self.set_focus(x)).pipe(|_| None),
 
-            Focus::HoverElement(id) => if event.left {
-                Some(Focus::MoveElement(id, event.point))
-            } else if !Self::in_block(unsafe{pattern.get_unchecked(id)}, offset, layer) {
-                Some(Focus::HoverPlane)
-            } else {
-                None
+            Focus::HoverElement(id) => match (event.left, event.shift) {
+                (true, true) => Some(zoom_plane_focus()),
+                (true, false) => Some(move_element_focus(id)),
+                (false, true) => Some(Focus::HoverPlaneWShift(event.point)),
+                (false, false) =>
+                    Self::in_block(unsafe{pattern.get_unchecked(id)}, offset, layer)
+                        .not().then_some(Focus::HoverPlane),
             }.map(|x| self.set_focus(x)).pipe(|_| None),
 
             Focus::MovePlane(ref mut last) => if event.left {
@@ -371,12 +384,14 @@ impl EditorPlaneHandler {
                 Some((ParamId::Select(None), R64::INFINITY))
             }.tee(|_| self.redraw = true),
 
-            Focus::MoveElement(id, ref mut point) => if event.left {
+            Focus::MoveElement(id, init_offset) => if event.left {
                 let block = unsafe{pattern.get_unchecked_mut(id)};
-                block.offset += Beats::from(event.point.x - point.x) / w * self.scale_x;
-                block.offset = block.offset.max(Beats::ZERO);
-                block.layer = (R32::from(event.point.y) / h * self.scale_y).to_int_from(0);
-                *point = event.point;
+                block.offset = (Beats::from(event.point.x - init_offset.x) / beat_w)
+                    .max(Beats::ZERO);
+                if *self.snap_step != 0.0 {
+                    block.offset = (block.offset / self.snap_step).ceil() * self.snap_step;
+                }
+                block.layer = (R32::from(event.point.y) / layer_h).to_int_from(0);
                 None
             } else {
                 self.focus = Focus::HoverElement(id);
@@ -389,8 +404,8 @@ impl EditorPlaneHandler {
                         init_scale_x: self.scale_x, init_scale_y: self.scale_y},
                 (true, false) =>
                     self.focus = Self::id_by_pos(offset, layer, pattern)
-                        .map_or(Focus::MovePlane(event.point - self.offset),
-                            |id| Focus::MoveElement(id, event.point)),
+                        .map_or_else(|| Focus::MovePlane(event.point - self.offset),
+                            move_element_focus),
                 (false, true) => *point = event.point,
                 (false, false) => self.focus = Focus::HoverPlane,
             }.pipe(|_| {self.redraw = true; None}),
@@ -507,30 +522,29 @@ impl EditorPlaneHandler {
         ctx.set_stroke_style(&Self::FG_STYLE.into());
         ctx.stroke();
 
-
         if discriminant(&self.focus) != self.last_focus || self.focus.always_update() {
             self.last_focus = discriminant(&self.focus);
             match self.focus {
                 Focus::None => (),
 
-                Focus::HoverPlane =>
-                    hint_handler.set_hint("Editor plane", "").add_loc(loc!())?,
+                Focus::HoverPlane => hint_handler
+                    .set_hint("Editor plane", "", f64::NAN).add_loc(loc!())?,
 
-                Focus::HoverElement(id) =>
-                    hint_handler.set_hint(&pattern.get(id).to_js_result(loc!())?.desc(),
-                        "Press and hold to drag").add_loc(loc!())?,
+                Focus::HoverElement(id) => hint_handler
+                    .set_hint(&pattern.get(id).to_js_result(loc!())?.desc(),
+                        "Press and hold to drag", f64::NAN).add_loc(loc!())?,
 
-                Focus::MovePlane(_) =>
-                    hint_handler.set_hint("Editor plane", "Dragging").add_loc(loc!())?,
+                Focus::MovePlane(_) => hint_handler
+                    .set_hint("Editor plane", "Dragging", f64::NAN).add_loc(loc!())?,
 
-                Focus::MoveElement(id, _) =>
-                    hint_handler.set_hint(&pattern.get(id).to_js_result(loc!())?.desc(),
-                        "Dragging").add_loc(loc!())?,
+                Focus::MoveElement(id, _) => hint_handler
+                    .set_hint(&pattern.get(id).to_js_result(loc!())?.desc(),
+                        "Dragging", f64::NAN).add_loc(loc!())?,
 
                 Focus::AwaitNewBlock(ty) => {
                     hint_handler.set_hint("Adding new block",
-                        &format!("Drag {} into the editor plane to add it", ty.name()))
-                        .add_loc(loc!())?;
+                        &format!("Drag {} into the editor plane to add it", ty.name()),
+                        f64::NAN).add_loc(loc!())?;
                     ctx.rect(0.0, 0.0, w, 5.0);
                     ctx.rect(0.0, 0.0, 5.0, h);
                     ctx.rect(0.0, h - 5.0, w, 5.0);
@@ -546,7 +560,8 @@ impl EditorPlaneHandler {
                     let layer = (at.y as f64 / layer_h) as i32;
                     let offset = Beats::from(at.x) / beat_w;
                     hint_handler.set_hint("Adding new block",
-                        &format!("Release to add {}", ty.desc(offset, layer)))
+                        &format!("Release to add {}", ty.desc(offset, layer)),
+                        f64::NAN)
                         .add_loc(loc!())?;
 
                     ctx.begin_path();
@@ -571,7 +586,8 @@ impl EditorPlaneHandler {
                 }
 
                 Focus::HoverPlaneWShift(at) => {
-                    hint_handler.set_hint("Editor plane", "Press and hold to zoom").add_loc(loc!())?;
+                    hint_handler.set_hint("Editor plane", "Press and hold to zoom", f64::NAN)
+                        .add_loc(loc!())?;
                     let layer = (at.y as f64 / layer_h) as i32;
                     let offset = at.x as f64 / beat_w;
                     ctx.set_text_align("left");
@@ -582,7 +598,7 @@ impl EditorPlaneHandler {
                 }
 
                 Focus::ZoomPlane{pivot, init_offset, ..} => {
-                    hint_handler.set_hint("Editor plane: zooming", "Release to stop")
+                    hint_handler.set_hint("Editor plane: zooming", "Release to stop", f64::NAN)
                         .add_loc(loc!())?;
                     let [x, y] = (pivot - init_offset).map(|x| x as f64);
                     ctx.begin_path();
@@ -595,7 +611,6 @@ impl EditorPlaneHandler {
                 }
             }
         }
-
         Ok(())
     }
 }
@@ -603,14 +618,15 @@ impl EditorPlaneHandler {
 #[derive(PartialEq, Default)]
 pub struct HintHandler {
     main_bar: NodeRef,
-    aux_bar: NodeRef
+    aux_bar: NodeRef,
+    last_access: Cell<f64>
 }
 
 impl HintHandler {
-    const DEFAULT_MAIN: &str = "Here will be a hint";
-    const DEFAULT_AUX: &str = "Hover over anything to get a hint";
-
-    #[inline] pub fn set_hint(&self, main: &str, aux: &str) -> JsResult<()> {
+    /// every consequent call with the same `access_id` is ignored after the 1st
+    #[inline] pub fn set_hint(&self, main: &str, aux: &str, access_id: f64) -> JsResult<()> {
+        if self.last_access.get() == access_id {return Ok(())}
+        self.last_access.set(access_id);
         self.main_bar.cast::<HtmlElement>().to_js_result(loc!())?
             .set_inner_text(main);
         self.aux_bar.cast::<HtmlElement>().to_js_result(loc!())?
@@ -618,18 +634,11 @@ impl HintHandler {
         Ok(())
     }
 
-    #[inline] pub fn clear_hint(&self) -> JsResult<()> {
-        self.main_bar.cast::<HtmlElement>().to_js_result(loc!())?
-            .set_inner_text(Self::DEFAULT_MAIN);
-        self.aux_bar.cast::<HtmlElement>().to_js_result(loc!())?
-            .set_inner_text(Self::DEFAULT_AUX);
-        Ok(())
-    }
-
     pub fn setter<T>(self: &Rc<Self>, main: impl AsRef<str>, aux: impl AsRef<str>)
-    -> impl Fn(T) {
+    -> impl Fn(T) where T: AsRef<Event> {
         let res = Rc::clone(self);
-        move |_| _ = res.set_hint(main.as_ref(), aux.as_ref()).report_err(loc!())
+        move |e| _ = res.set_hint(main.as_ref(), aux.as_ref(), e.as_ref().time_stamp())
+            .report_err(loc!())
     }
 
     #[inline] pub fn main_bar(&self) -> &NodeRef {

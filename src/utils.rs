@@ -55,6 +55,7 @@ pub trait BoolExt {
     fn then_negate<T: Neg<Output=T>>(self, val: T) -> T;
     fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
     fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T>;
+    fn toggle(&mut self) -> Self;
 }
 
 impl BoolExt for bool {
@@ -81,34 +82,14 @@ impl BoolExt for bool {
     #[inline] fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T> {
         if self {f()} else {None}
     }
-}
-/*
-pub trait ArrayExt<T, const M: usize> {
-    fn concat<const N: usize>(self, other: [T; N]) -> [T; N + M];
-    fn split_first(self) -> (T, [T; M - 1]);
-}
 
-impl<T, const M: usize> ArrayExt<T, M> for [T; M] {
-    #[inline] fn concat<const N: usize>(self, other: [T; N]) -> [T; N + M] {
-        let mut res = std::mem::MaybeUninit::<[T; N + M]>::uninit();
-        unsafe {
-            let res_ptr = res.as_mut_ptr() as *mut T;
-            std::ptr::copy_nonoverlapping(self.as_ptr(), res_ptr, M);
-            std::ptr::copy_nonoverlapping(other.as_ptr(), res_ptr.add(M), N);
-            res.assume_init()
-        }
-    }
-
-    #[inline] fn split_first(self) -> (T, [T; M - 1]) {
-        let mut res = std::mem::MaybeUninit::<[T; M - 1]>::uninit();
-        unsafe {
-            let (first, others) = self.as_slice().split_first().unwrap_unchecked();
-            std::ptr::copy_nonoverlapping(others.as_ptr(), res.as_mut_ptr() as *mut T, M - 1);
-            ((first as *const T).read(), res.assume_init())
-        }
+    #[inline] fn toggle(&mut self) -> Self {
+        let res = *self;
+        *self = !*self;
+        res
     }
 }
-*/
+
 #[allow(non_camel_case_types)]
 #[allow(dead_code)]
 pub mod js_types {
@@ -830,6 +811,12 @@ impl Point {
         self
     }
 
+    #[inline]
+    pub fn shift_x(self, off: i32) -> Self {Self{x: self.x + off, y: self.y}}
+
+    #[inline]
+    pub fn shift_y(self, off: i32) -> Self {Self{x: self.x, y: self.y + off}}
+
     #[inline] pub fn map<T>(self, mut f: impl FnMut(i32) -> T) -> [T; 2] {
         [f(self.x), f(self.y)]
     }
@@ -1254,8 +1241,11 @@ macro_rules! real_impl {
             #[inline]
             pub fn ceil(self) -> Self {Self(self.0.ceil())}
 
+            #[inline]
+            pub fn round(self) -> Self {Self(self.0.round())}
+
             #[inline] pub fn floor_to(self, step: Self) -> Self {
-                match Self::try_from(self.0 - self.0.rem_euclid(*step)) {
+                match Self::try_from(self.0 - self.0 % *step) {
                     Ok(x) => x,
                     Err(_) => if step.is_infinite() {step} else {self}
                 }
@@ -1263,6 +1253,9 @@ macro_rules! real_impl {
 
             #[inline]
             pub fn is_finite(&self) -> bool {self.0.is_finite()}
+
+            #[inline]
+            pub fn abs(self) -> Self {Self(self.0.abs())}
         }
     };
 }

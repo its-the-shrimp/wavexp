@@ -1,12 +1,13 @@
 use std::cmp::Ordering;
 use web_sys::{AnalyserNode as JsAnalyserNode, GainOptions, DynamicsCompressorOptions, DynamicsCompressorNode, GainNode, AudioContext};
 use crate::{
-    sound::{Secs, Sound, Beats},
+    sound::{Secs, Sound, Beats, MSecs, FromBeats},
     utils::{JsResult, JsResultUtils, R64, VecExt, Check, R32, OptionExt, ResultToJsResult},
     input::ParamId,
     loc, r64
 };
 
+#[derive(Debug)]
 pub struct PatternBlock {
     pub sound: Sound,
     pub layer: i32,
@@ -106,9 +107,15 @@ impl Sequencer {
                     .to_js_result(loc!())?;
             }
 
-            ParamId::Play(_) => {
-                self.state = value.is_sign_positive().then_some(0);
+            ParamId::Play => if value.is_sign_positive() {
+                self.state = Some(0);
                 self.start_time = R64::INFINITY;
+                for block in self.pattern.iter_mut() {
+                    block.sound.reset().add_loc(loc!())?;
+                }
+            } else {
+                self.state = None;
+                self.start_time = R64::NEG_INFINITY;
             }
 
             ParamId::Bpm =>
@@ -125,13 +132,14 @@ impl Sequencer {
         Ok(false)
     }
 
-    pub fn poll(&mut self, time: Secs) -> JsResult<()> {
+    pub fn poll(&mut self, time: MSecs) -> JsResult<()> {
+        let time: Secs = time / 1000;
         if let Some(ref mut id) = self.state {
-            self.start_time = self.start_time.check(R64::is_finite)
+            self.start_time = self.start_time.check(Secs::is_finite)
                 .unwrap_or(time);
             let offset = time - self.start_time;
-            for PatternBlock{sound, ..} in self.pattern.iter_mut().skip(*id).take_while(|x| x.offset <= offset) {
-                let when = sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;
+            for block in self.pattern.iter_mut().skip(*id).take_while(|x| x.offset.to_secs(self.bps) <= offset) {
+                let when = block.sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;
                 self.pending.push_sorted_by_key((*id, when), |x| x.0);
                 *id += 1;
             }
@@ -139,15 +147,15 @@ impl Sequencer {
                 // TODO: make it optionally loop around
                 self.state = None;
             }
-        } else {
+        } else if self.start_time.is_sign_negative() {
             for (id, _) in self.pending.drain(..) {
                 unsafe{self.pattern.get_unchecked_mut(id)}
                     .sound.stop(time).add_loc(loc!())?;
             }
         }
 
-        let n_due = self.pending.iter().position(|x| x.1 > time).unwrap_or(0);
-        let due: Vec<usize> = self.pending.drain(..n_due).map(|x| x.0).collect();
+        let n_due = self.pending.iter().position(|x| x.1 > time).unwrap_or(self.pending.len());
+        let due: Vec<usize> = self.pending.drain(..n_due).map(|x| x.0).collect::<Vec<_>>();
         for id in due {
             let when = unsafe{self.pattern.get_unchecked_mut(id)}
                 .sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;

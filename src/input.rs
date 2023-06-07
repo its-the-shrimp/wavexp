@@ -21,7 +21,7 @@ use crate::{
         HtmlCanvasExt,
         HtmlDocumentExt,
         OptionExt, BoolExt, R64},
-    sound::{Note, SoundType},
+    sound::SoundType,
     visual::HintHandler,
     MainCmd,
     loc};
@@ -37,7 +37,7 @@ pub enum Cmd {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ParamId {
-    Play(Note),
+    Play,
     Select(Option<usize>),
     Add(SoundType, i32),
     Remove(usize),
@@ -52,7 +52,7 @@ impl ParamId {
     /// returns `Some(id)` when the parameter ID belongs to a specific sound block
     pub fn block_id(&self) -> Option<usize> {
         match self {
-            ParamId::Play(..)
+            ParamId::Play
             | ParamId::Select(..)
             | ParamId::Add(..)
             | ParamId::Remove(..)
@@ -75,7 +75,7 @@ impl ParamId {
             | ParamId::NoteLength(..) => true,
 
             ParamId::Note(..)
-            | ParamId::Play(..)
+            | ParamId::Play
             | ParamId::Bpm
             | ParamId::MasterGain
             | ParamId::SnapStep => false,
@@ -151,15 +151,12 @@ impl Component for Slider {
                         if self.floored {self.value.floor()} else {self.value}).send();
                 }
 
-                Cmd::HoverIn(_) => {
+                Cmd::HoverIn(e) => {
                     self.hovered = true;
-                    hint.set_hint(name, "").add_loc(loc!())?;
+                    hint.set_hint(name, "", e.time_stamp()).add_loc(loc!())?;
                 }
 
-                Cmd::HoverOut(_) => {
-                    self.hovered = false;
-                    hint.clear_hint().add_loc(loc!())?;
-                }
+                Cmd::HoverOut(_) => self.hovered = false,
             }
             return true
         }.report_err(loc!());
@@ -271,15 +268,12 @@ impl Component for Switch {
                     self.focused = false;
                 }
 
-                Cmd::HoverIn(_) => {
+                Cmd::HoverIn(e) => {
                     self.hovered = true;
-                    hint.set_hint(name, "").add_loc(loc!())?;
+                    hint.set_hint(name, "", e.time_stamp()).add_loc(loc!())?;
                 }
 
-                Cmd::HoverOut(_) => {
-                    self.hovered = false;
-                    hint.clear_hint().add_loc(loc!())?;
-                }
+                Cmd::HoverOut(_) => self.hovered = false,
             }
             return true
         }.report_err(loc!());
@@ -334,14 +328,14 @@ pub struct Button;
 
 #[derive(PartialEq, yew::Properties)]
 pub struct ButtonProps {
-    #[prop_or_default]
-    pub class: Classes,
     pub name: AttrValue,
     pub children: Children,
     pub id: ParamId,
     pub hint: Rc<HintHandler>,
     #[prop_or(false)]
-    pub svg: bool
+    pub svg: bool,
+    #[prop_or_default]
+    pub class: Classes
 }
 
 impl Component for Button {
@@ -357,7 +351,7 @@ impl Component for Button {
                 Cmd::Drag(_) => (),
                 Cmd::Focus(_) => MainCmd::SetParam(*id, R64::INFINITY).send(),
                 Cmd::Unfocus(_) => MainCmd::SetParam(*id, R64::NEG_INFINITY).send(),
-                Cmd::HoverIn(_) => hint.set_hint(name, "").add_loc(loc!())?,
+                Cmd::HoverIn(e) => hint.set_hint(name, "", e.time_stamp()).add_loc(loc!())?,
                 Cmd::HoverOut(_) => ()
             }
         }.report_err(loc!());
@@ -379,13 +373,13 @@ impl Component for Button {
             }
         } else {
             html!{
-                <div {class}
+                <button {class} id={format!("Button({:?})", ctx.props().id)}
                 onpointerdown={ctx.link().callback(Cmd::Focus)}
                 onpointerup={ctx.link().callback(Cmd::Unfocus)}
                 onpointerenter={ctx.link().callback(Cmd::HoverIn)}
                 onpointerleave={ctx.link().callback(Cmd::HoverOut)}>
                     {ctx.props().children.clone()}
-                </div>
+                </button>
             }
         }
     }

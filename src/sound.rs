@@ -12,7 +12,7 @@ use crate::{
         JsResultUtils,
         SliceExt,
         R64, R32,
-        SaturatingInto, Pipe},
+        SaturatingInto, Pipe, BoolExt},
     input::{Switch, ParamId, Slider},
     loc,
     r32, r64, visual::HintHandler};
@@ -215,7 +215,7 @@ impl SoundType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sound {
-    Note{note: Note, len: Beats, gen: OscillatorNode}
+    Note{note: Note, len: Beats, gen: OscillatorNode, started: bool}
 }
 
 impl Sound {
@@ -227,7 +227,7 @@ impl Sound {
         let gen = OscillatorNode::new(ctx).add_loc(loc!())?;
         gen.start().add_loc(loc!())?;
         Ok(Self::Note{note: Note::MAX, len: r64![1.0],
-            gen})
+            gen, started: false})
     }
 
     #[inline] pub fn name(&self) -> &'static str {
@@ -236,17 +236,22 @@ impl Sound {
         }
     }
 
+    #[inline] pub fn reset(&mut self) -> JsResult<()> {
+        Ok(match self {
+            Sound::Note{gen, ..} =>
+                gen.disconnect().add_loc(loc!())?
+        })
+    }
+
     #[inline] pub fn poll(&mut self, time: Secs, plug: &AudioNode, bps: Beats) -> JsResult<Secs> {
         Ok(match self {
-            Sound::Note{note, len, gen} => if len.is_sign_positive() {
-                gen.connect_with_audio_node(plug).add_loc(loc!())?;
-                gen.frequency().set_value(*note.freq());
-                let res = len.to_secs(bps);
-                *len = -*len;
-                res
-            } else {
+            Sound::Note{note, len, gen, started} => if started.toggle() {
                 self.stop(time).add_loc(loc!())?;
                 Secs::INFINITY
+            } else {
+                gen.connect_with_audio_node(plug).add_loc(loc!())?;
+                gen.frequency().set_value(*note.freq());
+                len.to_secs(bps) + time
             }
         })
     }

@@ -24,7 +24,7 @@ use sequencer::Sequencer;
 use utils::{
     JsResultUtils, JsResult,
     MaybeCell, WasmCell,
-    window, R64, Pipe, Point};
+    window, R64, Point};
 use web_sys::{
     console::warn_1,
     HtmlCanvasElement, PointerEvent, DragEvent};
@@ -36,7 +36,7 @@ use js_sys::Function as JsFunction;
 use yew::{
     Callback,
     Component,
-    Context, Html, html, AttrValue, TargetCast};
+    Context, Html, html, TargetCast};
 use crate::{sound::Sound, utils::ResultToJsResult};
 
 /// responsible for playing sounds and frame-by-frame animations
@@ -104,8 +104,6 @@ pub enum MainCmd {
     Leave,
     SetParam(ParamId, R64),
     ReportError(JsValue),
-    SetHint(AttrValue, AttrValue),
-    ClearHint,
     SetTab(usize),
     Resize,
     BlockAddStart(SoundType),
@@ -184,14 +182,6 @@ impl Component for Main {
                     } else {false}
                 }
 
-                MainCmd::SetHint(main, aux) =>
-                    GLOBAL_PLAYER.get_mut().add_loc(loc!())?
-                        .hint_handler.set_hint(&main, &aux).pipe(|_| false),
-
-                MainCmd::ClearHint =>
-                    GLOBAL_PLAYER.get_mut().add_loc(loc!())?
-                        .hint_handler.clear_hint().pipe(|_| false),
-
                 MainCmd::SetParam(id, value) =>
                     GLOBAL_PLAYER.get_mut().add_loc(loc!())?
                         .set_param(id, value).add_loc(loc!())?,
@@ -266,9 +256,7 @@ impl Component for Main {
                         if let Some((id, block)) = block {
                             {block.sound.params(id, hint)}
                             <div id="general-ctrl" class="dark-bg">
-                                <Button {hint}
-                                id={ParamId::Remove(id)}
-                                name={"Remove component"}>
+                                <Button {hint} id={ParamId::Remove(id)} name="Remove component">
                                     <svg viewBox="0 0 100 100">
                                         <polygon points="27,35 35,27 50,42 65,27 73,35 58,50 73,65 65,73 50,58 35,73 27,65 42,50"/>
                                     </svg>
@@ -303,7 +291,7 @@ impl Component for Main {
                                 <div id="block-add-menu">
                                     {for Sound::TYPES.iter().map(|x| html!{
                                         <div draggable="true"
-                                        onpointerover={hint.setter(x.name(), "Click to add block to plane")}
+                                        onpointerover={hint.setter(x.name(), "Hold and drag to add block to plane")}
                                         ondragstart={ctx.link().callback(|_| MainCmd::BlockAddStart(*x))}
                                         ondragend={ctx.link().callback(|_| MainCmd::BlockAddEnd(None))}>
                                             <p>{x.name()}</p>
@@ -324,6 +312,11 @@ impl Component for Main {
                 </div>
                 <div id="io-panel" onpointerover={hint.setter("Editor plane settings", "")}>
                     {player.editor_plane_handler.params(hint)}
+                    <Button {hint} id={ParamId::Play} name="Play">
+                        <svg viewBox="0 0 100 100" height="100%">
+                            <polygon points="25,25 75,50 25,75"/>
+                        </svg>
+                    </Button>
                     <canvas id="sound-visualiser" ref={player.sound_visualiser.canvas().clone()} class="blue-border"
                     onpointerover={hint.setter("Sound visualiser", "")}/>
                 </div>
@@ -346,6 +339,5 @@ impl Component for Main {
 }
 
 fn main() {
-    yew::set_event_bubbling(false);
     yew::Renderer::<Main>::new().render();
 }
