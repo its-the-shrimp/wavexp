@@ -244,11 +244,11 @@ impl Component for Main {
             let hint = &player.hint_handler;
 
             html! {<>
-                <div id="main-panel">
+                <div id="main-panel" onpointerenter={hint.setter("www", "")}>
                     <div id="ctrl-panel" class="dark-bg"
-                    onpointerover={hint.setter("Settings", block.map_or("General".to_owned(), |(_, x)| x.desc()))}>
+                    onpointerenter={hint.setter("Settings", block.map_or("General".to_owned(), |(_, x)| x.desc()))}>
                         <div id="hint" class="light-bg"
-                        onpointerover={hint.setter("Hint bar", "for useful messages about the app's controls")}>
+                        onpointerenter={hint.setter("Hint bar", "for useful messages about the app's controls")}>
                             <span id="main-hint" ref={player.hint_handler.main_bar().clone()}/>
                             <br/>
                             <span id="aux-hint" ref={player.hint_handler.aux_bar().clone()}/>
@@ -267,12 +267,12 @@ impl Component for Main {
                             <div id="tab-list">
                                 <div id={(self.editor_tab_id == 0).then_some("selected-tab")}
                                 onpointerup={ctx.link().callback(|_| MainCmd::SetTab(0))}
-                                onpointerover={hint.setter("General", "Settings tab")}>
+                                onpointerenter={hint.setter("General", "Settings tab")}>
                                     <p onpointerup={ctx.link().callback(|_| MainCmd::SetTab(0))}>{"General"}</p>
                                 </div>
                                 <div id={(self.editor_tab_id == 1).then_some("selected-tab")}
                                 onpointerup={ctx.link().callback(|_| MainCmd::SetTab(1))}
-                                onpointerover={hint.setter("Add Block", "Settings tab")}>
+                                onpointerenter={hint.setter("Add Block", "Settings tab")}>
                                     <p onpointerup={ctx.link().callback(|_| MainCmd::SetTab(1))}>{"Add Block"}</p>
                                 </div>
                             </div>
@@ -291,7 +291,7 @@ impl Component for Main {
                                 <div id="block-add-menu">
                                     {for Sound::TYPES.iter().map(|x| html!{
                                         <div draggable="true"
-                                        onpointerover={hint.setter(x.name(), "Hold and drag to add block to plane")}
+                                        onpointerenter={hint.setter(x.name(), "Hold and drag to add block to plane")}
                                         ondragstart={ctx.link().callback(|_| MainCmd::BlockAddStart(*x))}
                                         ondragend={ctx.link().callback(|_| MainCmd::BlockAddEnd(None))}>
                                             <p>{x.name()}</p>
@@ -310,7 +310,7 @@ impl Component for Main {
                     ondragleave={ctx.link().callback(|_| MainCmd::DragNewBlockOut)}
                     ondrop={ctx.link().callback(|e| MainCmd::BlockAddEnd(Some(e)))}/>
                 </div>
-                <div id="io-panel" onpointerover={hint.setter("Editor plane settings", "")}>
+                <div id="io-panel" onpointerenter={hint.setter("Editor plane settings", "")}>
                     {player.editor_plane_handler.params(hint)}
                     <Button {hint} id={ParamId::Play} name="Play">
                         <svg viewBox="0 0 100 100" height="100%">
@@ -318,7 +318,7 @@ impl Component for Main {
                         </svg>
                     </Button>
                     <canvas id="sound-visualiser" ref={player.sound_visualiser.canvas().clone()} class="blue-border"
-                    onpointerover={hint.setter("Sound visualiser", "")}/>
+                    onpointerenter={hint.setter("Sound visualiser", "")}/>
                 </div>
                 if self.error_count > 0 {
                     <div id="error-count">{format!("Errors: {}", self.error_count)}</div>

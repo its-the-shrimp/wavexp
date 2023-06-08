@@ -151,9 +151,9 @@ impl Component for Slider {
                         if self.floored {self.value.floor()} else {self.value}).send();
                 }
 
-                Cmd::HoverIn(e) => {
+                Cmd::HoverIn(_) => {
                     self.hovered = true;
-                    hint.set_hint(name, "", e.time_stamp()).add_loc(loc!())?;
+                    hint.set_hint(name, "").add_loc(loc!())?;
                 }
 
                 Cmd::HoverOut(_) => self.hovered = false,
@@ -268,9 +268,9 @@ impl Component for Switch {
                     self.focused = false;
                 }
 
-                Cmd::HoverIn(e) => {
+                Cmd::HoverIn(_) => {
                     self.hovered = true;
-                    hint.set_hint(name, "", e.time_stamp()).add_loc(loc!())?;
+                    hint.set_hint(name, "").add_loc(loc!())?;
                 }
 
                 Cmd::HoverOut(_) => self.hovered = false,
@@ -351,7 +351,7 @@ impl Component for Button {
                 Cmd::Drag(_) => (),
                 Cmd::Focus(_) => MainCmd::SetParam(*id, R64::INFINITY).send(),
                 Cmd::Unfocus(_) => MainCmd::SetParam(*id, R64::NEG_INFINITY).send(),
-                Cmd::HoverIn(e) => hint.set_hint(name, "", e.time_stamp()).add_loc(loc!())?,
+                Cmd::HoverIn(_) => hint.set_hint(name, "").add_loc(loc!())?,
                 Cmd::HoverOut(_) => ()
             }
         }.report_err(loc!());

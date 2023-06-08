@@ -4,7 +4,7 @@ use std::{
 use web_sys::{
     AudioNode,
     AudioContext,
-    OscillatorNode};
+    OscillatorNode, OscillatorOptions};
 use yew::{html, Html};
 use crate::{
     utils::{
@@ -225,7 +225,6 @@ impl Sound {
 
     #[inline] fn new_note(ctx: &AudioContext) -> JsResult<Self> {
         let gen = OscillatorNode::new(ctx).add_loc(loc!())?;
-        gen.start().add_loc(loc!())?;
         Ok(Self::Note{note: Note::MAX, len: r64![1.0],
             gen, started: false})
     }
@@ -236,21 +235,23 @@ impl Sound {
         }
     }
 
-    #[inline] pub fn reset(&mut self) -> JsResult<()> {
+    #[inline] pub fn reset(&mut self, ctx: &AudioContext) -> JsResult<()> {
         Ok(match self {
-            Sound::Note{gen, ..} =>
-                gen.disconnect().add_loc(loc!())?
+            Sound::Note{gen, note, ..} => {
+                *gen = OscillatorNode::new_with_options(ctx,
+                    OscillatorOptions::new().frequency(*note.freq())).add_loc(loc!())?
+            }
         })
     }
 
     #[inline] pub fn poll(&mut self, time: Secs, plug: &AudioNode, bps: Beats) -> JsResult<Secs> {
         Ok(match self {
-            Sound::Note{note, len, gen, started} => if started.toggle() {
+            Sound::Note{len, gen, started, ..} => if started.toggle() {
                 self.stop(time).add_loc(loc!())?;
                 Secs::INFINITY
             } else {
                 gen.connect_with_audio_node(plug).add_loc(loc!())?;
-                gen.frequency().set_value(*note.freq());
+                gen.start().add_loc(loc!())?;
                 len.to_secs(bps) + time
             }
         })

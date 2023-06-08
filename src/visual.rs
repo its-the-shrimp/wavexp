@@ -2,7 +2,8 @@ use std::{
     iter::{Iterator, successors as succ},
     slice::from_raw_parts,
     mem::{Discriminant, discriminant},
-    rc::Rc, ops::{Mul, Neg, Not}, cell::Cell
+    rc::Rc,
+    ops::{Mul, Neg, Not}
 };
 use web_sys::{HtmlCanvasElement, AnalyserNode, ImageData, MouseEvent, HtmlElement, Event};
 use wasm_bindgen::{Clamped, JsValue};
@@ -141,6 +142,7 @@ impl SoundVisualiser {
         &self.canvas
     }
 
+    // TODO: correctly readjust the graph when shrinked in the UI
     pub fn handle_resize(&mut self) -> JsResult<()> {
         let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
         let [w, h] = canvas.client_size().map(|x| x as u32);
@@ -155,17 +157,7 @@ impl SoundVisualiser {
 
     // TODO: make it actually work
 	pub fn poll(&mut self, input: Option<&AnalyserNode>) -> JsResult<()> {
-		// TODO: correctly readjust the graph when shrinked in the UI
         let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
-        canvas.sync();
-        let (new_width, new_height) = (canvas.width(), canvas.height());
-        if new_width * new_height != self.width * self.height {
-            self.width = new_width;
-            self.height = new_height;
-            self.in_data.resize(new_height as usize, 0);
-            self.out_data.resize(new_width as usize * new_height as usize, Self::BG);
-        }
-
         if let Some(input) = input {
             let len = self.out_data.len();
             self.out_data.copy_within(.. len - self.height as usize, self.height as usize);
@@ -326,12 +318,12 @@ impl EditorPlaneHandler {
 
     pub fn handle_hover(&mut self, event: Option<CanvasEvent>, pattern: &mut [PatternBlock])
     -> Option<(ParamId, R64)> {
-
         let Some(mut event) = event else {
             self.focus = Focus::None;
             self.last_focus = discriminant(&self.focus);
             return None
         };
+
         event.point += self.offset;
         let [w, h] = self.canvas.cast::<HtmlCanvasElement>()?.size();
         let beat_w  = Beats::from(w) / self.scale_x;
@@ -528,23 +520,24 @@ impl EditorPlaneHandler {
                 Focus::None => (),
 
                 Focus::HoverPlane => hint_handler
-                    .set_hint("Editor plane", "", f64::NAN).add_loc(loc!())?,
+                    .set_hint("Editor plane", "").add_loc(loc!())?,
 
                 Focus::HoverElement(id) => hint_handler
                     .set_hint(&pattern.get(id).to_js_result(loc!())?.desc(),
-                        "Press and hold to drag", f64::NAN).add_loc(loc!())?,
+                        "Press and hold to drag").add_loc(loc!())?,
 
                 Focus::MovePlane(_) => hint_handler
-                    .set_hint("Editor plane", "Dragging", f64::NAN).add_loc(loc!())?,
+                    .set_hint("Editor plane", "Dragging").add_loc(loc!())?,
 
                 Focus::MoveElement(id, _) => hint_handler
                     .set_hint(&pattern.get(id).to_js_result(loc!())?.desc(),
-                        "Dragging", f64::NAN).add_loc(loc!())?,
+                        "Dragging").add_loc(loc!())?,
 
                 Focus::AwaitNewBlock(ty) => {
                     hint_handler.set_hint("Adding new block",
-                        &format!("Drag {} into the editor plane to add it", ty.name()),
-                        f64::NAN).add_loc(loc!())?;
+                        &format!("Drag {} into the editor plane to add it", ty.name()))
+                        .add_loc(loc!())?;
+                    ctx.begin_path();
                     ctx.rect(0.0, 0.0, w, 5.0);
                     ctx.rect(0.0, 0.0, 5.0, h);
                     ctx.rect(0.0, h - 5.0, w, 5.0);
@@ -560,8 +553,7 @@ impl EditorPlaneHandler {
                     let layer = (at.y as f64 / layer_h) as i32;
                     let offset = Beats::from(at.x) / beat_w;
                     hint_handler.set_hint("Adding new block",
-                        &format!("Release to add {}", ty.desc(offset, layer)),
-                        f64::NAN)
+                        &format!("Release to add {}", ty.desc(offset, layer)))
                         .add_loc(loc!())?;
 
                     ctx.begin_path();
@@ -586,7 +578,7 @@ impl EditorPlaneHandler {
                 }
 
                 Focus::HoverPlaneWShift(at) => {
-                    hint_handler.set_hint("Editor plane", "Press and hold to zoom", f64::NAN)
+                    hint_handler.set_hint("Editor plane", "Press and hold to zoom")
                         .add_loc(loc!())?;
                     let layer = (at.y as f64 / layer_h) as i32;
                     let offset = at.x as f64 / beat_w;
@@ -598,7 +590,7 @@ impl EditorPlaneHandler {
                 }
 
                 Focus::ZoomPlane{pivot, init_offset, ..} => {
-                    hint_handler.set_hint("Editor plane: zooming", "Release to stop", f64::NAN)
+                    hint_handler.set_hint("Editor plane: zooming", "Release to stop")
                         .add_loc(loc!())?;
                     let [x, y] = (pivot - init_offset).map(|x| x as f64);
                     ctx.begin_path();
@@ -619,14 +611,10 @@ impl EditorPlaneHandler {
 pub struct HintHandler {
     main_bar: NodeRef,
     aux_bar: NodeRef,
-    last_access: Cell<f64>
 }
 
 impl HintHandler {
-    /// every consequent call with the same `access_id` is ignored after the 1st
-    #[inline] pub fn set_hint(&self, main: &str, aux: &str, access_id: f64) -> JsResult<()> {
-        if self.last_access.get() == access_id {return Ok(())}
-        self.last_access.set(access_id);
+    #[inline] pub fn set_hint(&self, main: &str, aux: &str) -> JsResult<()> {
         self.main_bar.cast::<HtmlElement>().to_js_result(loc!())?
             .set_inner_text(main);
         self.aux_bar.cast::<HtmlElement>().to_js_result(loc!())?
@@ -637,7 +625,7 @@ impl HintHandler {
     pub fn setter<T>(self: &Rc<Self>, main: impl AsRef<str>, aux: impl AsRef<str>)
     -> impl Fn(T) where T: AsRef<Event> {
         let res = Rc::clone(self);
-        move |e| _ = res.set_hint(main.as_ref(), aux.as_ref(), e.as_ref().time_stamp())
+        move |_| _ = res.set_hint(main.as_ref(), aux.as_ref())
             .report_err(loc!())
     }
 

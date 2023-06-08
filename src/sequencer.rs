@@ -111,7 +111,7 @@ impl Sequencer {
                 self.state = Some(0);
                 self.start_time = R64::INFINITY;
                 for block in self.pattern.iter_mut() {
-                    block.sound.reset().add_loc(loc!())?;
+                    block.sound.reset(&self.audio_ctx).add_loc(loc!())?;
                 }
             } else {
                 self.state = None;
@@ -148,6 +148,7 @@ impl Sequencer {
                 self.state = None;
             }
         } else if self.start_time.is_sign_negative() {
+            self.start_time = Secs::INFINITY;
             for (id, _) in self.pending.drain(..) {
                 unsafe{self.pattern.get_unchecked_mut(id)}
                     .sound.stop(time).add_loc(loc!())?;
