@@ -24,10 +24,10 @@ use sequencer::Sequencer;
 use utils::{
     JsResultUtils, JsResult,
     MaybeCell, WasmCell,
-    window, R64, Point};
+    window, R64, Point, OptionExt};
 use web_sys::{
     console::warn_1,
-    HtmlCanvasElement, PointerEvent, DragEvent};
+    HtmlCanvasElement, PointerEvent, DragEvent, HtmlElement, SvgElement, Element};
 use wasm_bindgen::{
     JsCast,
     JsValue,
@@ -37,7 +37,7 @@ use yew::{
     Callback,
     Component,
     Context, Html, html, TargetCast};
-use crate::{sound::Sound, utils::ResultToJsResult};
+use crate::{sound::{Sound, Secs}, utils::ResultToJsResult};
 
 /// responsible for playing sounds and frame-by-frame animations
 struct Player {
@@ -54,14 +54,17 @@ impl Player {
     fn init_global() -> JsResult<RefMut<'static, Self>> {
         fn render(time: f64) {
             _ = js_try!{type = !:
-                let time: R64 = time.try_into().to_js_result(loc!())?;
+                let time = Secs::try_from(time).to_js_result(loc!())? / 1000u16;
                 let mut handle = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
                 let Player{ref mut editor_plane_handler, ref mut sound_visualiser,
                     ref mut sequencer, ref mut hint_handler, ref js_callback} = *handle;
 
                 sequencer.poll(time).add_loc(loc!())?;
-                sound_visualiser.poll(sequencer.visualiser()).add_loc(loc!())?;
-                editor_plane_handler.poll(sequencer.pattern(), hint_handler).add_loc(loc!())?;
+                if let Some(visualiser) = sequencer.visualiser() {
+                    sound_visualiser.poll(visualiser).add_loc(loc!())?;
+                }
+                editor_plane_handler.poll(sequencer.pattern(), hint_handler,
+                    sequencer.cur_play_offset(time)).add_loc(loc!())?;
                 window().request_animation_frame(js_callback).add_loc(loc!())?;
                 return
             }.report_err(loc!());
@@ -241,22 +244,21 @@ impl Component for Main {
             let player = GLOBAL_PLAYER.get().add_loc(loc!())?;
             let block = player.editor_plane_handler.selected_element_id()
                 .map(|x| (x, unsafe{player.sequencer.pattern().get_unchecked(x)}));
-            let hint = &player.hint_handler;
 
             html! {<>
-                <div id="main-panel" onpointerenter={hint.setter("www", "")}>
+                <div id="main-panel" data-main-hint="www">
                     <div id="ctrl-panel" class="dark-bg"
-                    onpointerenter={hint.setter("Settings", block.map_or("General".to_owned(), |(_, x)| x.desc()))}>
+                    data-main-hint="Settings" data-aux-hint={block.map_or_else(|| "General".to_owned(), |(_, x)| x.desc())}>
                         <div id="hint" class="light-bg"
-                        onpointerenter={hint.setter("Hint bar", "for useful messages about the app's controls")}>
+                        data-main-hint="Hint bar" data-aux-hint="for useful messages about the app's controls">
                             <span id="main-hint" ref={player.hint_handler.main_bar().clone()}/>
                             <br/>
                             <span id="aux-hint" ref={player.hint_handler.aux_bar().clone()}/>
                         </div>
                         if let Some((id, block)) = block {
-                            {block.sound.params(id, hint)}
+                            {block.sound.params(id)}
                             <div id="general-ctrl" class="dark-bg">
-                                <Button {hint} id={ParamId::Remove(id)} name="Remove component">
+                                <Button id={ParamId::Remove(id)} name="Remove component">
                                     <svg viewBox="0 0 100 100">
                                         <polygon points="27,35 35,27 50,42 65,27 73,35 58,50 73,65 65,73 50,58 35,73 27,65 42,50"/>
                                     </svg>
@@ -267,23 +269,23 @@ impl Component for Main {
                             <div id="tab-list">
                                 <div id={(self.editor_tab_id == 0).then_some("selected-tab")}
                                 onpointerup={ctx.link().callback(|_| MainCmd::SetTab(0))}
-                                onpointerenter={hint.setter("General", "Settings tab")}>
+                                data-main-hint="General" data-aux-hint="Settings tab">
                                     <p onpointerup={ctx.link().callback(|_| MainCmd::SetTab(0))}>{"General"}</p>
                                 </div>
                                 <div id={(self.editor_tab_id == 1).then_some("selected-tab")}
                                 onpointerup={ctx.link().callback(|_| MainCmd::SetTab(1))}
-                                onpointerenter={hint.setter("Add Block", "Settings tab")}>
+                                data-main-hint="Add Block" data-aux-hint="Settings tab">
                                     <p onpointerup={ctx.link().callback(|_| MainCmd::SetTab(1))}>{"Add Block"}</p>
                                 </div>
                             </div>
                             if self.editor_tab_id == 0 {
                                 <div id="inputs">
-                                    <Slider {hint} key="tmp" name="Tempo"
+                                    <Slider key="tmp" name="Tempo"
                                         id={ParamId::Bpm}
                                         min={r64![30.0]} max={r64![240.0]}
                                         postfix="BPM"
                                         initial={player.sequencer.bps() * r64![60.0]}/>
-                                    <Slider {hint} key="gain" name="Master gain level"
+                                    <Slider key="gain" name="Master gain level"
                                         id={ParamId::MasterGain}
                                         initial={R64::from(player.sequencer.gain())}/>
                                 </div>
@@ -291,7 +293,7 @@ impl Component for Main {
                                 <div id="block-add-menu">
                                     {for Sound::TYPES.iter().map(|x| html!{
                                         <div draggable="true"
-                                        onpointerenter={hint.setter(x.name(), "Hold and drag to add block to plane")}
+                                        data-main-hint={x.name()} data-aux-hint="Hold and drag to add block to plane"
                                         ondragstart={ctx.link().callback(|_| MainCmd::BlockAddStart(*x))}
                                         ondragend={ctx.link().callback(|_| MainCmd::BlockAddEnd(None))}>
                                             <p>{x.name()}</p>
@@ -310,15 +312,15 @@ impl Component for Main {
                     ondragleave={ctx.link().callback(|_| MainCmd::DragNewBlockOut)}
                     ondrop={ctx.link().callback(|e| MainCmd::BlockAddEnd(Some(e)))}/>
                 </div>
-                <div id="io-panel" onpointerenter={hint.setter("Editor plane settings", "")}>
-                    {player.editor_plane_handler.params(hint)}
-                    <Button {hint} id={ParamId::Play} name="Play">
+                <div id="io-panel" data-main-hint="Editor plane settings">
+                    {player.editor_plane_handler.params()}
+                    <Button id={ParamId::Play} name="Play">
                         <svg viewBox="0 0 100 100" height="100%">
                             <polygon points="25,25 75,50 25,75"/>
                         </svg>
                     </Button>
                     <canvas id="sound-visualiser" ref={player.sound_visualiser.canvas().clone()} class="blue-border"
-                    onpointerenter={hint.setter("Sound visualiser", "")}/>
+                    data-main-hint="Sound visualiser"/>
                 </div>
                 if self.error_count > 0 {
                     <div id="error-count">{format!("Errors: {}", self.error_count)}</div>
@@ -329,12 +331,44 @@ impl Component for Main {
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         if !first_render {return}
+
+        let window = window();
+        let mut player = GLOBAL_PLAYER.get_mut().unwrap_throw(loc!());
         let cb = ctx.link().callback(|()| MainCmd::Resize);
         let cb = JsClosure::<dyn Fn()>::new(move || cb.emit(()))
             .into_js_value().unchecked_into();
-        window().set_onresize(Some(&cb));
-        GLOBAL_PLAYER.get_mut().unwrap_throw(loc!())
-            .handle_resize().unwrap_throw(loc!());
+        window.set_onresize(Some(&cb));
+
+        fn get_hint(mut element: Element) -> [String; 2] {
+            loop {
+                let dataset = if let Some(x) = element.dyn_ref::<HtmlElement>() {
+                    x.dataset()
+                } else if let Some(x) = element.dyn_ref::<SvgElement>() {
+                    x.dataset()
+                } else {
+                    return Default::default()
+                };
+                if let Some(main) = dataset.get("mainHint") {
+                    return [main, dataset.get("auxHint").unwrap_or_default()]
+                }
+                if let Some(parent) = element.parent_element() {
+                    element = parent
+                } else {
+                    return Default::default()
+                }
+            }
+        }
+
+        let hint_handler = Rc::clone(&player.hint_handler);
+        let cb = JsClosure::<dyn Fn(_)>::new(move |e: PointerEvent| {
+            let Some(target) = e.target_dyn_into::<Element>()
+                .report_err(loc!()) else {return};
+            let [main, aux] = get_hint(target);
+            _ = hint_handler.set_hint(&main, &aux).report_err(loc!());
+        }).into_js_value().unchecked_into();
+        window.set_onpointerover(Some(&cb));
+
+        player.handle_resize().unwrap_throw(loc!());
     }
 }
 

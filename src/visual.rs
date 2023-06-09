@@ -2,10 +2,9 @@ use std::{
     iter::{Iterator, successors as succ},
     slice::from_raw_parts,
     mem::{Discriminant, discriminant},
-    rc::Rc,
     ops::{Mul, Neg, Not}
 };
-use web_sys::{HtmlCanvasElement, AnalyserNode, ImageData, MouseEvent, HtmlElement, Event};
+use web_sys::{HtmlCanvasElement, AnalyserNode, ImageData, MouseEvent, HtmlElement};
 use wasm_bindgen::{Clamped, JsValue};
 use yew::{TargetCast, NodeRef, html, Html};
 use crate::{
@@ -22,39 +21,51 @@ use crate::{
 pub struct EveryNth<'a, T> {
     iter: &'a [T],
     n: usize,
-    state: usize
+    state: usize,
+    off: usize
 }
 
 impl<'a, T> Iterator for EveryNth<'a, T> {
     type Item = &'a T;
     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
-		let len = self.iter.len();
-		let res = self.iter.get(self.state);
-        self.state = (self.state + self.n)
-            .check_not_in(len .. (len + self.n).saturating_sub(1))
-            .unwrap_or_else(|x| x - len + 1);
-        res
+		if let res @Some(_) = self.iter.get(self.state) {
+            self.state += self.n;
+            res
+        } else {
+            self.off += 1;
+            if self.off == self.n {
+                None
+            } else {
+                self.state = self.off + self.n;
+                self.iter.get(self.state - self.n)
+            }
+        }
     }
 }
 
 pub struct EveryNthMut<'a, T> {
     iter: &'a mut [T],
     n: usize,
-    state: usize
+    state: usize,
+    off: usize
 }
 
 impl<'a, T> Iterator for EveryNthMut<'a, T> {
     type Item = &'a mut T;
-    fn next(&mut self) -> Option<&'a mut T> {
-		let len = self.iter.len();
-		let res = self.iter.get_mut(self.state)
-            .map(|x| unsafe{(x as *mut T).as_mut().unwrap_unchecked()});
-        // the abomination above is there solely because such a trivial task as
-        // a lending iterator over mutable data can't be done any other way
-        self.state = (self.state + self.n)
-            .check_not_in(len .. (len + self.n).saturating_sub(1))
-            .unwrap_or_else(|x| x - len + 1);
-        res
+    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
+		if let Some(res) = self.iter.get_mut(self.state) {
+            self.state += self.n;
+            Some(unsafe{(res as *mut T).as_mut().unwrap_unchecked()})
+        } else {
+            self.off += 1;
+            if self.off == self.n {
+                None
+            } else {
+                self.state = self.off + self.n;
+                self.iter.get_mut(self.state - self.n)
+                    .map(|x| unsafe{(x as *mut T).as_mut().unwrap_unchecked()})
+            }
+        }
     }
 }
 
@@ -65,11 +76,20 @@ pub trait ToEveryNth<T> {
 
 impl<T> ToEveryNth<T> for [T] {
     #[inline] fn every_nth(&self, n: usize) -> EveryNth<'_, T> {
-        EveryNth {iter: self, n, state: 0}
+        EveryNth {iter: self, n, state: 0, off: 0}
     }
     #[inline] fn every_nth_mut(&mut self, n: usize) -> EveryNthMut<'_, T> {
-        EveryNthMut {iter: self, n, state: 0}
+        EveryNthMut {iter: self, n, state: 0, off: 0}
     }
+}
+
+#[test]
+fn test_every_nth_mut() {
+    let mut data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let transposed: Vec<u8>     = data.every_nth(3).copied().collect();
+    let transposed_mut: Vec<u8> = data.every_nth_mut(3).map(|x| *x).collect();
+    assert_eq!(transposed,     [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8]);
+    assert_eq!(transposed_mut, [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8]);
 }
 
 
@@ -155,24 +175,17 @@ impl SoundVisualiser {
         Ok(())
     }
 
-    // TODO: make it actually work
-	pub fn poll(&mut self, input: Option<&AnalyserNode>) -> JsResult<()> {
-        let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
-        if let Some(input) = input {
-            let len = self.out_data.len();
-            self.out_data.copy_within(.. len - self.height as usize, self.height as usize);
-            input.get_byte_frequency_data(&mut self.in_data);
-            for (&src, dst) in self.in_data.iter().zip(self.out_data.every_nth_mut(self.width as usize)) {
-                *dst = unsafe {*self.gradient.get_unchecked(src as usize)};
-            }
-            let out = Clamped(unsafe{from_raw_parts(
-                self.out_data.as_ptr().cast::<u8>(),
-                self.out_data.len() * 4)});
-            canvas.get_2d_context(loc!())?.put_image_data(
-                    &ImageData::new_with_u8_clamped_array(out, self.width).add_loc(loc!())?,
-                    0.0, 0.0).add_loc(loc!())?;
+	pub fn poll(&mut self, input: &AnalyserNode) -> JsResult<()> {
+        self.out_data.rotate_right(1);
+        input.get_byte_frequency_data(&mut self.in_data);
+        for (&src, dst) in self.in_data.iter().zip(self.out_data.every_nth_mut(self.width as usize)) {
+            *dst = unsafe {*self.gradient.get_unchecked(src as usize)};
         }
 
+        let out = unsafe{from_raw_parts(self.out_data.as_ptr().cast(), self.out_data.len() * 4)};
+        let out = ImageData::new_with_u8_clamped_array(Clamped(out), self.width).add_loc(loc!())?;
+        self.canvas.cast::<HtmlCanvasElement>().to_js_result(loc!())?.get_2d_context(loc!())?
+            .put_image_data(&out, 0.0, 0.0).add_loc(loc!())?;
         Ok(())
 	}
 }
@@ -243,18 +256,16 @@ impl EditorPlaneHandler {
             scale_x: r64![20.0], scale_y: r32![10.0], snap_step: r64![1.0]})
     }
 
-    #[inline] pub fn canvas(&self) -> &NodeRef {
-        &self.canvas
-    }
-    
+    #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
+
     #[inline] pub fn selected_element_id(&self) -> Option<usize> {
         self.selected_id
     }
 
-    pub fn params(&self, hint: &Rc<HintHandler>) -> Html {
+    pub fn params(&self) -> Html {
         html!{
-            <div id="plane-settings" onpointerover={hint.setter("Editor plane settings", "")}>
-                <Switch {hint} key="snap" name="Interval for blocks to snap to"
+            <div id="plane-settings" data-main-hint="Editor plane settings">
+                <Switch key="snap" name="Interval for blocks to snap to"
                     id={ParamId::SnapStep}
                     options={vec!["None", "1", "1/2", "1/4", "1/8"]}
                     initial={match *self.snap_step {
@@ -367,8 +378,8 @@ impl EditorPlaneHandler {
 
             Focus::MovePlane(ref mut last) => if event.left {
                 event.point -= self.offset;
-                self.offset.x = (self.offset.x + last.x - event.point.x).max(self.offset.x.min(0));
-                self.offset.y = (self.offset.y + last.y - event.point.y).max(self.offset.y.min(0));
+                self.offset.x = (self.offset.x + last.x - event.point.x).max(self.offset.x.min(-5));
+                self.offset.y = (self.offset.y + last.y - event.point.y).max(self.offset.y.min(-5));
                 *last = event.point;
                 None
             } else {
@@ -453,8 +464,8 @@ impl EditorPlaneHandler {
         }
     }
 
-    pub fn poll(&mut self, pattern: &[PatternBlock], hint_handler: &HintHandler) -> JsResult<()> {
-        if !self.redraw.take() {return Ok(())}
+    pub fn poll(&mut self, pattern: &[PatternBlock], hint_handler: &HintHandler, play_offset: Beats) -> JsResult<()> {
+        if !self.redraw.take() && play_offset.is_infinite() {return Ok(())}
 
         let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
         let [w, h] = canvas.size().map(|x| x as f64);
@@ -603,6 +614,9 @@ impl EditorPlaneHandler {
                 }
             }
         }
+
+        ctx.set_fill_style(&Self::FG_STYLE.into());
+        ctx.fill_rect(*play_offset * beat_w - self.offset.x as f64, 0.0, 3.0, h);
         Ok(())
     }
 }
@@ -610,7 +624,7 @@ impl EditorPlaneHandler {
 #[derive(PartialEq, Default)]
 pub struct HintHandler {
     main_bar: NodeRef,
-    aux_bar: NodeRef,
+    aux_bar: NodeRef
 }
 
 impl HintHandler {
@@ -620,13 +634,6 @@ impl HintHandler {
         self.aux_bar.cast::<HtmlElement>().to_js_result(loc!())?
             .set_inner_text(aux);
         Ok(())
-    }
-
-    pub fn setter<T>(self: &Rc<Self>, main: impl AsRef<str>, aux: impl AsRef<str>)
-    -> impl Fn(T) where T: AsRef<Event> {
-        let res = Rc::clone(self);
-        move |_| _ = res.set_hint(main.as_ref(), aux.as_ref())
-            .report_err(loc!())
     }
 
     #[inline] pub fn main_bar(&self) -> &NodeRef {

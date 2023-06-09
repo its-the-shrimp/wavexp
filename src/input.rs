@@ -2,9 +2,7 @@
 
 use std::{
     f64::consts::{PI, TAU},
-    ops::{Div, Mul, Add},
-    rc::Rc};
-use wasm_bindgen::{JsCast, JsValue};
+    ops::{Div, Mul, Add}};
 use web_sys::{Element, HtmlCanvasElement, PointerEvent, HtmlElement};
 use yew::{
     html, 
@@ -12,17 +10,14 @@ use yew::{
     Context,
     Html,
     TargetCast,
-    html::Children, Classes, AttrValue};
+    html::Children, Classes, AttrValue, NodeRef};
 use crate::{
     utils::{
-        document,
         js_try,
         JsResultUtils,
         HtmlCanvasExt,
-        HtmlDocumentExt,
         OptionExt, BoolExt, R64},
     sound::SoundType,
-    visual::HintHandler,
     MainCmd,
     loc};
 
@@ -85,7 +80,7 @@ impl ParamId {
 
 pub struct Slider {
     value: R64,
-    canvas: HtmlCanvasElement,
+    canvas: NodeRef,
     focused: bool,
     hovered: bool,
     floored: bool
@@ -105,8 +100,7 @@ pub struct SliderProps {
     #[prop_or("")]
     pub postfix: &'static str,
     pub id: ParamId,
-    pub initial: R64,
-    pub hint: Rc<HintHandler>
+    pub initial: R64
 }
 
 const LINE_WIDTH: f64 = 10.0;
@@ -118,12 +112,12 @@ impl Component for Slider {
 
     fn create(ctx: &Context<Self>) -> Self {
         Self {focused: false, hovered: false, floored: false,
-            value: ctx.props().initial, canvas: JsValue::UNDEFINED.unchecked_into()}
+            value: ctx.props().initial, canvas: NodeRef::default()}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            let SliderProps{id, min, max, name, signed, hint, ..} = ctx.props();
+            let SliderProps{id, min, max, signed, ..} = ctx.props();
             match msg {
                 Cmd::Drag(e) => {
                     let target: Element = e.target_dyn_into().to_js_result(loc!())?;
@@ -151,10 +145,7 @@ impl Component for Slider {
                         if self.floored {self.value.floor()} else {self.value}).send();
                 }
 
-                Cmd::HoverIn(_) => {
-                    self.hovered = true;
-                    hint.set_hint(name, "").add_loc(loc!())?;
-                }
+                Cmd::HoverIn(_) => self.hovered = true,
 
                 Cmd::HoverOut(_) => self.hovered = false,
             }
@@ -164,26 +155,23 @@ impl Component for Slider {
     }
 
 	fn view(&self, ctx: &Context<Self>) -> Html {
-        let SliderProps{id, .. } = ctx.props();
         html! {
-            <canvas id={format!("Slider({:?})", *id)} class="input"
+            <canvas ref={self.canvas.clone()} class="input"
+            data-main-hint={&ctx.props().name}
             onpointerdown={ctx.link().callback(Cmd::Focus)}
             onpointerup={ctx.link().callback(Cmd::Unfocus)}
-            onpointerenter={ctx.link().callback(Cmd::HoverIn)}
+            onpointerover={ctx.link().callback(Cmd::HoverIn)}
             onpointerleave={ctx.link().callback(Cmd::HoverOut)}
             onpointermove={self.focused.then(|| ctx.link().callback(Cmd::Drag))}/>}
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         _ = js_try!{type = !:
-            let SliderProps{min, max, precision, postfix, id, ..} = ctx.props();
-            if first_render {
-                self.canvas = document()
-                    .element_dyn_into(&format!("Slider({:?})", *id), loc!())?;
-                self.canvas.sync();
-            }
-            let ctx = self.canvas.get_2d_context(loc!())?;
-            let (w, h) = (self.canvas.width() as f64 / 2.0, self.canvas.height() as f64 / 2.0);
+            let SliderProps{min, max, precision, postfix, ..} = ctx.props();
+            let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
+            if first_render {canvas.sync()}
+            let ctx = canvas.get_2d_context(loc!())?;
+            let (w, h) = (canvas.width() as f64 / 2.0, canvas.height() as f64 / 2.0);
             const CORRECTION_COEF: f64 = 1.5;
             let r = w.min(h) - LINE_WIDTH * CORRECTION_COEF; 
             if first_render {
@@ -219,7 +207,7 @@ impl Component for Slider {
 
 pub struct Switch {
     value: R64,
-    canvas: HtmlCanvasElement,
+    canvas: NodeRef,
     focused: bool,
     hovered: bool
 }
@@ -229,8 +217,7 @@ pub struct SwitchProps {
     pub name: AttrValue,
     pub options: Vec<&'static str>,
     pub id: ParamId,
-    pub initial: usize,
-    pub hint: Rc<HintHandler>
+    pub initial: usize
 }
 
 impl Component for Switch {
@@ -238,13 +225,13 @@ impl Component for Switch {
     type Properties = SwitchProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        Self {focused: false, hovered: false, value: R64::from(ctx.props().initial),
-            canvas: JsValue::UNDEFINED.unchecked_into()}
+        Self {focused: false, hovered: false,
+            value: R64::from(ctx.props().initial), canvas: NodeRef::default()}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            let SwitchProps {options, id, name, hint, ..} = ctx.props();
+            let SwitchProps{options, id, ..} = ctx.props();
             match msg {
                 Cmd::Drag(e) => {
                     let old_value = *self.value as usize;
@@ -268,10 +255,7 @@ impl Component for Switch {
                     self.focused = false;
                 }
 
-                Cmd::HoverIn(_) => {
-                    self.hovered = true;
-                    hint.set_hint(name, "").add_loc(loc!())?;
-                }
+                Cmd::HoverIn(_) => self.hovered = true,
 
                 Cmd::HoverOut(_) => self.hovered = false,
             }
@@ -282,7 +266,8 @@ impl Component for Switch {
 
 	fn view(&self, ctx: &Context<Self>) -> Html {
         html! {
-            <canvas id={format!("Switch({:?})", ctx.props().id)} class="input"
+            <canvas ref={self.canvas.clone()} class="input"
+            data-main-hint={&ctx.props().name}
             onpointerdown={ctx.link().callback(Cmd::Focus)}
             onpointerup={ctx.link().callback(Cmd::Unfocus)}
             onpointerenter={ctx.link().callback(Cmd::HoverIn)}
@@ -292,14 +277,11 @@ impl Component for Switch {
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         _ = js_try!{
-            let SwitchProps{options, id, ..} = ctx.props();
-            if first_render {
-                self.canvas = document()
-                    .element_dyn_into(&format!("Switch({:?})", *id), loc!())?;
-                self.canvas.sync();
-            }
-            let ctx = self.canvas.get_2d_context(loc!())?;
-            let (w, h) = (self.canvas.width() as f64 / 2.0, self.canvas.height() as f64 / 2.0);
+            let options = &ctx.props().options;
+            let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
+            if first_render {canvas.sync()}
+            let ctx = canvas.get_2d_context(loc!())?;
+            let (w, h) = (canvas.width() as f64 / 2.0, canvas.height() as f64 / 2.0);
             const CORRECTION_COEF: f64 = 1.5;
             let r = w.min(h) - LINE_WIDTH * CORRECTION_COEF;
             if first_render {
@@ -331,7 +313,6 @@ pub struct ButtonProps {
     pub name: AttrValue,
     pub children: Children,
     pub id: ParamId,
-    pub hint: Rc<HintHandler>,
     #[prop_or(false)]
     pub svg: bool,
     #[prop_or_default]
@@ -339,46 +320,35 @@ pub struct ButtonProps {
 }
 
 impl Component for Button {
-    type Message = Cmd;
+    type Message = bool;
     type Properties = ButtonProps;
 
     fn create(_: &Context<Self>) -> Self {Self}
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        _ = js_try!{
-            let ButtonProps{name, id, hint, ..} = ctx.props();
-            match msg {
-                Cmd::Drag(_) => (),
-                Cmd::Focus(_) => MainCmd::SetParam(*id, R64::INFINITY).send(),
-                Cmd::Unfocus(_) => MainCmd::SetParam(*id, R64::NEG_INFINITY).send(),
-                Cmd::HoverIn(_) => hint.set_hint(name, "").add_loc(loc!())?,
-                Cmd::HoverOut(_) => ()
-            }
-        }.report_err(loc!());
+        MainCmd::SetParam(ctx.props().id,
+            msg.choose(R64::INFINITY, R64::NEG_INFINITY)).send();
         false
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let mut class = ctx.props().class.clone();
+        let ButtonProps{name, children, svg, class, ..} = ctx.props();
+        let mut class = class.clone();
         class.push("input button");
-        if ctx.props().svg {
+        if *svg {
             html!{
-                <g {class}
-                onpointerdown={ctx.link().callback(Cmd::Focus)}
-                onpointerup={ctx.link().callback(Cmd::Unfocus)}
-                onpointerenter={ctx.link().callback(Cmd::HoverIn)}
-                onpointerleave={ctx.link().callback(Cmd::HoverOut)}>
-                    {ctx.props().children.clone()}
+                <g {class} data-main-hint={name}
+                onpointerdown={ctx.link().callback(|_| true)}
+                onpointerup={ctx.link().callback(|_| false)}>
+                    {children.clone()}
                 </g>
             }
         } else {
             html!{
-                <button {class} id={format!("Button({:?})", ctx.props().id)}
-                onpointerdown={ctx.link().callback(Cmd::Focus)}
-                onpointerup={ctx.link().callback(Cmd::Unfocus)}
-                onpointerenter={ctx.link().callback(Cmd::HoverIn)}
-                onpointerleave={ctx.link().callback(Cmd::HoverOut)}>
-                    {ctx.props().children.clone()}
+                <button {class} data-main-hint={name}
+                onpointerdown={ctx.link().callback(|_| true)}
+                onpointerup={ctx.link().callback(|_| false)}>
+                    {children.clone()}
                 </button>
             }
         }

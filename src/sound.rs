@@ -1,10 +1,10 @@
 use std::{
     ops::{Add, Sub, Neg},
-    fmt::{self, Display, Formatter, Debug}, rc::Rc};
+    fmt::{self, Display, Formatter, Debug}};
 use web_sys::{
     AudioNode,
     AudioContext,
-    OscillatorNode, OscillatorOptions};
+    OscillatorNode};
 use yew::{html, Html};
 use crate::{
     utils::{
@@ -15,7 +15,7 @@ use crate::{
         SaturatingInto, Pipe, BoolExt},
     input::{Switch, ParamId, Slider},
     loc,
-    r32, r64, visual::HintHandler};
+    r32, r64};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -24,6 +24,7 @@ pub type Beats = R64;
 pub trait FromBeats {
     fn to_msecs(self, bps: Self) -> MSecs;
     fn to_secs(self, bps: Self) -> Secs;
+    fn secs_to_beats(self, bps: Self) -> Beats;
 }
 
 impl FromBeats for Beats {
@@ -32,6 +33,9 @@ impl FromBeats for Beats {
 
     #[inline]
     fn to_msecs(self, bps: Self) -> MSecs {self / bps * r64![1000.0]}
+
+    #[inline]
+    fn secs_to_beats(self, bps: Self) -> Beats {self * bps}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord)]
@@ -238,8 +242,9 @@ impl Sound {
     #[inline] pub fn reset(&mut self, ctx: &AudioContext) -> JsResult<()> {
         Ok(match self {
             Sound::Note{gen, note, ..} => {
-                *gen = OscillatorNode::new_with_options(ctx,
-                    OscillatorOptions::new().frequency(*note.freq())).add_loc(loc!())?
+                gen.disconnect().add_loc(loc!())?;
+                *gen = OscillatorNode::new(ctx).add_loc(loc!())?;
+                gen.frequency().set_value(*note.freq());
             }
         })
     }
@@ -247,12 +252,12 @@ impl Sound {
     #[inline] pub fn poll(&mut self, time: Secs, plug: &AudioNode, bps: Beats) -> JsResult<Secs> {
         Ok(match self {
             Sound::Note{len, gen, started, ..} => if started.toggle() {
-                self.stop(time).add_loc(loc!())?;
-                Secs::INFINITY
-            } else {
                 gen.connect_with_audio_node(plug).add_loc(loc!())?;
                 gen.start().add_loc(loc!())?;
                 len.to_secs(bps) + time
+            } else {
+                self.stop(time).add_loc(loc!())?;
+                Secs::INFINITY
             }
         })
     }
@@ -272,17 +277,15 @@ impl Sound {
         }
     }
 
-    #[inline] pub fn params(&self, id: usize, hint: &Rc<HintHandler>) -> Html {
+    #[inline] pub fn params(&self, id: usize) -> Html {
         match self {
             &Sound::Note{note, len, ..} => html!{<div id="inputs">
-                <Switch {hint}
-                key="note"
+                <Switch key="note"
                 id={ParamId::Note(id)}
                 options={Note::NAMES.to_vec()}
                 name="Note"
                 initial={note.index()}/>
-                <Slider {hint}
-                key="note-len"
+                <Slider key="note-len"
                 id={ParamId::NoteLength(id)}
                 max={r64![100.0]}
                 name="Note Length" postfix="Beats"
