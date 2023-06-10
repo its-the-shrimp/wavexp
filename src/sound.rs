@@ -1,18 +1,19 @@
 use std::{
     ops::{Add, Sub, Neg},
     fmt::{self, Display, Formatter, Debug}};
+use js_sys::Math::random;
+use wasm_bindgen::{JsValue, JsCast};
 use web_sys::{
     AudioNode,
     AudioContext,
-    OscillatorNode};
+    OscillatorNode, AudioBufferSourceNode, AudioBuffer, GainNode};
 use yew::{html, Html};
 use crate::{
     utils::{
         JsResult,
         JsResultUtils,
-        SliceExt,
         R64, R32,
-        SaturatingInto, Pipe, BoolExt},
+        SaturatingInto, Pipe},
     input::{Switch, ParamId, Slider},
     loc,
     r32, r64};
@@ -62,55 +63,7 @@ impl Sub<isize> for Note {
 }
 
 impl Note {
-    pub const C2:  Note = Note(0);
-    pub const CS2: Note = Note(1);
-    pub const D2:  Note = Note(2);
-    pub const DS2: Note = Note(3);
-    pub const E2:  Note = Note(4);
-    pub const F2:  Note = Note(5);
-    pub const FS2: Note = Note(6);
-    pub const G2:  Note = Note(7);
-    pub const GS2: Note = Note(8);
-    pub const A2:  Note = Note(9);
-    pub const AS2: Note = Note(10);
-    pub const B2:  Note = Note(11);
-    pub const C3:  Note = Note(12);
-    pub const CS3: Note = Note(13);
-    pub const D3:  Note = Note(14);
-    pub const DS3: Note = Note(15);
-    pub const E3:  Note = Note(16);
-    pub const F3:  Note = Note(17);
-    pub const FS3: Note = Note(18);
-    pub const G3:  Note = Note(19);
-    pub const GS3: Note = Note(20);
-    pub const A3:  Note = Note(21);
-    pub const AS3: Note = Note(22);
-    pub const B3:  Note = Note(23);
-    pub const C4:  Note = Note(24);
-    pub const CS4: Note = Note(25);
-    pub const D4:  Note = Note(26);
-    pub const DS4: Note = Note(27);
-    pub const E4:  Note = Note(28);
-    pub const F4:  Note = Note(29);
-    pub const FS4: Note = Note(30);
-    pub const G4:  Note = Note(31);
-    pub const GS4: Note = Note(32);
-    pub const A4:  Note = Note(33);
-    pub const AS4: Note = Note(34);
-    pub const B4:  Note = Note(35);
-
-    pub const MAX: Note = Note::B4;
-    pub const N_OCTAVES: usize = 3;
-
-    pub const ALL: [Note; 36] = {
-        let mut res = [Note(0); 36];
-        let mut iter = 0;
-        while iter < res.len() {
-            res[iter].0 = iter as u8;
-            iter += 1;
-        }
-        res
-    };
+    pub const MAX: Note = Note(35);
 
     pub const FREQS: [R32; 36] = [
         r32![65.410] /*C2*/, r32![69.300] /*C#2*/,
@@ -164,51 +117,30 @@ impl Note {
         else {Self(value as u8)}
     }
 
-    pub fn from_freq(value: R32) -> Self {
-        const MAX: usize = Note::FREQS.len() - 1;
-        Self(Self::FREQS.iter()
-            .position(|&freq| value <= freq)
-            .unwrap_or(MAX) as u8)
-    }
-
-    #[inline] pub const fn name(&self) -> &'static str {
-        unsafe{Self::NAMES.get_unchecked(self.0 as usize)}
-    }
-
     #[inline] pub const fn index(&self) -> usize {
         self.0 as usize
-    }
-
-    pub fn diatonic_index(&self) -> usize {
-        let octave = self.0 as usize / 12;
-        let pitch = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6].get_wrapping(self.0 as usize);
-        octave * 7 + *pitch
     }
 
     #[inline] pub const fn freq(&self) -> R32 {
         unsafe{*Self::FREQS.get_unchecked(self.0 as usize)}
     }
+}
 
-    #[inline] pub const fn is_sharp(&self) -> bool {
-        self.0 % 2 == (self.0 % 12 < 5) as u8
-    }
+pub struct TabInfo {
+    pub name: &'static str
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SoundType {
-    Note
+    Note,
+    Noise
 }
 
 impl SoundType {
     #[inline] pub fn name(&self) -> &'static str {
         match self {
-            SoundType::Note => "Note"
-        }
-    }
-
-    #[inline] pub fn init(&self, ctx: &AudioContext) -> JsResult<Sound> {
-        match self {
-            SoundType::Note => Sound::new_note(ctx)
+            SoundType::Note => "Note",
+            SoundType::Noise => "White Noise"
         }
     }
 
@@ -219,89 +151,194 @@ impl SoundType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sound {
-    Note{note: Note, len: Beats, gen: OscillatorNode, started: bool}
+    Note{gen: OscillatorNode, note: Note, len: Beats, started: bool,
+        attack: Beats, release: Beats},
+    Noise{gen: AudioBufferSourceNode, src: AudioBuffer,
+        gain: GainNode, len: Beats, started: bool}
 }
 
 impl Sound {
-    pub const TYPES: [SoundType; 1] = [
-        SoundType::Note
+    pub const TYPES: [SoundType; 2] = [
+        SoundType::Note,
+        SoundType::Noise
     ];
 
-    #[inline] fn new_note(ctx: &AudioContext) -> JsResult<Self> {
-        let gen = OscillatorNode::new(ctx).add_loc(loc!())?;
-        Ok(Self::Note{note: Note::MAX, len: r64![1.0],
-            gen, started: false})
+    #[inline] pub fn new(sound_type: SoundType, ctx: &AudioContext) -> JsResult<Self> {
+        Ok(match sound_type {
+            SoundType::Note => {
+                let gen = ctx.create_oscillator().add_loc(loc!())?;
+                gen.frequency().set_value(0.0);
+                gen.start().add_loc(loc!())?;
+                Self::Note{gen,
+                    note: Note::MAX, len: r64![1.0], started: false,
+                    attack: r64![0.4], release: r64![0.4]}
+            }
+
+            SoundType::Noise => {
+                let len = ctx.sample_rate();
+                let mut src_buf = vec![0.0f32; len as usize];
+                src_buf.fill_with(|| random() as f32 * 2.0 - 1.0);
+                let src = ctx.create_buffer(2, len as u32, len).add_loc(loc!())?;
+                src.copy_to_channel(&src_buf, 0).add_loc(loc!())?;
+                src.copy_to_channel(&src_buf, 1).add_loc(loc!())?;
+                let gain = ctx.create_gain().add_loc(loc!())?;
+                gain.gain().set_value(0.2);
+                Self::Noise{gen: JsValue::NULL.unchecked_into(), src, gain,
+                    len: r64![1.0], started: false}
+            }
+        })
     }
 
     #[inline] pub fn name(&self) -> &'static str {
         match self {
-            Sound::Note{..} => "Note"
+            Sound::Note{..} => "Note",
+            Sound::Noise{..} => "Noise"
         }
     }
 
     #[inline] pub fn reset(&mut self, ctx: &AudioContext) -> JsResult<()> {
         Ok(match self {
-            Sound::Note{gen, note, ..} => {
-                gen.disconnect().add_loc(loc!())?;
-                *gen = OscillatorNode::new(ctx).add_loc(loc!())?;
-                gen.frequency().set_value(*note.freq());
+            Sound::Note{started, gen, ..} => {
+                *started = false;
+                gen.frequency().cancel_scheduled_values(0.0).add_loc(loc!())?
+                    .set_value(0.0);
+            }
+
+            Sound::Noise{gen, src, started, gain, ..} => {
+                *started = false;
+                *gen = ctx.create_buffer_source().add_loc(loc!())?;
+                gen.set_loop(true);
+                gen.set_buffer(Some(src));
+                gen.start().add_loc(loc!())?;
+                gen.connect_with_audio_node(gain).add_loc(loc!())?;
             }
         })
     }
 
     #[inline] pub fn poll(&mut self, time: Secs, plug: &AudioNode, bps: Beats) -> JsResult<Secs> {
         Ok(match self {
-            Sound::Note{len, gen, started, ..} => if started.toggle() {
-                gen.connect_with_audio_node(plug).add_loc(loc!())?;
-                gen.start().add_loc(loc!())?;
-                len.to_secs(bps) + time
-            } else {
-                self.stop(time).add_loc(loc!())?;
+            Sound::Note{len, gen, started, note, attack, ..} => if *started {
+                self.stop(time, bps).add_loc(loc!())?;
                 Secs::INFINITY
+            } else {
+                *started = true;
+                gen.connect_with_audio_node(plug).add_loc(loc!())?;
+                gen.frequency()
+                    .linear_ramp_to_value_at_time(*note.freq(), *time + *attack.to_secs(bps))
+                    .add_loc(loc!())?;
+                len.to_secs(bps) + time
+            }
+
+            Sound::Noise{gain, len, started, ..} => if *started {
+                self.stop(time, bps).add_loc(loc!())?;
+                Secs::INFINITY
+            } else {
+                *started = true;
+                gain.connect_with_audio_node(plug).add_loc(loc!())?;
+                len.to_secs(bps) + time
             }
         })
     }
 
-    #[inline] pub fn stop(&mut self, time: Secs) -> JsResult<()> {
-        Ok(match self {
-            Sound::Note{gen, ..} => {
+    /// the method always properly stops the sound no matter if an error is returned or not
+    #[inline] pub fn stop(&mut self, time: Secs, bps: Beats) -> JsResult<()> {
+        match self {
+            Sound::Note{gen, release, ..} =>
                 gen.frequency()
-                    .exponential_ramp_to_value_at_time(f32::MIN_POSITIVE, *time + 0.2).add_loc(loc!())?;
-            }
-        })
+                    .cancel_scheduled_values(0.0).add_loc(loc!())?
+                    .linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *time + *release.to_secs(bps))
+                    .add_loc(loc!()).map(|_| ()),
+            Sound::Noise{gen, ..} =>
+                gen.stop().add_loc(loc!())
+        }
     }
 
     #[inline] pub fn len(&self) -> Beats {
         match self {
-            &Sound::Note{len, ..} => len
+            Sound::Note{len, ..}
+            | Sound::Noise{len, ..} => *len
         }
     }
 
-    #[inline] pub fn params(&self, id: usize) -> Html {
+    #[inline] pub fn tabs(&self) -> &'static [TabInfo] {
         match self {
-            &Sound::Note{note, len, ..} => html!{<div id="inputs">
-                <Switch key="note"
-                id={ParamId::Note(id)}
-                options={Note::NAMES.to_vec()}
-                name="Note"
-                initial={note.index()}/>
-                <Slider key="note-len"
-                id={ParamId::NoteLength(id)}
-                max={r64![100.0]}
-                name="Note Length" postfix="Beats"
-                initial={len}/>
-            </div>}
+            Sound::Note{..} =>
+                &[TabInfo{name: "General"}, TabInfo{name: "Pitch"}],
+            Sound::Noise{..} =>
+                &[TabInfo{name: "General"}, TabInfo{name: "Volume"}]
+        }
+    }
+
+    #[inline] pub fn params(&self, tab_id: usize, self_id: usize) -> Html {
+        match *self {
+            Sound::Note{note, len, attack, release, ..} => match tab_id {
+                0 /* General */ => html!{<div id="inputs">
+                    <Slider key="note-dur"
+                    id={ParamId::Duration(self_id)}
+                    max={r64![100.0]}
+                    name="Note Duration" postfix="Beats"
+                    initial={len}/>
+                </div>},
+                1 /* Pitch */ => html!{<div id="inputs">
+                    <Switch key={format!("{self_id}-note")}
+                    id={ParamId::Note(self_id)}
+                    options={Note::NAMES.to_vec()}
+                    name="Note"
+                    initial={note.index()}/>
+                    <Slider key={format!("{self_id}-att")}
+                    id={ParamId::Attack(self_id)}
+                    max={r64![5.0]}
+                    name="Attack Time" postfix="Beats"
+                    initial={attack}/>
+                    <Slider key={format!("{self_id}-rel")}
+                    id={ParamId::Release(self_id)}
+                    max={r64![5.0]}
+                    name="Release Time" postfix="Beats"
+                    initial={release}/>
+                </div>},
+                tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
+            }
+
+
+            Sound::Noise{len, ref gain, ..} => match tab_id {
+                0 /* General */ => html!{<div id="inputs">
+                    <Slider key="noise-dur"
+                    id={ParamId::Duration(self_id)}
+                    max={r64![100.0]}
+                    name="Noise Duration" postfix="Beats"
+                    initial={len}/>
+                </div>},
+                1 /* Volume */ => html!{<div id="inputs">
+                    <Slider key={format!("{self_id}-noise-vol")}
+                    id={ParamId::Volume(self_id)}
+                    name="Noise Volume"
+                    initial={R64::new_or(R64::ZERO, gain.gain().value() as f64)}/>
+                </div>},
+                tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
+            }
         }
     }
 
     pub fn set_param(&mut self, id: ParamId, value: R64) -> bool {
         match self {
-            Sound::Note{note, len, ..} => match id {
+            Sound::Note{note, len, attack, release, ..} => match id {
                 ParamId::Note(_) =>
                     *note = Note::from_index(*value as usize),
-                ParamId::NoteLength(_) =>
+                ParamId::Duration(_) =>
                     *len = value,
+                ParamId::Attack(_) =>
+                    *attack = value,
+                ParamId::Release(_) =>
+                    *release = value,
                 _ => ()
+            }.pipe(|_| false),
+
+            Sound::Noise{len, gain, ..} => match id {
+                ParamId::Duration(_) =>
+                    *len = value,
+                ParamId::Volume(_) =>
+                    gain.gain().set_value(*value as f32),
+                _ => (),
             }.pipe(|_| false)
         }
     }

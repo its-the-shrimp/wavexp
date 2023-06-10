@@ -17,16 +17,13 @@ web-sys = { version = "0.3.60", features = [
 	"OscillatorType",
 	"AnalyserNode",
 	"GainNode",
-	"DelayNode",
 	"DynamicsCompressorNode",
 	"AudioContext",
 	"AudioParam",
-	"Path2d",
 	"TextMetrics",
-	"DomRect",
-	"NodeList",
-	"Node",
 	"DomStringMap",
-	"SvgElement"
+	"SvgElement",
+	"AudioBuffer",
+	"AudioBufferSourceNode"
 ]}
 yew = { version = "0.20.0", features = ["csr"] }

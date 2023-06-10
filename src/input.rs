@@ -33,11 +33,14 @@ pub enum Cmd {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ParamId {
     Play,
-    Select(Option<usize>),
+    Select,
     Add(SoundType, i32),
     Remove(usize),
     Note(usize),
-    NoteLength(usize),
+    Duration(usize),
+    Volume(usize),
+    Attack(usize),
+    Release(usize),
     Bpm,
     MasterGain,
     SnapStep
@@ -48,7 +51,7 @@ impl ParamId {
     pub fn block_id(&self) -> Option<usize> {
         match self {
             ParamId::Play
-            | ParamId::Select(..)
+            | ParamId::Select
             | ParamId::Add(..)
             | ParamId::Remove(..)
             | ParamId::Bpm
@@ -56,7 +59,10 @@ impl ParamId {
             | ParamId::SnapStep => None,
 
             ParamId::Note(id)
-            | ParamId::NoteLength(id) => Some(*id)
+            | ParamId::Duration(id)
+            | ParamId::Volume(id)
+            | ParamId::Attack(id)
+            | ParamId::Release(id) => Some(*id)
         }
     }
 
@@ -64,12 +70,15 @@ impl ParamId {
     /// after setting the parameter
     pub fn need_plane_rerender(&self) -> bool {
         match self {
-            ParamId::Select(..)
+            ParamId::Select
             | ParamId::Add(..)
             | ParamId::Remove(..)
-            | ParamId::NoteLength(..) => true,
+            | ParamId::Duration(..) => true,
 
             ParamId::Note(..)
+            | ParamId::Volume(..)
+            | ParamId::Attack(..)
+            | ParamId::Release(..)
             | ParamId::Play
             | ParamId::Bpm
             | ParamId::MasterGain

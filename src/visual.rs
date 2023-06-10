@@ -11,7 +11,7 @@ use crate::{
     utils::{Check, SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, R64, OptionExt,
         HtmlElementExt, 
-        Pipe, Tee, document, Take, HtmlDocumentExt, R32, RatioToInt},
+        Pipe, Tee, document, Take, HtmlDocumentExt, R32, RatioToInt, BoolExt},
     loc, r64,
     input::{ParamId, Switch},
     sequencer::PatternBlock,
@@ -289,10 +289,15 @@ impl EditorPlaneHandler {
                 false
             }
 
-            ParamId::Select(id) => {
-                self.selected_id = id;
+            ParamId::Select => {
+                self.selected_id = value.is_finite().then_some(*value as usize);
                 true
             }
+
+            ParamId::Remove(_) => value.is_sign_negative().then(|| {
+                self.selected_id = None;
+                self.redraw = true
+            }).is_some(),
 
             id => id.need_plane_rerender().then(|| self.redraw = true).is_some()
         }
@@ -384,7 +389,7 @@ impl EditorPlaneHandler {
                 None
             } else {
                 self.focus = Focus::HoverPlane;
-                Some((ParamId::Select(None), R64::INFINITY))
+                Some((ParamId::Select, R64::INFINITY))
             }.tee(|_| self.redraw = true),
 
             Focus::MoveElement(id, init_offset) => if event.left {
@@ -398,7 +403,7 @@ impl EditorPlaneHandler {
                 None
             } else {
                 self.focus = Focus::HoverElement(id);
-                Some((ParamId::Select((self.selected_id != Some(id)).then_some(id)), R64::INFINITY))
+                Some((ParamId::Select, (self.selected_id != Some(id)).choose(id.into(), R64::INFINITY)))
             }.tee(|_| self.redraw = true),
 
             Focus::HoverPlaneWShift(ref mut point) => match (event.left, event.shift) {

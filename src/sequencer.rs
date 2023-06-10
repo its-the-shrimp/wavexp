@@ -107,7 +107,7 @@ impl Sequencer {
         match id {
             ParamId::Add(ty, layer) => {
                 let block = PatternBlock{
-                    sound: ty.init(&self.audio_ctx).add_loc(loc!())?,
+                    sound: Sound::new(ty, &self.audio_ctx).add_loc(loc!())?,
                     layer, offset: value};
                 self.pattern.push_sorted(block);
             }
@@ -115,6 +115,7 @@ impl Sequencer {
             ParamId::Remove(id) => if value.is_sign_negative() {
                 self.pattern.try_remove(id)
                     .to_js_result(loc!())?;
+                return Ok(true)
             }
 
             ParamId::Play => if value.is_sign_positive() {
@@ -150,7 +151,7 @@ impl Sequencer {
                 let mut next = 0;
                 for block in self.pattern.iter_mut().take_while(|x| *x.offset == 0.0) {
                     let when = block.sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;
-                    self.pending.push_sorted_by_key((next, when), |x| x.0);
+                    self.pending.push_sorted_by_key((next, when), |x| x.1);
                     next += 1;
                 }
                 self.state = SequencerState::Play{next, start_time: time};
@@ -160,7 +161,7 @@ impl Sequencer {
                 let offset = (time - start_time).secs_to_beats(self.bps);
                 for block in self.pattern.iter_mut().skip(*next).take_while(|x| x.offset <= offset) {
                     let when = block.sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;
-                    self.pending.push_sorted_by_key((*next, when), |x| x.0);
+                    self.pending.push_sorted_by_key((*next, when), |x| x.1);
                     *next += 1;
                 }
                 if *next >= self.pattern.len() {
@@ -171,7 +172,7 @@ impl Sequencer {
             SequencerState::Stop => {
                 for (id, _) in self.pending.drain(..) {
                     unsafe{self.pattern.get_unchecked_mut(id)}
-                        .sound.stop(time).add_loc(loc!())?;
+                        .sound.stop(time, self.bps).add_loc(loc!())?;
                 }
                 self.state = SequencerState::None;
             }
@@ -182,8 +183,8 @@ impl Sequencer {
         let n_due = self.pending.iter().position(|x| x.1 > time).unwrap_or(self.pending.len());
         let due: Vec<usize> = self.pending.drain(..n_due).map(|x| x.0).collect::<Vec<_>>();
         for id in due {
-            let when = unsafe{self.pattern.get_unchecked_mut(id)}
-                .sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;
+            let block  = unsafe{self.pattern.get_unchecked_mut(id)};
+            let when = block.sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;
             if when.is_infinite() {continue}
             self.pending.push_sorted_by_key((id, when), |x| x.0);
         }

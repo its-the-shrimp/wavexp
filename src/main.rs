@@ -246,7 +246,7 @@ impl Component for Main {
                 .map(|x| (x, unsafe{player.sequencer.pattern().get_unchecked(x)}));
 
             html! {<>
-                <div id="main-panel" data-main-hint="www">
+                <div id="main-panel">
                     <div id="ctrl-panel" class="dark-bg"
                     data-main-hint="Settings" data-aux-hint={block.map_or_else(|| "General".to_owned(), |(_, x)| x.desc())}>
                         <div id="hint" class="light-bg"
@@ -255,9 +255,23 @@ impl Component for Main {
                             <br/>
                             <span id="aux-hint" ref={player.hint_handler.aux_bar().clone()}/>
                         </div>
-                        if let Some((id, block)) = block {
-                            {block.sound.params(id)}
+                        if let Some((tab_aux_hint, id, block)) = block.map(|(id, block)| (block.desc() + ": Settings tab", id, block)) {
+                            <div id="tab-list">
+                                {for block.sound.tabs().iter().enumerate().map(|(tab_id, tab)| html!{
+                                    <div id={(self.editor_tab_id == tab_id).then_some("selected-tab")}
+                                    onpointerup={ctx.link().callback(move |_| MainCmd::SetTab(tab_id))}
+                                    data-main-hint={tab.name} data-aux-hint={tab_aux_hint.clone()}>
+                                        <p onpointerup={ctx.link().callback(|_| MainCmd::SetTab(0))}>{tab.name}</p>
+                                    </div>
+                                })}
+                            </div>
+                            {block.sound.params(self.editor_tab_id, id)}
                             <div id="general-ctrl" class="dark-bg">
+                                <Button id={ParamId::Select} name="Back to project-wide settings">
+                                    <svg viewBox="0 0 100 100">
+                                        <polygon points="20,60 50,20 80,60 70,60 70,80 30,80 30,60"/>
+                                    </svg>
+                                </Button>
                                 <Button id={ParamId::Remove(id)} name="Remove component">
                                     <svg viewBox="0 0 100 100">
                                         <polygon points="27,35 35,27 50,42 65,27 73,35 58,50 73,65 65,73 50,58 35,73 27,65 42,50"/>
