@@ -309,15 +309,14 @@ impl HtmlCanvasExt for HtmlCanvasElement {
 }
 
 pub trait HtmlDocumentExt {
-    fn element_dyn_into<T: JsCast>(&self, id: &str, loc: (&str, u32, u32)) -> JsResult<T>;
+    fn element_dyn_into<T: JsCast>(&self, id: &str) -> JsResult<T>;
 }
 
 impl HtmlDocumentExt for HtmlDocument {
-    fn element_dyn_into<T: JsCast>(&self, id: &str, loc: (&str, u32, u32)) -> JsResult<T> {
-        self.get_element_by_id(id).to_js_result(loc!()).add_loc(loc)?
+    fn element_dyn_into<T: JsCast>(&self, id: &str) -> JsResult<T> {
+        self.get_element_by_id(id).to_js_result(loc!())?
             .dyn_into::<T>()
             .to_js_result_with(|_| format!("element #{} is not of type `{}`", id, type_name::<T>()), loc!())
-            .add_loc(loc)
     }
 }
 

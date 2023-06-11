@@ -307,7 +307,8 @@ impl EditorPlaneHandler {
         let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
         let doc = document();
         let w = doc.body().to_js_result(loc!())?.client_width()
-            - doc.element_dyn_into::<HtmlElement>("ctrl-panel", loc!())?.client_width();
+            - doc.element_dyn_into::<HtmlElement>("ctrl-panel").add_loc(loc!())?
+                .client_width();
         canvas.set_width(w as u32);
         let h = canvas.client_height();
         canvas.set_height(h as u32);

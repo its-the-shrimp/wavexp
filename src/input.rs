@@ -43,7 +43,8 @@ pub enum ParamId {
     Release(usize),
     Bpm,
     MasterGain,
-    SnapStep
+    SnapStep,
+    Redraw(usize)
 }
 
 impl ParamId {
@@ -62,7 +63,8 @@ impl ParamId {
             | ParamId::Duration(id)
             | ParamId::Volume(id)
             | ParamId::Attack(id)
-            | ParamId::Release(id) => Some(*id)
+            | ParamId::Release(id)
+            | ParamId::Redraw(id) => Some(*id)
         }
     }
 
@@ -82,7 +84,8 @@ impl ParamId {
             | ParamId::Play
             | ParamId::Bpm
             | ParamId::MasterGain
-            | ParamId::SnapStep => false,
+            | ParamId::SnapStep
+            | ParamId::Redraw(..) => false,
         }
     }
 }

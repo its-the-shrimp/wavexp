@@ -16,7 +16,7 @@ use crate::{
         SaturatingInto, Pipe},
     input::{Switch, ParamId, Slider},
     loc,
-    r32, r64};
+    r32, r64, js_log};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -127,7 +127,13 @@ impl Note {
 }
 
 pub struct TabInfo {
-    pub name: &'static str
+    pub name: &'static str,
+    pub dynamic: bool
+}
+
+macro_rules! tab_info {
+    ($name:literal) => {crate::sound::TabInfo{name: $name, dynamic: false}};
+    (dynamic $name:literal) => {crate::sound::TabInfo{name: $name, dynamic: true}};
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,9 +269,9 @@ impl Sound {
     #[inline] pub fn tabs(&self) -> &'static [TabInfo] {
         match self {
             Sound::Note{..} =>
-                &[TabInfo{name: "General"}, TabInfo{name: "Pitch"}],
+                &[tab_info!{"General"}, tab_info!(dynamic "Pitch")],
             Sound::Noise{..} =>
-                &[TabInfo{name: "General"}, TabInfo{name: "Volume"}]
+                &[tab_info!{"General"}, tab_info!(dynamic "Volume")]
         }
     }
 
@@ -330,6 +336,7 @@ impl Sound {
                     *attack = value,
                 ParamId::Release(_) =>
                     *release = value,
+                ParamId::Redraw(_) => js_log!("pretending to do smth"),
                 _ => ()
             }.pipe(|_| false),
 
