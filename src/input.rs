@@ -30,21 +30,23 @@ pub enum Cmd {
     HoverOut(PointerEvent)
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ParamId {
+    Resize,
     Play,
     Select,
     Add(SoundType, i32),
     Remove(usize),
-    Note(usize),
     Duration(usize),
     Volume(usize),
-    Attack(usize),
-    Release(usize),
     Bpm,
     MasterGain,
     SnapStep,
-    Redraw(usize)
+    LeavePlane,
+    HoverPlane(PointerEvent),
+    Redraw(usize),
+    LeaveTab(usize),
+    HoverTab(usize, PointerEvent)
 }
 
 impl ParamId {
@@ -57,35 +59,16 @@ impl ParamId {
             | ParamId::Remove(..)
             | ParamId::Bpm
             | ParamId::MasterGain
-            | ParamId::SnapStep => None,
-
-            ParamId::Note(id)
-            | ParamId::Duration(id)
-            | ParamId::Volume(id)
-            | ParamId::Attack(id)
-            | ParamId::Release(id)
-            | ParamId::Redraw(id) => Some(*id)
-        }
-    }
-
-    /// returns `true` if the editor plane needs to be re-rendered
-    /// after setting the parameter
-    pub fn need_plane_rerender(&self) -> bool {
-        match self {
-            ParamId::Select
-            | ParamId::Add(..)
-            | ParamId::Remove(..)
-            | ParamId::Duration(..) => true,
-
-            ParamId::Note(..)
-            | ParamId::Volume(..)
-            | ParamId::Attack(..)
-            | ParamId::Release(..)
-            | ParamId::Play
-            | ParamId::Bpm
-            | ParamId::MasterGain
             | ParamId::SnapStep
-            | ParamId::Redraw(..) => false,
+            | ParamId::LeavePlane
+            | ParamId::HoverPlane(..)
+            | ParamId::Resize => None,
+
+            ParamId::Duration(id)
+            | ParamId::Volume(id)
+            | ParamId::Redraw(id)
+            | ParamId::HoverTab(id, _)
+            | ParamId::LeaveTab(id) => Some(*id)
         }
     }
 }
@@ -153,7 +136,7 @@ impl Component for Slider {
                         .release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
                     self.focused = false;
                     self.floored = e.shift_key();
-                    MainCmd::SetParam(*id,
+                    MainCmd::SetParam(id.clone(),
                         if self.floored {self.value.floor()} else {self.value}).send();
                 }
 
@@ -251,7 +234,7 @@ impl Component for Switch {
                     self.value = (self.value + R64::from(e.movement_y()) / h / -4i8 * options.len())
                         .rem_euclid(options.len().into()).to_js_result(loc!())?;
                     if old_value != *self.value as usize {
-                        MainCmd::SetParam(*id, self.value.floor()).send()
+                        MainCmd::SetParam(id.clone(), self.value.floor()).send()
                     }
                 }
 
@@ -338,7 +321,7 @@ impl Component for Button {
     fn create(_: &Context<Self>) -> Self {Self}
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        MainCmd::SetParam(ctx.props().id,
+        MainCmd::SetParam(ctx.props().id.clone(),
             msg.choose(R64::INFINITY, R64::NEG_INFINITY)).send();
         false
     }

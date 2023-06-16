@@ -1,10 +1,13 @@
-use std::{cmp::Ordering, ops::Not};
-use web_sys::{AnalyserNode as JsAnalyserNode, DynamicsCompressorNode, GainNode, AudioContext};
+use std::{cmp::Ordering, ops::{Not, Range}};
+use web_sys::{AnalyserNode as JsAnalyserNode, DynamicsCompressorNode, GainNode, AudioContext, Path2d, HtmlCanvasElement, HtmlElement};
+use yew::{NodeRef, Html, html};
 use crate::{
     sound::{Secs, Sound, Beats, FromBeats},
-    utils::{JsResult, JsResultUtils, R64, VecExt, R32, OptionExt, ResultToJsResult},
-    input::ParamId,
-    loc, r64
+    utils::{JsResult, JsResultUtils, R64, VecExt, R32, OptionExt, RatioToInt, Pipe, BoolExt, document, HtmlDocumentExt},
+    input::{ParamId, Switch},
+    visual::{GraphEditor, Graphable, HintHandler, CanvasEvent},
+    r32, r64,
+    loc
 };
 
 #[derive(Debug)]
@@ -34,10 +37,52 @@ impl Ord for PatternBlock {
     }
 }
 
-impl PatternBlock {
-    pub fn desc(&self) -> String {
-        format!("{} @{:.3}, layer {}",
-            self.sound.name(), *self.offset, self.layer)
+impl Graphable for PatternBlock {
+    const SCALE_X_BOUND: Range<R32> = r32![5.0] .. r32![95.0];
+    const SCALE_Y_BOUND: Range<R32> = r32![5.0] .. r32![30.0];
+    type Inner = Sound;
+    type Event = (ParamId, R64);
+
+    #[inline] fn inner(&self) -> &Self::Inner {
+        &self.sound
+    }
+
+    #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {
+        &mut self.sound
+    }
+
+    #[inline] fn loc(&self) -> [R32; 2] {
+        [self.offset.into(), self.layer.into()]
+    }
+
+    #[inline] fn set_loc(&mut self, _: usize, _: usize, x: impl FnOnce() -> R32, y: impl FnOnce() -> R32) {
+        self.offset = x().into();
+        self.layer = y().to_int();
+    }
+
+    #[inline] fn desc(&self) -> String {
+        self.sound.name().to_owned()
+    }
+
+    fn draw(&self, _: Option<&Self>, mapper: impl Fn([f64; 2]) -> [f64; 2]) -> JsResult<Path2d> {
+        let res = Path2d::new().add_loc(loc!())?;
+        let src = mapper([*self.offset, self.layer as f64]);
+        let dst = mapper([*self.offset + *self.sound.len(), (self.layer + 1) as f64]);
+        res.rect(src[0], src[1], dst[0] - src[0], dst[1] - src[1]);
+        Ok(res)
+    }
+
+    #[inline] fn in_hitbox(&self, point: [R32; 2]) -> bool {
+        self.layer == *point[0] as i32
+            && (self.offset .. self.offset + self.sound.len()).contains(&point[0].into())
+    }
+
+    #[inline] fn fmt_loc(loc: [R32; 2]) -> String {
+        format!("{:.3}, layer {}", loc[0], *loc[1] as i32)
+    }
+
+    #[inline] fn on_select(self_id: Option<usize>) -> Option<Self::Event> {
+        Some((ParamId::Select, self_id.map_or(R64::INFINITY, R64::from)))
     }
 }
 
@@ -50,14 +95,15 @@ pub enum SequencerState {
 }
 
 pub struct Sequencer {
-    pattern: Vec<PatternBlock>,
+    pattern: GraphEditor<PatternBlock>,
     pending: Vec<(usize, Secs)>,
     state: SequencerState,
     audio_ctx: AudioContext,
     visualiser: JsAnalyserNode,
     plug: DynamicsCompressorNode,
     gain: GainNode,
-    bps: Beats
+    bps: Beats,
+    selected_id: Option<usize>
 }
 
 impl Sequencer {
@@ -75,8 +121,9 @@ impl Sequencer {
             .connect_with_audio_node(&gain).add_loc(loc!())?
             .connect_with_audio_node(&audio_ctx.destination()).add_loc(loc!())?;
 
-        Ok(Self{pattern: vec![], pending: vec![], audio_ctx,
-            state: SequencerState::None, visualiser, plug, gain, bps: r64![2.0]})
+        Ok(Self{pattern: GraphEditor::new(r32![20.0], r32![10.0]), pending: vec![], audio_ctx,
+            state: SequencerState::None, visualiser, plug, gain, bps: r64![2.0],
+            selected_id: None})
     }
 
     #[inline] pub fn visualiser(&self) -> Option<&JsAnalyserNode> {
@@ -93,64 +140,113 @@ impl Sequencer {
         self.bps
     }
 
-    #[inline] pub fn pattern(&self) -> &[PatternBlock] {
-        &self.pattern
+    #[inline] pub fn canvas(&self) -> &NodeRef {
+        self.pattern.canvas()
     }
 
-    #[inline] pub fn pattern_mut(&mut self) -> &mut [PatternBlock] {
-        &mut self.pattern
+    #[inline] pub fn selected_block(&self) -> Option<(usize, &PatternBlock)> {
+        self.selected_id.map(|x|
+            (x, unsafe{self.pattern.get_unchecked(x)}))
+    }
+
+    pub fn editor_plane_params(&self) -> Html {
+        html!{
+            <div id="plane-settings" data-main-hint="Editor plane settings">
+                <Switch key="snap" name="Interval for blocks to snap to"
+                    id={ParamId::SnapStep}
+                    options={vec!["None", "1", "1/2", "1/4", "1/8"]}
+                    initial={match *self.pattern.snap_step() {
+                        x if x == 1.0   => 1,
+                        x if x == 0.5   => 2,
+                        x if x == 0.25  => 3,
+                        x if x == 0.125 => 4,
+                        _ => 0
+                    }}/>
+            </div>
+        }
     }
 
     /// the returned `bool` indicates whether the selected element's editor window should be
     /// rerendered
     pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
-        match id {
-            ParamId::Add(ty, layer) => {
-                let block = PatternBlock{
-                    sound: Sound::new(ty, &self.audio_ctx).add_loc(loc!())?,
-                    layer, offset: value};
-                self.pattern.push_sorted(block);
-            }
+        Ok(match id {
+            ParamId::Add(ty, layer) => self.pattern.add_point(PatternBlock{
+                sound: Sound::new(ty, &self.audio_ctx).add_loc(loc!())?,
+                layer, offset: value})
+                .pipe(|_| false),
 
-            ParamId::Remove(id) => if value.is_sign_negative() {
-                self.pattern.try_remove(id)
-                    .to_js_result(loc!())?;
-                return Ok(true)
-            }
+            ParamId::Remove(id) => value.is_sign_negative()
+                .then_try(|| self.pattern.del_point(id).add_loc(loc!()))?
+                .is_some(),
 
             ParamId::Play => if value.is_sign_positive() {
                 self.state = SequencerState::Start;
-                for block in self.pattern.iter_mut() {
-                    block.sound.reset(&self.audio_ctx).add_loc(loc!())?;
+                for mut block in self.pattern.iter_mut() {
+                    block.inner().reset(&self.audio_ctx).add_loc(loc!())?;
                 }
             } else {
                 self.state = SequencerState::Stop;
+            }.pipe(|_| false),
+
+            ParamId::Select => {
+                self.selected_id = value.is_finite().then_some(*value as usize);
+                true
             }
 
-            ParamId::Bpm => self.bps = value / 60u8,
+            ParamId::SnapStep => {
+                self.pattern.set_snap_step(value.into());
+                false
+            }
 
-            ParamId::MasterGain => self.gain.gain().set_value(*value as f32),
+            ParamId::Bpm => {
+                self.bps = value / 60u8;
+                false
+            }
+
+            ParamId::Resize => {
+                let canvas: HtmlCanvasElement = self.pattern.canvas()
+                    .cast().to_js_result(loc!())?;
+                let doc = document();
+                let w = doc.body().to_js_result(loc!())?.client_width()
+                    - doc.element_dyn_into::<HtmlElement>("ctrl-panel").add_loc(loc!())?
+                    .client_width();
+                canvas.set_width(w as u32);
+                let h = canvas.client_height();
+                canvas.set_height(h as u32);
+                self.pattern.force_redraw();
+                if let Some(id) = self.selected_id {
+                    unsafe{self.pattern.get_unchecked_mut(id)}.inner()
+                        .set_param(ParamId::Resize, value).add_loc(loc!())?
+                } else {false}
+            }
+
+            ParamId::HoverPlane(e) => {
+                let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
+                self.pattern.handle_hover(Some(e));
+                false
+            }
+
+            ParamId::LeavePlane => {
+                self.pattern.handle_hover(None);
+                false
+            }
+
+            ParamId::MasterGain => self.gain.gain()
+                .set_value(*value as f32).pipe(|_| false),
 
             param_id => if let Some(block_id) = param_id.block_id() {
-                return Ok(self.pattern.get_mut(block_id).to_js_result(loc!())?
-                    .sound.set_param(param_id, value))
-            }
-        }
-        Ok(false)
+                self.pattern.get_mut(block_id).to_js_result(loc!())?
+                    .inner().set_param(param_id, value).add_loc(loc!())?
+            } else {false}
+        })
     }
 
-    pub fn cur_play_offset(&self, time: Secs) -> Beats {
-        if let SequencerState::Play{start_time, ..} | SequencerState::Idle{start_time} = self.state {
-            (time - start_time).secs_to_beats(self.bps)
-        } else {Beats::NEG_INFINITY}
-    }
-
-    pub fn poll(&mut self, time: Secs) -> JsResult<()> {
+    pub fn poll(&mut self, time: Secs, hint_handler: &HintHandler) -> JsResult<()> {
         match self.state {
             SequencerState::Start => {
                 let mut next = 0;
-                for block in self.pattern.iter_mut().take_while(|x| *x.offset == 0.0) {
-                    let when = block.sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;
+                for mut block in self.pattern.iter_mut().take_while(|x| *x.offset == 0.0) {
+                    let when = block.inner().poll(time, &self.plug, self.bps).add_loc(loc!())?;
                     self.pending.push_sorted_by_key((next, when), |x| x.1);
                     next += 1;
                 }
@@ -159,21 +255,25 @@ impl Sequencer {
 
             SequencerState::Play{ref mut next, start_time} => {
                 let offset = (time - start_time).secs_to_beats(self.bps);
-                for block in self.pattern.iter_mut().skip(*next).take_while(|x| x.offset <= offset) {
-                    let when = block.sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;
+                for mut block in self.pattern.iter_mut().skip(*next).take_while(|x| x.offset <= offset) {
+                    let when = block.inner().poll(time, &self.plug, self.bps).add_loc(loc!())?;
                     self.pending.push_sorted_by_key((*next, when), |x| x.1);
                     *next += 1;
                 }
-                if *next >= self.pattern.len() {
+                if *next >= self.pattern.data().len() {
                     self.state = SequencerState::Idle{start_time};
                 }
             }
 
             SequencerState::Stop => {
-                for (id, _) in self.pending.drain(..) {
-                    unsafe{self.pattern.get_unchecked_mut(id)}
-                        .sound.stop(time, self.bps).add_loc(loc!())?;
-                }
+                let mut err = Ok(());
+                self.pending.drain_filter(|(id, when)| unsafe {
+                    *when = self.pattern.get_unchecked_mut(*id)
+                        .inner().stop(time, self.bps).add_loc(loc!())
+                        .unwrap_or_else(|x| {err = Err(x); R64::INFINITY});
+                    when.is_finite()
+                });
+                err?;
                 self.state = SequencerState::None;
             }
 
@@ -183,11 +283,16 @@ impl Sequencer {
         let n_due = self.pending.iter().position(|x| x.1 > time).unwrap_or(self.pending.len());
         let due: Vec<usize> = self.pending.drain(..n_due).map(|x| x.0).collect::<Vec<_>>();
         for id in due {
-            let block  = unsafe{self.pattern.get_unchecked_mut(id)};
-            let when = block.sound.poll(time, &self.plug, self.bps).add_loc(loc!())?;
+            let mut block = unsafe{self.pattern.get_unchecked_mut(id)};
+            let when = block.inner().poll(time, &self.plug, self.bps).add_loc(loc!())?;
             if when.is_infinite() {continue}
             self.pending.push_sorted_by_key((id, when), |x| x.0);
         }
-        Ok(())
+
+        use SequencerState::*;
+        let play_offset = if let Play{start_time, ..} | Idle{start_time} = self.state {
+            (time - start_time).secs_to_beats(self.bps)
+        } else {Beats::NEG_INFINITY};
+        self.pattern.redraw(hint_handler, play_offset)
     }
 }

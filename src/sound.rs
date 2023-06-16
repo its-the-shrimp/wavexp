@@ -1,22 +1,30 @@
 use std::{
-    ops::{Add, Sub, Neg},
-    fmt::{self, Display, Formatter, Debug}};
+    ops::{Add, Sub, Neg, Range},
+    fmt::{self, Display, Formatter, Debug},
+    f64::consts::PI,
+    mem::transmute};
 use js_sys::Math::random;
 use wasm_bindgen::{JsValue, JsCast};
 use web_sys::{
     AudioNode,
     AudioContext,
-    OscillatorNode, AudioBufferSourceNode, AudioBuffer, GainNode};
-use yew::{html, Html};
+    OscillatorNode,
+    AudioBufferSourceNode,
+    AudioBuffer,
+    GainNode,
+    Path2d};
+use yew::{html, Html, Callback};
 use crate::{
     utils::{
         JsResult,
         JsResultUtils,
         R64, R32,
-        SaturatingInto, Pipe},
-    input::{Switch, ParamId, Slider},
+        SaturatingInto, Pipe, RatioToInt, LooseEq},
+    input::{ParamId, Slider},
+    visual::{GraphEditor, Graphable, CanvasEvent},
     loc,
-    r32, r64, js_log};
+    r32, r64,
+};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -127,13 +135,7 @@ impl Note {
 }
 
 pub struct TabInfo {
-    pub name: &'static str,
-    pub dynamic: bool
-}
-
-macro_rules! tab_info {
-    ($name:literal) => {crate::sound::TabInfo{name: $name, dynamic: false}};
-    (dynamic $name:literal) => {crate::sound::TabInfo{name: $name, dynamic: true}};
+    pub name: &'static str
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,9 +158,66 @@ impl SoundType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PitchPoint {
+    pub offset: Beats,
+    pub value: Note
+}
+
+impl Graphable for PitchPoint {
+    const SCALE_X_BOUND: Range<R32> = r32![3.0] .. r32![30.0];
+    const SCALE_Y_BOUND: Range<R32> = r32![5.0] .. r32![36.0];
+    type Inner = ();
+    type Event = ();
+
+    #[inline] fn inner(&self) -> &Self::Inner {&()}
+    #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {
+        unsafe{transmute(self)}
+    }
+
+    #[inline] fn loc(&self) -> [R32; 2] {
+        [self.offset.into(), self.value.index().into()]
+    }
+
+    fn draw(&self, next: Option<&Self>, mapper: impl Fn([f64; 2]) -> [f64; 2]) -> JsResult<Path2d> {
+        let res = Path2d::new().add_loc(loc!())?;
+        let src = mapper([*self.offset, self.value.index() as f64]);
+        res.ellipse(src[0], src[1], 5.0, 5.0, 0.0, 0.0, PI * 2.0).add_loc(loc!())?;
+        if let Some(next) = next {
+            let dst = mapper([*next.offset, next.value.index() as f64]);
+            res.move_to(src[0], src[1]);
+            res.line_to(dst[0], dst[1]);
+        }
+        Ok(res)
+    }
+
+    #[inline] fn desc(&self) -> String {
+        String::new()
+    }
+
+    #[inline] fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R32, y: impl FnOnce() -> R32) {
+        if self_id != n_points - 2 {
+            self.offset = x().into();
+        }
+        self.value = Note::from_index(y().to_int());
+    }
+
+    #[inline] fn in_hitbox(&self, point: [R32; 2]) -> bool {
+        self.value.index() == *point[1] as usize
+            && R32::from(self.offset).loose_eq(point[0], 0.1)
+    }
+
+    #[inline] fn fmt_loc(loc: [R32; 2]) -> String {
+        format!("{:.3}, {}", *loc[0], Note::from_index(loc[1].to_int()))
+    }
+
+    #[inline] fn on_select(_: Option<usize>) -> Option<Self::Event> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Sound {
-    Note{gen: OscillatorNode, note: Note, len: Beats, started: bool,
-        attack: Beats, release: Beats},
+    Note{gen: OscillatorNode, state: usize, pitch: GraphEditor<PitchPoint>},
     Noise{gen: AudioBufferSourceNode, src: AudioBuffer,
         gain: GainNode, len: Beats, started: bool}
 }
@@ -175,9 +234,8 @@ impl Sound {
                 let gen = ctx.create_oscillator().add_loc(loc!())?;
                 gen.frequency().set_value(0.0);
                 gen.start().add_loc(loc!())?;
-                Self::Note{gen,
-                    note: Note::MAX, len: r64![1.0], started: false,
-                    attack: r64![0.4], release: r64![0.4]}
+                Self::Note{gen, state: 0,
+                    pitch: GraphEditor::new(r32![5.0], r32![20.0])}
             }
 
             SoundType::Noise => {
@@ -202,12 +260,13 @@ impl Sound {
         }
     }
 
-    #[inline] pub fn reset(&mut self, ctx: &AudioContext) -> JsResult<()> {
+    pub fn reset(&mut self, ctx: &AudioContext) -> JsResult<()> {
         Ok(match self {
-            Sound::Note{started, gen, ..} => {
-                *started = false;
+            Sound::Note{state, gen, pitch, ..} => {
+                *state = 0;
+                let first = unsafe{pitch.get_unchecked(0)};
                 gen.frequency().cancel_scheduled_values(0.0).add_loc(loc!())?
-                    .set_value(0.0);
+                    .set_value(*first.value.freq());
             }
 
             Sound::Noise{gen, src, started, gain, ..} => {
@@ -221,18 +280,21 @@ impl Sound {
         })
     }
 
-    #[inline] pub fn poll(&mut self, time: Secs, plug: &AudioNode, bps: Beats) -> JsResult<Secs> {
+    pub fn poll(&mut self, mut time: Secs, plug: &AudioNode, bps: Beats) -> JsResult<Secs> {
         Ok(match self {
-            Sound::Note{len, gen, started, note, attack, ..} => if *started {
-                self.stop(time, bps).add_loc(loc!())?;
-                Secs::INFINITY
-            } else {
-                *started = true;
-                gen.connect_with_audio_node(plug).add_loc(loc!())?;
-                gen.frequency()
-                    .linear_ramp_to_value_at_time(*note.freq(), *time + *attack.to_secs(bps))
-                    .add_loc(loc!())?;
-                len.to_secs(bps) + time
+            Sound::Note{gen, state, pitch, ..} => {
+                let cur = unsafe{pitch.data().get_unchecked(*state)};
+                *state += 1;
+                if let Some(next) = pitch.get(*state) {
+                    time += *(next.offset - cur.offset).to_secs(bps);
+                    gen.frequency()
+                        .linear_ramp_to_value_at_time(*cur.value.freq(), *time)
+                        .add_loc(loc!())?;
+                    time
+                } else {
+                    gen.disconnect().add_loc(loc!())?;
+                    Secs::INFINITY
+                }
             }
 
             Sound::Noise{gain, len, started, ..} => if *started {
@@ -246,73 +308,56 @@ impl Sound {
         })
     }
 
-    /// the method always properly stops the sound no matter if an error is returned or not
-    #[inline] pub fn stop(&mut self, time: Secs, bps: Beats) -> JsResult<()> {
+    /// given guarantee: always stop the sound properly regardless of whether an error is returned
+    /// expected guarantee: called in the same manner as `poll` would be called
+    pub fn stop(&mut self, mut time: Secs, bps: Beats) -> JsResult<Secs> {
         match self {
-            Sound::Note{gen, release, ..} =>
-                gen.frequency()
-                    .cancel_scheduled_values(0.0).add_loc(loc!())?
-                    .linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *time + *release.to_secs(bps))
-                    .add_loc(loc!()).map(|_| ()),
-            Sound::Noise{gen, ..} =>
-                gen.stop().add_loc(loc!())
+            Sound::Note{gen, pitch, state, ..} => match (pitch.data(), pitch.data().len() - *state) {
+                ([.., start, end], 2..) => {
+                    time += (end.offset - start.offset).to_secs(bps);
+                    gen.frequency()
+                        .linear_ramp_to_value_at_time(*end.value.freq(), *time)
+                        .add_loc(loc!()).map(|_| time)
+                }
+
+                _ => gen.disconnect().add_loc(loc!()).map(|_| Beats::INFINITY)
+            }
+
+            Sound::Noise{gen, ..} => gen.disconnect().add_loc(loc!())
+                .map(|_| Beats::INFINITY)
         }
     }
 
     #[inline] pub fn len(&self) -> Beats {
         match self {
-            Sound::Note{len, ..}
-            | Sound::Noise{len, ..} => *len
+            Sound::Note{pitch, ..} =>
+                pitch.data().last().map_or(r64!{0.0}, |x| x.offset),
+            Sound::Noise{len, ..} => *len
         }
     }
 
     #[inline] pub fn tabs(&self) -> &'static [TabInfo] {
         match self {
             Sound::Note{..} =>
-                &[tab_info!{"General"}, tab_info!(dynamic "Pitch")],
+                &[],
             Sound::Noise{..} =>
-                &[tab_info!{"General"}, tab_info!(dynamic "Volume")]
+                &[TabInfo{name: "General"}, TabInfo{name: "Volume"}]
         }
     }
 
-    #[inline] pub fn params(&self, tab_id: usize, self_id: usize) -> Html {
-        match *self {
-            Sound::Note{note, len, attack, release, ..} => match tab_id {
-                0 /* General */ => html!{<div id="inputs">
-                    <Slider key="note-dur"
-                    id={ParamId::Duration(self_id)}
-                    max={r64![100.0]}
-                    name="Note Duration" postfix="Beats"
-                    initial={len}/>
-                </div>},
-                1 /* Pitch */ => html!{<div id="inputs">
-                    <Switch key={format!("{self_id}-note")}
-                    id={ParamId::Note(self_id)}
-                    options={Note::NAMES.to_vec()}
-                    name="Note"
-                    initial={note.index()}/>
-                    <Slider key={format!("{self_id}-att")}
-                    id={ParamId::Attack(self_id)}
-                    max={r64![5.0]}
-                    name="Attack Time" postfix="Beats"
-                    initial={attack}/>
-                    <Slider key={format!("{self_id}-rel")}
-                    id={ParamId::Release(self_id)}
-                    max={r64![5.0]}
-                    name="Release Time" postfix="Beats"
-                    initial={release}/>
-                </div>},
-                tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
-            }
+    #[inline] pub fn params(&self, tab_id: usize, self_id: usize, _param_setter: Callback<(ParamId, R64)>) -> Html {
+        match self {
+            Sound::Note{pitch, ..} => html!{
+                <canvas ref={pitch.canvas().clone()}/>
+            },
 
-
-            Sound::Noise{len, ref gain, ..} => match tab_id {
+            Sound::Noise{len, gain, ..} => match tab_id {
                 0 /* General */ => html!{<div id="inputs">
                     <Slider key="noise-dur"
                     id={ParamId::Duration(self_id)}
                     max={r64![100.0]}
                     name="Noise Duration" postfix="Beats"
-                    initial={len}/>
+                    initial={*len}/>
                 </div>},
                 1 /* Volume */ => html!{<div id="inputs">
                     <Slider key={format!("{self_id}-noise-vol")}
@@ -325,18 +370,18 @@ impl Sound {
         }
     }
 
-    pub fn set_param(&mut self, id: ParamId, value: R64) -> bool {
-        match self {
-            Sound::Note{note, len, attack, release, ..} => match id {
-                ParamId::Note(_) =>
-                    *note = Note::from_index(*value as usize),
-                ParamId::Duration(_) =>
-                    *len = value,
-                ParamId::Attack(_) =>
-                    *attack = value,
-                ParamId::Release(_) =>
-                    *release = value,
-                ParamId::Redraw(_) => js_log!("pretending to do smth"),
+    pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
+        Ok(match self {
+            Sound::Note{pitch, ..} => match id {
+                ParamId::HoverTab(_, e) => {
+                    let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
+                    pitch.handle_hover(Some(e));
+                }
+
+                ParamId::LeavePlane => _ = pitch.handle_hover(None),
+
+                ParamId::Resize => pitch.handle_resize(),
+
                 _ => ()
             }.pipe(|_| false),
 
@@ -347,6 +392,6 @@ impl Sound {
                     gain.gain().set_value(*value as f32),
                 _ => (),
             }.pipe(|_| false)
-        }
+        })
     }
 }

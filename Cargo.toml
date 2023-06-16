@@ -24,6 +24,7 @@ web-sys = { version = "0.3.60", features = [
 	"DomStringMap",
 	"SvgElement",
 	"AudioBuffer",
-	"AudioBufferSourceNode"
+	"AudioBufferSourceNode",
+	"Path2d"
 ]}
 yew = { version = "0.20.0", features = ["csr"] }

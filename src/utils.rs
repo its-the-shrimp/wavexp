@@ -7,7 +7,9 @@ use std::{
     iter::successors,
     error::Error,
     collections::TryReserveError,
-    cmp::Ordering, any::type_name};
+    cmp::Ordering,
+    any::type_name,
+    num::FpCategory};
 use js_sys::{Object as JsObject, Error as JsError};
 use wasm_bindgen::{JsCast, JsValue, throw_val};
 use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement, Element};
@@ -43,8 +45,13 @@ pub trait Tee: Sized {
 impl<T> Tee for T {}
 
 pub trait Pipe: Sized {
-	#[inline]
-	fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T { f(self) }
+	#[inline] fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
+        f(self)
+    }
+
+    #[inline] fn pipe_if(self, cond: bool, f: impl FnOnce(Self) -> Self) -> Self {
+        if cond {f(self)} else {self}
+    }
 }
 impl<T> Pipe for T {}
 
@@ -1243,10 +1250,11 @@ macro_rules! real_impl {
             #[inline]
             pub fn round(self) -> Self {Self(self.0.round())}
 
-            #[inline] pub fn floor_to(self, step: Self) -> Self {
-                match Self::try_from(self.0 - self.0 % *step) {
-                    Ok(x) => x,
-                    Err(_) => if step.is_infinite() {step} else {self}
+            #[inline] pub fn round_to(self, step: Self) -> Self {
+                match step.classify() {
+                    FpCategory::Zero => self,
+                    FpCategory::Infinite => step,
+                    _ => (self / step).round() * step
                 }
             }
 
@@ -1277,9 +1285,9 @@ macro_rules! r64 {
 }
 
 #[test]
-fn real_floor_to() {
-    assert!(r64![1.3].floor_to(r64![0.2]).loose_eq(r64![1.2], 0.005));
-    assert!(r64![-1.3].floor_to(r64![0.2]).loose_eq(r64![-1.4], 0.005));
+fn real_round_to() {
+    assert!(r64![1.3].round_to(r64![0.2]).loose_eq(r64![1.2], 0.005));
+    assert!(r64![-1.3].round_to(r64![0.2]).loose_eq(r64![-1.4], 0.005));
 }
 
 pub trait RatioToInt<Int> {

@@ -5,6 +5,8 @@
 #![feature(const_float_classify)]
 #![feature(const_trait_impl)]
 #![feature(const_mut_refs)]
+#![feature(array_windows)]
+#![feature(drain_filter)]
 #![allow(clippy::unit_arg)]
 #![allow(clippy::option_map_unit_fn)]
 
@@ -18,16 +20,19 @@ use std::{
     fmt::Debug,
     rc::Rc, cell::RefMut};
 use input::{ParamId, Button, Slider};
-use sound::{SoundType, TabInfo};
-use visual::{SoundVisualiser, EditorPlaneHandler, CanvasEvent, HintHandler};
+use sound::TabInfo;
+use visual::{SoundVisualiser, HintHandler, Graphable};
 use sequencer::Sequencer;
 use utils::{
     JsResultUtils, JsResult,
     MaybeCell, WasmCell,
-    window, R64, Point, OptionExt, document, HtmlDocumentExt};
+    window, R64, OptionExt, document, HtmlDocumentExt};
 use web_sys::{
     console::warn_1,
-    HtmlCanvasElement, PointerEvent, DragEvent, HtmlElement, SvgElement, Element};
+    PointerEvent,
+    HtmlElement,
+    SvgElement,
+    Element};
 use wasm_bindgen::{
     JsCast,
     JsValue,
@@ -42,7 +47,6 @@ use crate::{sound::{Sound, Secs}, utils::ResultToJsResult};
 /// responsible for playing sounds and frame-by-frame animations
 struct Player {
     pub sound_visualiser: SoundVisualiser,
-    pub editor_plane_handler: EditorPlaneHandler,
     pub sequencer: Sequencer,
     pub hint_handler: Rc<HintHandler>,
     pub js_callback: JsFunction
@@ -56,15 +60,13 @@ impl Player {
             _ = js_try!{type = !:
                 let time = Secs::try_from(time).to_js_result(loc!())? / 1000u16;
                 let mut handle = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
-                let Player{ref mut editor_plane_handler, ref mut sound_visualiser,
+                let Player{ref mut sound_visualiser,
                     ref mut sequencer, ref mut hint_handler, ref js_callback} = *handle;
 
-                sequencer.poll(time).add_loc(loc!())?;
+                sequencer.poll(time, hint_handler).add_loc(loc!())?;
                 if let Some(visualiser) = sequencer.visualiser() {
-                    sound_visualiser.poll(visualiser).add_loc(loc!())?;
+                    sound_visualiser.redraw(visualiser).add_loc(loc!())?;
                 }
-                editor_plane_handler.poll(sequencer.pattern(), hint_handler,
-                    sequencer.cur_play_offset(time)).add_loc(loc!())?;
                 window().request_animation_frame(js_callback).add_loc(loc!())?;
                 return
             }.report_err(loc!());
@@ -72,7 +74,6 @@ impl Player {
 
         let res = GLOBAL_PLAYER.set(Self{
             sound_visualiser: SoundVisualiser::new().add_loc(loc!())?,
-            editor_plane_handler: EditorPlaneHandler::new().add_loc(loc!())?,
             sequencer: Sequencer::new().add_loc(loc!())?,
             hint_handler: Rc::new(HintHandler::default()),
             js_callback: JsClosure::<dyn Fn(f64)>::new(render).into_js_value().unchecked_into()
@@ -81,37 +82,21 @@ impl Player {
         window().request_animation_frame(&res.js_callback).add_loc(loc!()).map(|_| res)
     }
 
-    pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
-        Ok(self.sequencer.set_param(id, value).add_loc(loc!())?
-            | self.editor_plane_handler.set_param(id, value))
-    }
-
-    pub fn handle_resize(&mut self) -> JsResult<()> {
-        self.editor_plane_handler.handle_resize().add_loc(loc!())?;
-        self.sound_visualiser.handle_resize().add_loc(loc!())?;
-        Ok(())
+    #[inline] pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
+        Ok(self.sequencer.set_param(id.clone(), value).add_loc(loc!())?
+        | self.sound_visualiser.set_param(id, value).add_loc(loc!())?)
     }
 }
 
 pub struct Main {
-    editor_tab_id: usize,
-    new_block_type: Option<SoundType>
+    editor_tab_id: usize
 }
 
 #[derive(Debug)]
 pub enum MainCmd {
-    Hover(PointerEvent),
-    Focus(PointerEvent),
-    Unfocus(PointerEvent),
-    Leave,
     SetParam(ParamId, R64),
     ReportError(JsValue),
-    SetTab(usize),
-    Resize,
-    BlockAddStart(SoundType),
-    BlockAddEnd(Option<DragEvent>),
-    HoverNewBlock(DragEvent),
-    DragNewBlockOut,
+    SetTab(usize)
 }
 
 impl From<ParamId> for MainCmd {
@@ -133,7 +118,7 @@ impl Component for Main {
     fn create(ctx: &Context<Self>) -> Self {
         *unsafe{&mut MAINCMD_SENDER} = Some(ctx.link().callback(|msg| msg));
         Player::init_global().unwrap_throw(loc!());
-        Self{editor_tab_id: 0, new_block_type: None}
+        Self{editor_tab_id: 0}
     }
 
     fn update(&mut self, _: &Context<Self>, msg: Self::Message) -> bool {
@@ -146,47 +131,8 @@ impl Component for Main {
 
         let err = js_try!{type = !:
             return match msg {
-                MainCmd::Hover(e) => {
-                    let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
-                    let Player{ref mut editor_plane_handler, ref mut sequencer, ..} = *player;
-                    if let Some((id, value)) = editor_plane_handler.handle_hover(Some(e), sequencer.pattern_mut()) {
-                        player.set_param(id, value).add_loc(loc!())? | self.set_param(id, value)
-                    } else {false}
-                }
-
-                MainCmd::Focus(e) => {
-                    e.target_unchecked_into::<HtmlCanvasElement>()
-                        .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
-                    let Player{ref mut editor_plane_handler, ref mut sequencer, ..} = *player;
-                    if let Some((id, value)) = editor_plane_handler.handle_hover(Some(e), sequencer.pattern_mut()) {
-                        player.set_param(id, value).add_loc(loc!())? | self.set_param(id, value)
-                    } else {false}
-                }
-
-                MainCmd::Unfocus(e) => {
-                    e.target_unchecked_into::<HtmlCanvasElement>()
-                        .release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
-                    let Player{ref mut editor_plane_handler, ref mut sequencer, ..} = *player;
-                    if let Some((id, value)) = editor_plane_handler.handle_hover(Some(e), sequencer.pattern_mut()) {
-                        player.set_param(id, value).add_loc(loc!())? | self.set_param(id, value)
-                    } else {false}
-                }
-
-                MainCmd::Leave => {
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
-                    let Player{ref mut editor_plane_handler, ref mut sequencer, ..} = *player;
-                    if let Some((id, value)) = editor_plane_handler.handle_hover(None, sequencer.pattern_mut()) {
-                        player.set_param(id, value).add_loc(loc!())? | self.set_param(id, value)
-                    } else {false}
-                }
-
                 MainCmd::SetParam(id, value) => {
-                    self.set_param(id, value);
+                    self.set_param(id.clone(), value);
                     GLOBAL_PLAYER.get_mut().add_loc(loc!())?
                         .set_param(id, value).add_loc(loc!())?
                 }
@@ -194,45 +140,6 @@ impl Component for Main {
                 MainCmd::SetTab(id) => {
                     self.editor_tab_id = id;
                     true
-                }
-
-                MainCmd::Resize => {
-                    GLOBAL_PLAYER.get_mut().add_loc(loc!())?
-                        .handle_resize().add_loc(loc!())?;
-                    true
-                }
-
-                MainCmd::BlockAddStart(decl) => {
-                    self.new_block_type = Some(decl);
-                    GLOBAL_PLAYER.get_mut().add_loc(loc!())?
-                        .editor_plane_handler.handle_block_add(Some(decl), None);
-                    false
-                }
-
-                MainCmd::BlockAddEnd(e) => {
-                    self.new_block_type = None;
-                    let at = e.map(|e| Point{x: e.offset_x(), y: e.offset_y()});
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
-                    if let Some((id, val)) = player.editor_plane_handler.handle_block_add(None, at) {
-                        player.set_param(id, val).add_loc(loc!())? | self.set_param(id, val)
-                    } else {false}
-                }
-
-                MainCmd::HoverNewBlock(e) => {
-                    // TODO: somehow hide the moved copy of the element being dragged
-                    e.prevent_default();
-                    let at = Some(Point{x: e.offset_x(), y: e.offset_y()});
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
-                    if let Some((id, val)) = player.editor_plane_handler.handle_block_add(self.new_block_type, at) {
-                        player.set_param(id, val).add_loc(loc!())? | self.set_param(id, val)
-                    } else {false}
-                }
-
-                MainCmd::DragNewBlockOut => {
-                    let mut player = GLOBAL_PLAYER.get_mut().add_loc(loc!())?;
-                    if let Some((id, val)) = player.editor_plane_handler.handle_block_add(self.new_block_type, None) {
-                        player.set_param(id, val).add_loc(loc!())? | self.set_param(id, val)
-                    } else {false}
                 }
 
                 MainCmd::ReportError(err) => return on_new_error(err)
@@ -243,14 +150,11 @@ impl Component for Main {
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         let player = GLOBAL_PLAYER.get().unwrap_throw(loc!());
-        let block = player.editor_plane_handler.selected_element_id()
-            .map(|x| (x, unsafe{player.sequencer.pattern().get_unchecked(x)}));
+        let block = player.sequencer.selected_block();
 
         let render_tab_info = |info: &TabInfo, block_id: usize, tab_id: usize, desc: String| -> Html {
             if self.editor_tab_id == tab_id {
-                if info.dynamic {
-                    ctx.link().send_message(MainCmd::SetParam(ParamId::Redraw(block_id), tab_id.into()));
-                }
+                ctx.link().send_message(MainCmd::SetParam(ParamId::Redraw(block_id), tab_id.into()));
                 html!{
                     <div id="selected-tab"
                     onpointerup={ctx.link().callback(move |_| MainCmd::SetTab(tab_id))}
@@ -283,7 +187,8 @@ impl Component for Main {
                             {for block.sound.tabs().iter().enumerate()
                                 .map(|(tab_id, tab)| render_tab_info(tab, id, tab_id, tab_aux_hint.clone()))}
                         </div>
-                        {block.sound.params(self.editor_tab_id, id)}
+                        {block.sound.params(self.editor_tab_id, id,
+                            ctx.link().callback(|(id, value)| MainCmd::SetParam(id, value)))}
                         <div id="general-ctrl" class="dark-bg">
                             <Button id={ParamId::Select} name="Back to project-wide settings">
                                 <svg viewBox="0 0 100 100">
@@ -325,9 +230,7 @@ impl Component for Main {
                             <div id="block-add-menu">
                                 {for Sound::TYPES.iter().map(|x| html!{
                                     <div draggable="true"
-                                    data-main-hint={x.name()} data-aux-hint="Hold and drag to add block to plane"
-                                    ondragstart={ctx.link().callback(|_| MainCmd::BlockAddStart(*x))}
-                                    ondragend={ctx.link().callback(|_| MainCmd::BlockAddEnd(None))}>
+                                    data-main-hint={x.name()} data-aux-hint="Hold and drag to add block to plane">
                                         <p>{x.name()}</p>
                                     </div>
                                 })}
@@ -335,17 +238,18 @@ impl Component for Main {
                         }
                     }
                 </div>
-                <canvas ref={player.editor_plane_handler.canvas().clone()} id="plane"
-                onpointerdown={ctx.link().callback(MainCmd::Focus)}
-                onpointerup={ctx.link().callback(MainCmd::Unfocus)}
-                onpointermove={ctx.link().callback(MainCmd::Hover)}
-                onpointerout={ctx.link().callback(|_| MainCmd::Leave)}
-                ondragover={ctx.link().callback(MainCmd::HoverNewBlock)}
-                ondragleave={ctx.link().callback(|_| MainCmd::DragNewBlockOut)}
-                ondrop={ctx.link().callback(|e| MainCmd::BlockAddEnd(Some(e)))}/>
+                <canvas ref={player.sequencer.canvas().clone()} id="plane"
+                onpointerdown={ctx.link().callback(|e|
+                    MainCmd::SetParam(ParamId::HoverPlane(e), R64::INFINITY))}
+                onpointerup={ctx.link().callback(|e|
+                    MainCmd::SetParam(ParamId::HoverPlane(e), R64::INFINITY))}
+                onpointermove={ctx.link().callback(|e|
+                    MainCmd::SetParam(ParamId::HoverPlane(e), R64::INFINITY))}
+                onpointerout={ctx.link().callback(|_|
+                    MainCmd::SetParam(ParamId::LeavePlane, R64::INFINITY))}/>
             </div>
             <div id="io-panel" data-main-hint="Editor plane settings">
-                {player.editor_plane_handler.params()}
+                {player.sequencer.editor_plane_params()}
                 <Button id={ParamId::Play} name="Play">
                     <svg viewBox="0 0 100 100" height="100%">
                         <polygon points="25,25 75,50 25,75"/>
@@ -370,7 +274,7 @@ impl Component for Main {
 
         let window = window();
         let mut player = GLOBAL_PLAYER.get_mut().unwrap_throw(loc!());
-        let cb = ctx.link().callback(|()| MainCmd::Resize);
+        let cb = ctx.link().callback(|()| MainCmd::SetParam(ParamId::Resize, R64::INFINITY));
         let cb = JsClosure::<dyn Fn()>::new(move || cb.emit(()))
             .into_js_value().unchecked_into();
         window.set_onresize(Some(&cb));
@@ -404,7 +308,8 @@ impl Component for Main {
         }).into_js_value().unchecked_into();
         window.set_onpointerover(Some(&cb));
 
-        player.handle_resize().unwrap_throw(loc!());
+        player.set_param(ParamId::Resize, R64::INFINITY)
+            .unwrap_throw(loc!());
     }
 }
 
