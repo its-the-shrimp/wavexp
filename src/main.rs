@@ -7,6 +7,7 @@
 #![feature(const_mut_refs)]
 #![feature(array_windows)]
 #![feature(drain_filter)]
+#![feature(associated_type_defaults)]
 #![allow(clippy::unit_arg)]
 #![allow(clippy::option_map_unit_fn)]
 
@@ -100,8 +101,9 @@ pub enum MainCmd {
 }
 
 impl From<ParamId> for MainCmd {
-    #[inline]
-    fn from(value: ParamId) -> Self {Self::SetParam(value, R64::INFINITY)}
+    #[inline] fn from(value: ParamId) -> Self {
+        Self::SetParam(value, R64::INFINITY)
+    }
 }
 
 static mut MAINCMD_SENDER: Option<Callback<MainCmd>> = None;
@@ -159,14 +161,14 @@ impl Component for Main {
                     <div id="selected-tab"
                     onpointerup={ctx.link().callback(move |_| MainCmd::SetTab(tab_id))}
                     data-main-hint={info.name} data-aux-hint={desc}>
-                        <p onpointerup={ctx.link().callback(|_| MainCmd::SetTab(0))}>{info.name}</p>
+                        <p>{info.name}</p>
                     </div>
                 }
             } else {
                 html!{
                     <div onpointerup={ctx.link().callback(move |_| MainCmd::SetTab(tab_id))}
                     data-main-hint={info.name} data-aux-hint={desc}>
-                        <p onpointerup={ctx.link().callback(|_| MainCmd::SetTab(0))}>{info.name}</p>
+                        <p>{info.name}</p>
                     </div>
                 }
             }
@@ -239,14 +241,10 @@ impl Component for Main {
                     }
                 </div>
                 <canvas ref={player.sequencer.canvas().clone()} id="plane"
-                onpointerdown={ctx.link().callback(|e|
-                    MainCmd::SetParam(ParamId::HoverPlane(e), R64::INFINITY))}
-                onpointerup={ctx.link().callback(|e|
-                    MainCmd::SetParam(ParamId::HoverPlane(e), R64::INFINITY))}
-                onpointermove={ctx.link().callback(|e|
-                    MainCmd::SetParam(ParamId::HoverPlane(e), R64::INFINITY))}
-                onpointerout={ctx.link().callback(|_|
-                    MainCmd::SetParam(ParamId::LeavePlane, R64::INFINITY))}/>
+                onpointerdown={ctx.link().callback(|e| MainCmd::from(ParamId::FocusPlane(e)))}
+                onpointerup={ctx.link().callback(|e|   MainCmd::from(ParamId::HoverPlane(e)))}
+                onpointermove={ctx.link().callback(|e| MainCmd::from(ParamId::HoverPlane(e)))}
+                onpointerout={ctx.link().callback(|_|  MainCmd::from(ParamId::LeavePlane))}/>
             </div>
             <div id="io-panel" data-main-hint="Editor plane settings">
                 {player.sequencer.editor_plane_params()}

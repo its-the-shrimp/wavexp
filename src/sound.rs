@@ -164,6 +164,7 @@ pub struct PitchPoint {
 }
 
 impl Graphable for PitchPoint {
+    const EDITOR_NAME: &'static str = "Pitch Editor";
     const SCALE_X_BOUND: Range<R32> = r32![3.0] .. r32![30.0];
     const SCALE_Y_BOUND: Range<R32> = r32![5.0] .. r32![36.0];
     type Inner = ();
@@ -190,10 +191,6 @@ impl Graphable for PitchPoint {
         Ok(res)
     }
 
-    #[inline] fn desc(&self) -> String {
-        String::new()
-    }
-
     #[inline] fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R32, y: impl FnOnce() -> R32) {
         if self_id != n_points - 2 {
             self.offset = x().into();
@@ -208,10 +205,6 @@ impl Graphable for PitchPoint {
 
     #[inline] fn fmt_loc(loc: [R32; 2]) -> String {
         format!("{:.3}, {}", *loc[0], Note::from_index(loc[1].to_int()))
-    }
-
-    #[inline] fn on_select(_: Option<usize>) -> Option<Self::Event> {
-        None
     }
 }
 

@@ -42,6 +42,7 @@ pub enum ParamId {
     Bpm,
     MasterGain,
     SnapStep,
+    FocusPlane(PointerEvent),
     LeavePlane,
     HoverPlane(PointerEvent),
     Redraw(usize),
@@ -60,6 +61,7 @@ impl ParamId {
             | ParamId::Bpm
             | ParamId::MasterGain
             | ParamId::SnapStep
+            | ParamId::FocusPlane(..)
             | ParamId::LeavePlane
             | ParamId::HoverPlane(..)
             | ParamId::Resize => None,

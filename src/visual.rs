@@ -240,27 +240,38 @@ impl HintHandler {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Focus {
-    None,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Focus<D: Copy> {
+    #[default] None,
     HoverPlane,
-    HoverBlock(usize),
+    HoverPoint(usize),
     MovePlane(Point),
-    MoveBlock(usize, Point),
+    MovePoint(usize, Point),
+    AwaitDragIn(D),
+    HoverWDraggable(D, Point),
     HoverPlaneWShift(Point),
     ZoomPlane{init_offset: Point, pivot: Point, init_scale_x: R32, init_scale_y: R32}
 }
 
-impl Focus {
+impl<D: Copy> Focus<D> {
+    #[inline] pub fn draggable(self) -> Option<D> {
+        if let Focus::AwaitDragIn(d)
+            | Focus::HoverWDraggable(d, _) = self {Some(d)}
+        else {None}
+    }
+
     #[inline] pub fn always_update(&self) -> bool {
-        matches!(self, Self::MoveBlock(..)
+        matches!(self, Self::MovePoint(..)
             | Self::ZoomPlane{..}
-            | Self::HoverPlaneWShift(..))
+            | Self::HoverPlaneWShift(..)
+            | Self::HoverWDraggable(..))
     }
 }
 
 /// data that can be edited with a generic graph editor defined below
 pub trait Graphable: Debug {
+    /// the name of the plane that will be displayed as a hint when hovered over it
+    const EDITOR_NAME: &'static str;
     /// bounds for the scale of the X axis of the graph
     const SCALE_X_BOUND: Range<R32>;
     /// bounds for the scale of the Y axis of the graph
@@ -269,8 +280,11 @@ pub trait Graphable: Debug {
     /// unlike the coordinates, can be freely mutated
     type Inner;
     /// type returned from `GraphEditor::handle_hover` when the user interacted with the UI in a special way,
-    /// i.e. selected a point
-    type Event;
+    /// i.e. selected a point or dropped in a `Draggable`
+    type Event = ();
+    /// type passed to `GraphEditor::handle_drag_n_drop` when the user started dragging an item
+    /// into the editor space
+    type Draggable: Copy = ();
 
     /// inner data of the point
     fn inner(&self) -> &Self::Inner;
@@ -282,8 +296,12 @@ pub trait Graphable: Debug {
     fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R32, y: impl FnOnce() -> R32);
     /// returns `true` if the given user coordinates are inside the hitbox of the point
     fn in_hitbox(&self, point: [R32; 2]) -> bool;
-    /// the message to send when the point is selected/de-selected in the UI
-    fn on_select(self_id: Option<usize>) -> Option<Self::Event>;
+    /// the event to emit when the point is selected/de-selected in the UI
+    #[allow(unused_variables)] #[inline]
+    fn on_select(self_id: Option<usize>) -> Option<Self::Event> {None}
+    /// the event to emit when a `Draggable` is dropped into the UI
+    #[allow(unused_variables)] #[inline]
+    fn on_drop_in(value: Self::Draggable, loc: impl FnOnce() -> [R32; 2]) -> Option<Self::Event> {None}
     /// visual representation of the point's hitbox
     /// `mapper` maps user coordinates to canvas coordinates, all vertices in the
     /// returned `Path2d` must be the result of the `mapper` function
@@ -291,9 +309,22 @@ pub trait Graphable: Debug {
     // return type of `desc` and `fmt_loc` should be `impl AsRef<str>`
     // but feature `return_position_impl_trait_in_trait` is not usable yet
     /// description of the point that'll be shown in the hint handler when the point's hovered over
-    fn desc(&self) -> String;
+    #[allow(unused_variables)] #[inline]
+    fn desc(&self) -> String {String::new()}
     /// format the location of a point in user coordinates
     fn fmt_loc(loc: [R32; 2]) -> String;
+    /// visual representation of `Draggable`, evaluated every time `Draggable` enters the UI
+    /// the center of the representation should be 0, it will then be moved accordingly
+    #[allow(unused_variables)] #[inline]
+    fn draw_draggable(value: Self::Draggable, step: [R64; 2]) -> JsResult<Path2d> {
+        Path2d::new()
+    }
+
+    /// set hint when the user enters/leaves/hovers the UI with the `d`
+    /// `loc` is in user coordinates
+    #[allow(unused_variables)] #[inline]
+    fn set_drag_n_drop_hint(hint_handler: &HintHandler, d: Self::Draggable, loc: impl FnOnce() -> Option<[R32; 2]>)
+    -> JsResult<()> {Ok(())}
 }
 
 /// a special reference wrapper: access to everything is immutable,
@@ -318,8 +349,8 @@ pub struct GraphEditor<T: Graphable> {
     scale_x: R32,
     scale_y: R32,
     snap_step: R32,
-    focus: Focus,
-    last_focus: Discriminant<Focus>,
+    focus: Focus<T::Draggable>,
+    last_focus: Discriminant<Focus<T::Draggable>>,
     redraw: bool,
     data: Vec<T>
 }
@@ -386,18 +417,22 @@ impl<T: Graphable> GraphEditor<T> {
         self.redraw = true;
     }
 
-    #[inline] fn id_by_pos(x: R32, y: R32, pattern: &[T]) -> Option<usize> {
-        pattern.iter().position(|point| point.in_hitbox([x, y]))
+    #[inline] pub fn set_draggable(&mut self, value: T::Draggable) {
+        self.set_focus(Focus::AwaitDragIn(value));
     }
 
-    #[inline] fn set_focus(&mut self, focus: Focus) {
+    #[inline] fn id_by_pos(&self, x: R32, y: R32) -> Option<usize> {
+        self.data.iter().position(|point| point.in_hitbox([x, y]))
+    }
+
+    #[inline] fn set_focus(&mut self, focus: Focus<T::Draggable>) {
         self.focus = focus;
         self.redraw = true;
     }
 
     pub fn handle_hover(&mut self, event: Option<CanvasEvent>) -> Option<T::Event> {
         let Some(mut event) = event else {
-            self.focus = Focus::None;
+            self.focus = self.focus.take().draggable().map_or(Focus::None, Focus::AwaitDragIn);
             self.last_focus = discriminant(&self.focus);
             return None
         };
@@ -405,13 +440,13 @@ impl<T: Graphable> GraphEditor<T> {
         event.point += self.offset;
         let [w, h]   = self.canvas.cast::<HtmlCanvasElement>()?.size();
         let step_x   = R32::from(w) / self.scale_x;
-        let step_y  = R32::from(h) / self.scale_y;
+        let step_y   = R32::from(h) / self.scale_y;
         let x        = R32::from(event.point.x) / step_x;
         let y        = R32::from(event.point.y) / step_y;
 
         let move_element_focus = |id: usize| {
             let off = unsafe{self.data.get_unchecked(id)}.loc()[0];
-            Focus::MoveBlock(id, event.point.shift_x((-step_x * off).to_int()))
+            Focus::MovePoint(id, event.point.shift_x((-step_x * off).to_int()))
         };
 
         let zoom_plane_focus = || Focus::ZoomPlane{
@@ -419,20 +454,22 @@ impl<T: Graphable> GraphEditor<T> {
             init_scale_x: self.scale_x, init_scale_y: self.scale_y};
 
         match self.focus {
+            Focus::None => None,
+
             Focus::HoverPlane => match (event.left, event.shift) {
                 (true, true) =>
                     Some(zoom_plane_focus()),
                 (true, false) =>
-                    Self::id_by_pos(x, y, &self.data)
+                    self.id_by_pos(x, y)
                         .map_or_else(|| Focus::MovePlane(event.point - self.offset),
                             move_element_focus).into(),
                 (false, true) =>
                     Some(Focus::HoverPlaneWShift(event.point)),
                 (false, false) =>
-                    Self::id_by_pos(x, y, &self.data).map(Focus::HoverBlock)
+                    self.id_by_pos(x, y).map(Focus::HoverPoint)
             }.map(|x| self.set_focus(x)).pipe(|_| None),
 
-            Focus::HoverBlock(id) => match (event.left, event.shift) {
+            Focus::HoverPoint(id) => match (event.left, event.shift) {
                 (true, true) => Some(zoom_plane_focus()),
                 (true, false) => Some(move_element_focus(id)),
                 (false, true) => Some(Focus::HoverPlaneWShift(event.point)),
@@ -452,7 +489,7 @@ impl<T: Graphable> GraphEditor<T> {
                 T::on_select(None)
             }.tee(|_| self.redraw = true),
 
-            Focus::MoveBlock(id, init_offset) => if event.left {
+            Focus::MovePoint(id, init_offset) => if event.left {
                 let n_points = self.data.len();
                 unsafe{self.data.get_unchecked_mut(id)}.set_loc(n_points, id,
                     || R32::from(event.point.x - init_offset.x).div(step_x)
@@ -460,7 +497,7 @@ impl<T: Graphable> GraphEditor<T> {
                     || (R32::from(event.point.y - init_offset.y) / step_y).max(R32::ZERO));
                 None
             } else {
-                self.focus = Focus::HoverBlock(id);
+                self.focus = Focus::HoverPoint(id);
                 T::on_select(Some(id))
             }.tee(|_| self.redraw = true),
 
@@ -468,12 +505,28 @@ impl<T: Graphable> GraphEditor<T> {
                 (true, true) => 
                     self.focus = zoom_plane_focus(),
                 (true, false) =>
-                    self.focus = Self::id_by_pos(x, y, &self.data)
+                    self.focus = self.id_by_pos(x, y)
                         .map_or_else(|| Focus::MovePlane(event.point - self.offset),
                             move_element_focus),
                 (false, true) => *point = event.point,
                 (false, false) => self.focus = Focus::HoverPlane,
             }.pipe(|_| {self.redraw = true; None}),
+
+            Focus::AwaitDragIn(d) => if event.left {
+                self.focus = Focus::HoverWDraggable(d, event.point);
+                None
+            } else {
+                self.focus = Focus::HoverPlane;
+                T::on_drop_in(d, || [R32::from(event.point.x) / step_x, R32::from(event.point.y) / step_y])
+            }.tee(|_| self.redraw = true),
+
+            Focus::HoverWDraggable(d, ref mut point) => if event.left {
+                *point = event.point;
+                None
+            } else {
+                self.focus = Focus::HoverPlane;
+                T::on_drop_in(d, || [R32::from(event.point.x) / step_x, R32::from(event.point.y) / step_y])
+            }.tee(|_| self.redraw = true),
 
             Focus::ZoomPlane{init_offset, init_scale_x, init_scale_y, pivot} => match (event.left, event.shift) {
                 (true, _) => {
@@ -492,8 +545,6 @@ impl<T: Graphable> GraphEditor<T> {
 
                 (false, false) => self.focus = Focus::HoverPlane
             }.pipe(|_| {self.redraw = true; None}),
-
-            _ => self.set_focus(Focus::HoverPlane).pipe(|_| None),
         }
     }
 
@@ -509,37 +560,37 @@ impl<T: Graphable> GraphEditor<T> {
         if !self.redraw.take() && play_offset.is_infinite() {return Ok(())}
 
         let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
-        let [w, h] = canvas.size().map(|x| x as f64);
+        let [w, h] = canvas.size().map(R64::from);
         let ctx = canvas.get_2d_context(loc!())?;
 
         ctx.set_fill_style(&Self::BG_STYLE.into());
-        ctx.fill_rect(0.0, 0.0, w, h);
+        ctx.fill_rect(0.0, 0.0, *w, *h);
 
-        let step_x = w / *self.scale_x as f64;
-        let step_y = h / *self.scale_y as f64;
-        let offset_x = -self.offset.x as f64
-            % (self.offset.x > 0).choose(step_x, f64::INFINITY);
-        let offset_y = -self.offset.y as f64
-            % (self.offset.y > 0).choose(step_y * 2.0, f64::INFINITY);
+        let step_x = w / self.scale_x;
+        let step_y = h / self.scale_y;
+        let offset_x = R64::from(-self.offset.x)
+            % (self.offset.x > 0).choose(step_x, R64::INFINITY);
+        let offset_y = R64::from(-self.offset.y)
+            % (self.offset.y > 0).choose(step_y * 2.0, R64::INFINITY);
 
         // lighter horizontal bars
         ctx.begin_path();
-        for y in succ(Some(offset_y), |y| (y + step_y * 2.0).check_in(..h).ok()) {
+        for y in succ(Some(offset_y), |y| (y + step_y * 2u8).check_in(..h).ok()) {
             for x in succ(Some(offset_x), |x| (x + step_x + Self::LINE_WIDTH).check_in(..w).ok()) {
-                ctx.rect(x, y, step_x, step_y);
+                ctx.rect(*x, *y, *step_x, *step_y);
             }
         }
         // lighter vertical lines
-        for y in succ(Some(step_y + offset_y), |y| (y + step_y * 2.0).check_in(..h).ok()) {
+        for y in succ(Some(step_y + offset_y), |y| (y + step_y * 2u8).check_in(..h).ok()) {
             for x in succ(Some(offset_x), |x| (x + step_x + Self::LINE_WIDTH).check_in(..w).ok()) {
-                ctx.rect(x - Self::LINE_WIDTH, y, Self::LINE_WIDTH, step_y);
+                ctx.rect(*x - Self::LINE_WIDTH, *y, Self::LINE_WIDTH, *step_y);
             }
         }
         ctx.set_fill_style(&Self::MG_STYLE.into());
         ctx.fill();
 
         ctx.begin_path();
-        let mapper = |[x, y]: [f64; 2]| [x * step_x - self.offset.x as f64, y * step_y - self.offset.y as f64];
+        let mapper = |[x, y]: [f64; 2]| [x * *step_x - self.offset.x as f64, y * *step_y - self.offset.y as f64];
         for [this, next] in self.data.array_windows::<2>() {
             this.draw(Some(next), mapper).add_loc(loc!())?;
         }
@@ -561,7 +612,7 @@ impl<T: Graphable> GraphEditor<T> {
                 Focus::HoverPlane => hint_handler
                     .set_hint("Editor plane", "").add_loc(loc!())?,
 
-                Focus::HoverBlock(id) => {
+                Focus::HoverPoint(id) => {
                     let point = self.data.get(id).to_js_result(loc!())?;
                     hint_handler
                         .set_hint(&format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc())),
@@ -572,7 +623,7 @@ impl<T: Graphable> GraphEditor<T> {
                 Focus::MovePlane(_) => hint_handler
                     .set_hint("Editor plane", "Dragging").add_loc(loc!())?,
 
-                Focus::MoveBlock(id, _) => {
+                Focus::MovePoint(id, _) => {
                     let point = unsafe{self.data.get_unchecked(id)};
                     hint_handler
                         .set_hint(&format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc())),
@@ -588,8 +639,35 @@ impl<T: Graphable> GraphEditor<T> {
                     ctx.set_text_align("left");
                     ctx.set_text_baseline("bottom");
                     ctx.set_fill_style(&Self::FG_STYLE.into());
-                    ctx.fill_text(&T::fmt_loc([x, y]), 5.0, h - 5.0)
+                    ctx.fill_text(&T::fmt_loc([x, y]), 5.0, *h - 5.0)
                         .add_loc(loc!())?;
+                }
+
+                Focus::AwaitDragIn(d) => {
+                    T::set_drag_n_drop_hint(hint_handler, d, || None).add_loc(loc!())?;
+                    ctx.begin_path();
+                    ctx.rect(0.0, 0.0, *w, 5.0);
+                    ctx.rect(0.0, 0.0, 5.0, *h);
+                    ctx.rect(0.0, *h - 5.0, *w, 5.0);
+                    ctx.rect(*w - 5.0, 0.0, 5.0, *h);
+                    ctx.set_fill_style(&Self::FG_STYLE.into());
+                    ctx.fill();
+                    ctx.set_text_align("center");
+                    ctx.set_text_baseline("middle");
+                    ctx.fill_text("Drag here", *w / 2.0, *h / 2.0).add_loc(loc!())?;
+                }
+
+                Focus::HoverWDraggable(d, at) => {
+                    T::set_drag_n_drop_hint(hint_handler, d,
+                       || Some([R32::from(at.x) / step_x, R32::from(at.y) / step_y])).add_loc(loc!())?;
+                    ctx.stroke_with_path(&T::draw_draggable(d, [step_x, step_y]).add_loc(loc!())?);
+                    ctx.begin_path();
+                    ctx.rect(0.0, 0.0, *w, 5.0);
+                    ctx.rect(0.0, 0.0, 5.0, *h);
+                    ctx.rect(0.0, *h - 5.0, *w, 5.0);
+                    ctx.rect(*w - 5.0, 0.0, 5.0, *h);
+                    ctx.set_fill_style(&Self::FG_STYLE.into());
+                    ctx.fill();
                 }
 
                 Focus::ZoomPlane{pivot, init_offset, ..} => {
@@ -608,7 +686,7 @@ impl<T: Graphable> GraphEditor<T> {
         }
 
         ctx.set_fill_style(&Self::FG_STYLE.into());
-        ctx.fill_rect(*play_offset * step_x - self.offset.x as f64, 0.0, 3.0, h);
+        ctx.fill_rect(*play_offset * *step_x - self.offset.x as f64, 0.0, 3.0, *h);
         Ok(())
     }
 }

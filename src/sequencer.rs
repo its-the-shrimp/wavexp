@@ -1,8 +1,8 @@
 use std::{cmp::Ordering, ops::{Not, Range}};
-use web_sys::{AnalyserNode as JsAnalyserNode, DynamicsCompressorNode, GainNode, AudioContext, Path2d, HtmlCanvasElement, HtmlElement};
-use yew::{NodeRef, Html, html};
+use web_sys::{AnalyserNode as JsAnalyserNode, DynamicsCompressorNode, GainNode, AudioContext, Path2d, HtmlCanvasElement, HtmlElement, Element};
+use yew::{NodeRef, Html, html, TargetCast};
 use crate::{
-    sound::{Secs, Sound, Beats, FromBeats},
+    sound::{Secs, Sound, Beats, FromBeats, SoundType},
     utils::{JsResult, JsResultUtils, R64, VecExt, R32, OptionExt, RatioToInt, Pipe, BoolExt, document, HtmlDocumentExt},
     input::{ParamId, Switch},
     visual::{GraphEditor, Graphable, HintHandler, CanvasEvent},
@@ -38,10 +38,12 @@ impl Ord for PatternBlock {
 }
 
 impl Graphable for PatternBlock {
+    const EDITOR_NAME: &'static str = "Editor plane";
     const SCALE_X_BOUND: Range<R32> = r32![5.0] .. r32![95.0];
     const SCALE_Y_BOUND: Range<R32> = r32![5.0] .. r32![30.0];
     type Inner = Sound;
     type Event = (ParamId, R64);
+    type Draggable = SoundType;
 
     #[inline] fn inner(&self) -> &Self::Inner {
         &self.sound
@@ -83,6 +85,24 @@ impl Graphable for PatternBlock {
 
     #[inline] fn on_select(self_id: Option<usize>) -> Option<Self::Event> {
         Some((ParamId::Select, self_id.map_or(R64::INFINITY, R64::from)))
+    }
+
+    #[inline] fn on_drop_in(value: Self::Draggable, loc: impl FnOnce() -> [R32; 2]) -> Option<Self::Event> {
+        let loc = loc();
+        Some((ParamId::Add(value, loc[1].to_int()), loc[0].into()))
+    }
+
+    #[inline] fn draw_draggable(_draggable: Self::Draggable, step: [R64; 2])
+    -> JsResult<Path2d> {
+        let res = Path2d::new().add_loc(loc!())?;
+        let [[x1, x2], [y1, y2]] = step.map(|x| [x / -2i8, x / 2i8]);
+        res.move_to(*x1, *y1);
+        res.line_to(*x2, *y1);
+        res.move_to(0.0, -*step[1]);
+        res.move_to(0.0,  *step[1]);
+        res.move_to(*x1, *y2);
+        res.line_to(*x2, *y2);
+        Ok(res)
     }
 }
 
@@ -218,6 +238,14 @@ impl Sequencer {
                     unsafe{self.pattern.get_unchecked_mut(id)}.inner()
                         .set_param(ParamId::Resize, value).add_loc(loc!())?
                 } else {false}
+            }
+
+            ParamId::FocusPlane(e) => {
+                e.target_dyn_into::<Element>().to_js_result(loc!())?
+                    .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
+                let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
+                self.pattern.handle_hover(Some(e));
+                false
             }
 
             ParamId::HoverPlane(e) => {

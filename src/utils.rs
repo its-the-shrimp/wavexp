@@ -2,7 +2,7 @@ use std::{
     ptr,
     mem::{self, swap},
     fmt::{self, Debug, Formatter, Display},
-    ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Range},
+    ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Rem, RemAssign, Range},
     cell::{RefMut, Ref, RefCell},
     iter::successors,
     error::Error,
@@ -1165,47 +1165,61 @@ macro_rules! real_impl {
             u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
         real_int_operator_impl!($real{$float}, u8:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, i8:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, u16:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, i16:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, u32:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, i32:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, usize:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, isize:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, u64:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, i64:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
 
         real_float_operator_impl!($real{$float}, $float:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_float_operator_impl!($real{$float}, $other_float:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_real_operator_impl!($real{$float}, $real{$float}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_real_operator_impl!($real{$float}, $other_real{$other_float}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
 
         impl $real {
             pub const INFINITY: $real = $real($float::INFINITY);
