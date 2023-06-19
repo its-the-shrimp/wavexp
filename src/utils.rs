@@ -1,9 +1,8 @@
 use std::{
     ptr,
-    mem::{self, swap},
+    mem::{swap, take},
     fmt::{self, Debug, Formatter, Display},
     ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Rem, RemAssign, Range},
-    cell::{RefMut, Ref, RefCell},
     iter::successors,
     error::Error,
     collections::TryReserveError,
@@ -13,7 +12,7 @@ use std::{
 use js_sys::{Object as JsObject, Error as JsError};
 use wasm_bindgen::{JsCast, JsValue, throw_val};
 use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement, Element};
-use crate::MainCmd;
+use crate::report_err;
 
 pub trait Check: Sized {
 	#[inline] fn check(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
@@ -229,7 +228,7 @@ impl<T> OptionExt<T> for Option<T> {
 
     #[inline] fn report_err(self, loc: (&str, u32, u32)) -> Self {
         if self.is_none() {
-            MainCmd::ReportError(js_error("`Option` contained the `None` value", loc).into_err()).send()
+            report_err(js_error("`Option` contained the `None` value", loc).into_err())
         }
         self
     }
@@ -280,7 +279,7 @@ impl<T> JsResultUtils<T> for JsResult<T> {
     fn report_err(mut self, loc: (&str, u32, u32)) -> Self {
         self = self.add_loc(loc);
         if let Err(err) = &self {
-            MainCmd::ReportError(err.clone()).send()
+            report_err(err.clone())
         }
         self
     }
@@ -625,54 +624,9 @@ impl<T> VecExt<T> for Vec<T> {
     }
 }
 
-// this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
-// them from containing types that don't implement `Sync`. On any other architecture this
-// limitation makes sense, but in Webassembly, which doesn't support threading, this limitation is meaningless.
-pub struct WasmCell<T>(T);
-
-unsafe impl<T> Sync for WasmCell<T> {}
-
-impl<T> Deref for WasmCell<T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target {&self.0}
-}
-
-impl<T> WasmCell<T> {
-    pub const fn new(val: T) -> Self {Self(val)}
-}
-
-pub struct MaybeCell<T>(RefCell<Option<T>>);
-
-impl<T> MaybeCell<T> {
-    #[inline] pub const fn new() -> Self {
-        Self(RefCell::new(None))
-    }
-
-    #[inline] pub fn get(&self) -> JsResult<Ref<'_, T>> {
-        Ref::filter_map(self.0.try_borrow().to_js_result(loc!())?,
-            |x| x.as_ref()).to_js_result_with(|_| "MaybeCell object not initialised", loc!())
-    }
-
-    #[inline] pub fn get_mut(&self) -> JsResult<RefMut<'_, T>> {
-        RefMut::filter_map(self.0.try_borrow_mut().to_js_result(loc!())?,
-            |x| x.as_mut()).to_js_result_with(|_| "MaybeCell object not initialised", loc!())
-    }
-
-    #[inline] pub fn set(&self, val: T) -> JsResult<RefMut<'_, T>> {
-        Ok(RefMut::map(self.0.try_borrow_mut().to_js_result(loc!())?,
-            |x| x.insert(val)))
-    }
-
-    /*#[inline] pub fn maybe_set(&self, val: Option<T>) -> JsResult<()> {
-        let mut r = self.0.try_borrow_mut().to_js_result()?;
-        *r = val;
-        Ok(())
-    }*/
-}
-
 pub trait Take: Default {
     /// replaces the value with a default one and returns the previous value
-    #[inline] fn take(&mut self) -> Self {mem::take(self)}
+    #[inline] fn take(&mut self) -> Self {take(self)}
 }
 impl<T: Default> Take for T {}
 

@@ -12,16 +12,16 @@ use web_sys::{
     AudioBufferSourceNode,
     AudioBuffer,
     GainNode,
-    Path2d};
-use yew::{html, Html, Callback};
+    Path2d, MouseEvent, Element};
+use yew::{html, Html, TargetCast, Callback};
 use crate::{
     utils::{
         JsResult,
         JsResultUtils,
         R64, R32,
-        SaturatingInto, Pipe, RatioToInt, LooseEq},
-    input::{ParamId, Slider},
-    visual::{GraphEditor, Graphable, CanvasEvent},
+        SaturatingInto, RatioToInt, LooseEq, OptionExt},
+    input::{AppEvent, Slider},
+    visual::{GraphEditor, Graphable, HintHandler},
     loc,
     r32, r64,
 };
@@ -72,6 +72,7 @@ impl Sub<isize> for Note {
 
 impl Note {
     pub const MAX: Note = Note(35);
+    pub const MIN: Note = Note(0);
 
     pub const FREQS: [R32; 36] = [
         r32![65.410] /*C2*/, r32![69.300] /*C#2*/,
@@ -151,10 +152,6 @@ impl SoundType {
             SoundType::Noise => "White Noise"
         }
     }
-
-    pub fn desc(&self, offset: Beats, layer: i32) -> String {
-        format!("{} @{:.3}, layer {}", self.name(), *offset, layer)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,8 +162,8 @@ pub struct PitchPoint {
 
 impl Graphable for PitchPoint {
     const EDITOR_NAME: &'static str = "Pitch Editor";
-    const SCALE_X_BOUND: Range<R32> = r32![3.0] .. r32![30.0];
-    const SCALE_Y_BOUND: Range<R32> = r32![5.0] .. r32![36.0];
+    const SCALE_X_BOUND: Range<R64> = r64![3.0] .. r64![30.0];
+    const SCALE_Y_BOUND: Range<R64> = r64![5.0] .. r64![50.0];
     type Inner = ();
     type Event = ();
 
@@ -175,8 +172,8 @@ impl Graphable for PitchPoint {
         unsafe{transmute(self)}
     }
 
-    #[inline] fn loc(&self) -> [R32; 2] {
-        [self.offset.into(), self.value.index().into()]
+    #[inline] fn loc(&self) -> [R64; 2] {
+        [self.offset, self.value.index().into()]
     }
 
     fn draw(&self, next: Option<&Self>, mapper: impl Fn([f64; 2]) -> [f64; 2]) -> JsResult<Path2d> {
@@ -191,19 +188,19 @@ impl Graphable for PitchPoint {
         Ok(res)
     }
 
-    #[inline] fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R32, y: impl FnOnce() -> R32) {
+    #[inline] fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R64, y: impl FnOnce() -> R64) {
         if self_id != n_points - 2 {
-            self.offset = x().into();
+            self.offset = x();
         }
         self.value = Note::from_index(y().to_int());
     }
 
-    #[inline] fn in_hitbox(&self, point: [R32; 2]) -> bool {
+    #[inline] fn in_hitbox(&self, point: [R64; 2]) -> bool {
         self.value.index() == *point[1] as usize
-            && R32::from(self.offset).loose_eq(point[0], 0.1)
+            && self.offset.loose_eq(point[0], 0.1)
     }
 
-    #[inline] fn fmt_loc(loc: [R32; 2]) -> String {
+    #[inline] fn fmt_loc(loc: [R64; 2]) -> String {
         format!("{:.3}, {}", *loc[0], Note::from_index(loc[1].to_int()))
     }
 }
@@ -228,7 +225,8 @@ impl Sound {
                 gen.frequency().set_value(0.0);
                 gen.start().add_loc(loc!())?;
                 Self::Note{gen, state: 0,
-                    pitch: GraphEditor::new(r32![5.0], r32![20.0])}
+                    pitch: GraphEditor::new(r64![5.0], r64![20.0],
+                        vec![PitchPoint{offset: r64![0.0], value: Note::MAX}, PitchPoint{offset: r64![1.0], value: Note::MIN}])}
             }
 
             SoundType::Noise => {
@@ -329,6 +327,12 @@ impl Sound {
         }
     }
 
+    pub fn redraw_tab(&mut self, _tab_id: usize, hint_handler: &HintHandler, play_offset: Beats) -> JsResult<()> {
+        if let Self::Note{pitch, ..} = self {
+            pitch.redraw(hint_handler, play_offset)
+        } else {Ok(())}
+    }
+
     #[inline] pub fn tabs(&self) -> &'static [TabInfo] {
         match self {
             Sound::Note{..} =>
@@ -338,23 +342,27 @@ impl Sound {
         }
     }
 
-    #[inline] pub fn params(&self, tab_id: usize, self_id: usize, _param_setter: Callback<(ParamId, R64)>) -> Html {
+    pub fn params(&self, tab_id: usize, self_id: usize, setter: Callback<AppEvent>) -> Html {
         match self {
             Sound::Note{pitch, ..} => html!{
-                <canvas ref={pitch.canvas().clone()}/>
+                <canvas ref={pitch.canvas().clone()} class="blue-border"
+                onpointerdown={setter.reform(move |e| AppEvent::FocusTab(self_id, e))}
+                onpointerup={setter.reform(move   |e| AppEvent::HoverTab(self_id, MouseEvent::from(e)))}
+                onpointermove={setter.reform(move |e| AppEvent::HoverTab(self_id, MouseEvent::from(e)))}
+                onpointerout={setter.reform(move  |_| AppEvent::LeaveTab(self_id))}/>
             },
 
             Sound::Noise{len, gain, ..} => match tab_id {
                 0 /* General */ => html!{<div id="inputs">
                     <Slider key="noise-dur"
-                    id={ParamId::Duration(self_id)}
+                    setter={setter.reform(move |x| AppEvent::Duration(self_id, x))}
                     max={r64![100.0]}
                     name="Noise Duration" postfix="Beats"
                     initial={*len}/>
                 </div>},
                 1 /* Volume */ => html!{<div id="inputs">
                     <Slider key={format!("{self_id}-noise-vol")}
-                    id={ParamId::Volume(self_id)}
+                    setter={setter.reform(move |x| AppEvent::Volume(self_id, R32::from(x)))}
                     name="Noise Volume"
                     initial={R64::new_or(R64::ZERO, gain.gain().value() as f64)}/>
                 </div>},
@@ -363,28 +371,33 @@ impl Sound {
         }
     }
 
-    pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
+    pub fn handle_event(&mut self, event: AppEvent) -> JsResult<()> {
         Ok(match self {
-            Sound::Note{pitch, ..} => match id {
-                ParamId::HoverTab(_, e) => {
-                    let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                    pitch.handle_hover(Some(e));
+            Sound::Note{pitch, ..} => match event {
+                AppEvent::FocusTab(_, e) => {
+                    e.target_dyn_into::<Element>().to_js_result(loc!())?
+                        .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
+                    pitch.handle_hover(Some(e.try_into().add_loc(loc!())?));
                 }
 
-                ParamId::LeavePlane => _ = pitch.handle_hover(None),
+                AppEvent::HoverTab(_, e) => _ = pitch
+                    .handle_hover(Some(e.try_into().add_loc(loc!())?)),
 
-                ParamId::Resize => pitch.handle_resize(),
+                AppEvent::LeaveTab(_) => _ = pitch.handle_hover(None),
+
+                AppEvent::Resize | AppEvent::SetTab(_) =>
+                    pitch.handle_resize().add_loc(loc!())?,
 
                 _ => ()
-            }.pipe(|_| false),
+            }
 
-            Sound::Noise{len, gain, ..} => match id {
-                ParamId::Duration(_) =>
+            Sound::Noise{len, gain, ..} => match event {
+                AppEvent::Duration(_, value) =>
                     *len = value,
-                ParamId::Volume(_) =>
-                    gain.gain().set_value(*value as f32),
+                AppEvent::Volume(_, value) =>
+                    gain.gain().set_value(*value),
                 _ => (),
-            }.pipe(|_| false)
+            }
         })
     }
 }

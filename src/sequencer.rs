@@ -1,13 +1,15 @@
-use std::{cmp::Ordering, ops::{Not, Range}};
-use web_sys::{AnalyserNode as JsAnalyserNode, DynamicsCompressorNode, GainNode, AudioContext, Path2d, HtmlCanvasElement, HtmlElement, Element};
-use yew::{NodeRef, Html, html, TargetCast};
+use std::{
+    cmp::Ordering,
+    ops::Range};
+use wasm_bindgen::JsCast;
+use web_sys::{AnalyserNode as JsAnalyserNode, DynamicsCompressorNode, GainNode, AudioContext, Path2d, HtmlCanvasElement, HtmlElement, Element, DragEvent};
+use yew::{NodeRef, Html, html, TargetCast, Callback};
 use crate::{
     sound::{Secs, Sound, Beats, FromBeats, SoundType},
-    utils::{JsResult, JsResultUtils, R64, VecExt, R32, OptionExt, RatioToInt, Pipe, BoolExt, document, HtmlDocumentExt},
-    input::{ParamId, Switch},
-    visual::{GraphEditor, Graphable, HintHandler, CanvasEvent},
-    r32, r64,
-    loc
+    utils::{JsResult, JsResultUtils, R64, VecExt, R32, OptionExt, RatioToInt, Pipe, document, HtmlDocumentExt, SliceExt},
+    input::{AppEvent, Switch},
+    visual::{GraphEditor, Graphable, GraphPointView},
+    r64, loc
 };
 
 #[derive(Debug)]
@@ -39,10 +41,10 @@ impl Ord for PatternBlock {
 
 impl Graphable for PatternBlock {
     const EDITOR_NAME: &'static str = "Editor plane";
-    const SCALE_X_BOUND: Range<R32> = r32![5.0] .. r32![95.0];
-    const SCALE_Y_BOUND: Range<R32> = r32![5.0] .. r32![30.0];
+    const SCALE_X_BOUND: Range<R64> = r64![5.0] .. r64![95.0];
+    const SCALE_Y_BOUND: Range<R64> = r64![5.0] .. r64![30.0];
     type Inner = Sound;
-    type Event = (ParamId, R64);
+    type Event = AppEvent;
     type Draggable = SoundType;
 
     #[inline] fn inner(&self) -> &Self::Inner {
@@ -53,12 +55,12 @@ impl Graphable for PatternBlock {
         &mut self.sound
     }
 
-    #[inline] fn loc(&self) -> [R32; 2] {
-        [self.offset.into(), self.layer.into()]
+    #[inline] fn loc(&self) -> [R64; 2] {
+        [self.offset, self.layer.into()]
     }
 
-    #[inline] fn set_loc(&mut self, _: usize, _: usize, x: impl FnOnce() -> R32, y: impl FnOnce() -> R32) {
-        self.offset = x().into();
+    #[inline] fn set_loc(&mut self, _: usize, _: usize, x: impl FnOnce() -> R64, y: impl FnOnce() -> R64) {
+        self.offset = x();
         self.layer = y().to_int();
     }
 
@@ -74,22 +76,22 @@ impl Graphable for PatternBlock {
         Ok(res)
     }
 
-    #[inline] fn in_hitbox(&self, point: [R32; 2]) -> bool {
-        self.layer == *point[0] as i32
-            && (self.offset .. self.offset + self.sound.len()).contains(&point[0].into())
+    #[inline] fn in_hitbox(&self, point: [R64; 2]) -> bool {
+        self.layer == *point[1] as i32
+            && (self.offset .. self.offset + self.sound.len()).contains(&point[0])
     }
 
-    #[inline] fn fmt_loc(loc: [R32; 2]) -> String {
+    #[inline] fn fmt_loc(loc: [R64; 2]) -> String {
         format!("{:.3}, layer {}", loc[0], *loc[1] as i32)
     }
 
     #[inline] fn on_select(self_id: Option<usize>) -> Option<Self::Event> {
-        Some((ParamId::Select, self_id.map_or(R64::INFINITY, R64::from)))
+        Some(AppEvent::Select(self_id))
     }
 
-    #[inline] fn on_drop_in(value: Self::Draggable, loc: impl FnOnce() -> [R32; 2]) -> Option<Self::Event> {
+    #[inline] fn on_drop_in(value: Self::Draggable, loc: impl FnOnce() -> [R64; 2]) -> Option<Self::Event> {
         let loc = loc();
-        Some((ParamId::Add(value, loc[1].to_int()), loc[0].into()))
+        Some(AppEvent::Add(value, loc[1].to_int(), loc[0]))
     }
 
     #[inline] fn draw_draggable(_draggable: Self::Draggable, step: [R64; 2])
@@ -141,14 +143,13 @@ impl Sequencer {
             .connect_with_audio_node(&gain).add_loc(loc!())?
             .connect_with_audio_node(&audio_ctx.destination()).add_loc(loc!())?;
 
-        Ok(Self{pattern: GraphEditor::new(r32![20.0], r32![10.0]), pending: vec![], audio_ctx,
+        Ok(Self{pattern: GraphEditor::new(r64![20.0], r64![10.0], vec![]), pending: vec![], audio_ctx,
             state: SequencerState::None, visualiser, plug, gain, bps: r64![2.0],
             selected_id: None})
     }
 
-    #[inline] pub fn visualiser(&self) -> Option<&JsAnalyserNode> {
-        matches!(self.state, SequencerState::None)
-            .not().then_some(&self.visualiser)
+    #[inline] pub fn visualiser(&self) -> &JsAnalyserNode {
+        &self.visualiser
     }
 
     #[inline] pub fn gain(&self) -> R32 {
@@ -169,61 +170,71 @@ impl Sequencer {
             (x, unsafe{self.pattern.get_unchecked(x)}))
     }
 
-    pub fn editor_plane_params(&self) -> Html {
+    #[inline] pub fn selected_block_mut(&mut self) -> Option<(usize, GraphPointView<PatternBlock>)> {
+        self.selected_id.map(|x|
+            (x, unsafe{self.pattern.get_unchecked_mut(x)}))
+    }
+
+    #[inline] pub fn pattern_mut(&mut self) -> &mut GraphEditor<PatternBlock> {
+        &mut self.pattern
+    }
+
+    pub fn editor_plane_params(&self, setter: Callback<AppEvent>) -> Html {
         html!{
             <div id="plane-settings" data-main-hint="Editor plane settings">
                 <Switch key="snap" name="Interval for blocks to snap to"
-                    id={ParamId::SnapStep}
-                    options={vec!["None", "1", "1/2", "1/4", "1/8"]}
-                    initial={match *self.pattern.snap_step() {
-                        x if x == 1.0   => 1,
-                        x if x == 0.5   => 2,
-                        x if x == 0.25  => 3,
-                        x if x == 0.125 => 4,
-                        _ => 0
-                    }}/>
+                setter={setter.reform(|x: usize|
+                    AppEvent::SnapStep(*[r64![0.0], r64![1.0], r64![0.5], r64![0.25], r64![0.125]].get_wrapping(x)))}
+                options={vec!["None", "1", "1/2", "1/4", "1/8"]}
+                initial={match *self.pattern.snap_step() {
+                    x if x == 1.0   => 1,
+                    x if x == 0.5   => 2,
+                    x if x == 0.25  => 3,
+                    x if x == 0.125 => 4,
+                    _ => 0
+                }}/>
             </div>
         }
     }
 
-    /// the returned `bool` indicates whether the selected element's editor window should be
-    /// rerendered
-    pub fn set_param(&mut self, id: ParamId, value: R64) -> JsResult<bool> {
-        Ok(match id {
-            ParamId::Add(ty, layer) => self.pattern.add_point(PatternBlock{
+    pub fn handle_event(&mut self, event: AppEvent) -> JsResult<Option<AppEvent>> {
+        Ok(match event {
+            AppEvent::Add(ty, layer, offset) => self.pattern.add_point(PatternBlock{
                 sound: Sound::new(ty, &self.audio_ctx).add_loc(loc!())?,
-                layer, offset: value})
-                .pipe(|_| false),
+                layer, offset})
+                .pipe(|_| None),
 
-            ParamId::Remove(id) => value.is_sign_negative()
-                .then_try(|| self.pattern.del_point(id).add_loc(loc!()))?
-                .is_some(),
+            AppEvent::Remove(id) => self.pattern.del_point(id).add_loc(loc!())?
+                .pipe(|_| None),
 
-            ParamId::Play => if value.is_sign_positive() {
+            AppEvent::TogglePlay => if matches!(self.state, SequencerState::Start |SequencerState::Play{..}) {
                 self.state = SequencerState::Start;
                 for mut block in self.pattern.iter_mut() {
                     block.inner().reset(&self.audio_ctx).add_loc(loc!())?;
                 }
             } else {
                 self.state = SequencerState::Stop;
-            }.pipe(|_| false),
+            }.pipe(|_| None),
 
-            ParamId::Select => {
-                self.selected_id = value.is_finite().then_some(*value as usize);
-                true
+            AppEvent::Select(id) => {
+                self.selected_id = id;
+                Some(AppEvent::SetTab(0))
             }
 
-            ParamId::SnapStep => {
-                self.pattern.set_snap_step(value.into());
-                false
-            }
+            AppEvent::SetTab(tab_id) => if let Some(id) = self.selected_id {
+                unsafe{self.pattern.get_unchecked_mut(id)}.inner()
+                    .handle_event(AppEvent::SetTab(tab_id)).add_loc(loc!())?;
+            }.pipe(|_| None),
 
-            ParamId::Bpm => {
+            AppEvent::SnapStep(value) => self.pattern.set_snap_step(value)
+                .pipe(|_| None),
+
+            AppEvent::Bpm(value) => {
                 self.bps = value / 60u8;
-                false
+                None
             }
 
-            ParamId::Resize => {
+            AppEvent::Resize => {
                 let canvas: HtmlCanvasElement = self.pattern.canvas()
                     .cast().to_js_result(loc!())?;
                 let doc = document();
@@ -236,40 +247,49 @@ impl Sequencer {
                 self.pattern.force_redraw();
                 if let Some(id) = self.selected_id {
                     unsafe{self.pattern.get_unchecked_mut(id)}.inner()
-                        .set_param(ParamId::Resize, value).add_loc(loc!())?
-                } else {false}
+                        .handle_event(AppEvent::Resize).add_loc(loc!())?;
+                }
+                None
             }
 
-            ParamId::FocusPlane(e) => {
+            AppEvent::FocusPlane(e) => {
                 e.target_dyn_into::<Element>().to_js_result(loc!())?
                     .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                self.pattern.handle_hover(Some(e));
-                false
+                self.pattern.handle_hover(Some(e.try_into().add_loc(loc!())?))
             }
 
-            ParamId::HoverPlane(e) => {
-                let e = CanvasEvent::try_from(&*e).add_loc(loc!())?;
-                self.pattern.handle_hover(Some(e));
-                false
+            AppEvent::HoverPlane(e) => {
+                if let Some(e) = e.dyn_ref::<DragEvent>() {
+                    e.prevent_default();
+                }
+                self.pattern.handle_hover(Some(e.try_into().add_loc(loc!())?))
             }
 
-            ParamId::LeavePlane => {
-                self.pattern.handle_hover(None);
-                false
+            AppEvent::LeavePlane => self.pattern.handle_hover(None),
+
+            AppEvent::SetBlockAdd(d) => {
+                self.pattern.set_draggable(d);
+                None
             }
 
-            ParamId::MasterGain => self.gain.gain()
-                .set_value(*value as f32).pipe(|_| false),
+            AppEvent::MasterGain(value) => self.gain.gain()
+                .set_value(*value).pipe(|_| None),
 
-            param_id => if let Some(block_id) = param_id.block_id() {
+            event => if let Some(block_id) = event.block_id() {
                 self.pattern.get_mut(block_id).to_js_result(loc!())?
-                    .inner().set_param(param_id, value).add_loc(loc!())?
-            } else {false}
+                    .inner().handle_event(event).add_loc(loc!())?;
+            }.pipe(|_| None)
         })
     }
 
-    pub fn poll(&mut self, time: Secs, hint_handler: &HintHandler) -> JsResult<()> {
+    #[inline] pub fn play_offset(&self, time: Secs) -> Beats {
+        use SequencerState::*;
+        if let Play{start_time, ..} | Idle{start_time} = self.state {
+            (time - start_time).secs_to_beats(self.bps)
+        } else {Beats::NEG_INFINITY}
+    }
+
+    pub fn poll(&mut self, time: Secs) -> JsResult<()> {
         match self.state {
             SequencerState::Start => {
                 let mut next = 0;
@@ -316,11 +336,6 @@ impl Sequencer {
             if when.is_infinite() {continue}
             self.pending.push_sorted_by_key((id, when), |x| x.0);
         }
-
-        use SequencerState::*;
-        let play_offset = if let Play{start_time, ..} | Idle{start_time} = self.state {
-            (time - start_time).secs_to_beats(self.bps)
-        } else {Beats::NEG_INFINITY};
-        self.pattern.redraw(hint_handler, play_offset)
+        Ok(())
     }
 }

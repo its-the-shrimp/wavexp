@@ -3,22 +3,25 @@
 use std::{
     f64::consts::{PI, TAU},
     ops::{Div, Mul, Add}};
-use web_sys::{Element, HtmlCanvasElement, PointerEvent, HtmlElement};
+use web_sys::{
+    Element,
+    HtmlCanvasElement,
+    PointerEvent,
+    HtmlElement,
+    MouseEvent};
 use yew::{
     html, 
     Component,
     Context,
     Html,
     TargetCast,
-    html::Children, Classes, AttrValue, NodeRef};
+    html::Children,
+    Classes,
+    AttrValue,
+    NodeRef, Callback};
 use crate::{
-    utils::{
-        js_try,
-        JsResultUtils,
-        HtmlCanvasExt,
-        OptionExt, BoolExt, R64},
-    sound::SoundType,
-    MainCmd,
+    utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, BoolExt, R64, R32},
+    sound::{SoundType, Beats},
     loc};
 
 #[derive(Debug)]
@@ -30,47 +33,79 @@ pub enum Cmd {
     HoverOut(PointerEvent)
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum ParamId {
+#[derive(Debug, PartialEq, Clone)]
+pub enum AppEvent {
+    Redraw(R64),
+    SetTab(usize),
     Resize,
-    Play,
-    Select,
-    Add(SoundType, i32),
+    TogglePlay,
+    Select(Option<usize>),
+    Add(SoundType, i32, Beats),
     Remove(usize),
-    Duration(usize),
-    Volume(usize),
-    Bpm,
-    MasterGain,
-    SnapStep,
+    Duration(usize, R64),
+    Volume(usize, R32),
+    Bpm(R64),
+    MasterGain(R32),
+    SnapStep(R64),
     FocusPlane(PointerEvent),
     LeavePlane,
-    HoverPlane(PointerEvent),
-    Redraw(usize),
+    HoverPlane(MouseEvent),
+    SetBlockAdd(Option<SoundType>),
+    FocusTab(usize, PointerEvent),
+    HoverTab(usize, MouseEvent),
     LeaveTab(usize),
-    HoverTab(usize, PointerEvent)
 }
 
-impl ParamId {
+impl AppEvent {
     /// returns `Some(id)` when the parameter ID belongs to a specific sound block
     pub fn block_id(&self) -> Option<usize> {
         match self {
-            ParamId::Play
-            | ParamId::Select
-            | ParamId::Add(..)
-            | ParamId::Remove(..)
-            | ParamId::Bpm
-            | ParamId::MasterGain
-            | ParamId::SnapStep
-            | ParamId::FocusPlane(..)
-            | ParamId::LeavePlane
-            | ParamId::HoverPlane(..)
-            | ParamId::Resize => None,
+            AppEvent::TogglePlay
+            | AppEvent::Select(..)
+            | AppEvent::Add(..)
+            | AppEvent::Remove(..)
+            | AppEvent::Bpm(..)
+            | AppEvent::MasterGain(..)
+            | AppEvent::SnapStep(..)
+            | AppEvent::FocusPlane(..)
+            | AppEvent::LeavePlane
+            | AppEvent::HoverPlane(..)
+            | AppEvent::SetBlockAdd(..)
+            | AppEvent::SetTab(..)
+            | AppEvent::Resize
+            | AppEvent::Redraw(..) => None,
 
-            ParamId::Duration(id)
-            | ParamId::Volume(id)
-            | ParamId::Redraw(id)
-            | ParamId::HoverTab(id, _)
-            | ParamId::LeaveTab(id) => Some(*id)
+            AppEvent::Duration(id, _)
+            | AppEvent::Volume(id, _)
+            | AppEvent::FocusTab(id, _)
+            | AppEvent::HoverTab(id, _)
+            | AppEvent::LeaveTab(id) => Some(*id)
+        }
+    }
+
+    /// returns `true` if the events changes the UI layout
+    #[inline] pub fn ui_change(&self) -> bool {
+        match self {
+            AppEvent::SetTab(..)
+            | AppEvent::Select(..)
+            | AppEvent::Remove(..) => true,
+
+            AppEvent::Redraw(_)
+            | AppEvent::Duration(..)
+            | AppEvent::Resize 
+            | AppEvent::TogglePlay 
+            | AppEvent::Add(..) 
+            | AppEvent::Volume(..) 
+            | AppEvent::Bpm(..) 
+            | AppEvent::MasterGain(..) 
+            | AppEvent::SnapStep(..) 
+            | AppEvent::FocusPlane(..) 
+            | AppEvent::LeavePlane 
+            | AppEvent::HoverPlane(..) 
+            | AppEvent::SetBlockAdd(..) 
+            | AppEvent::FocusTab(..) 
+            | AppEvent::HoverTab(..) 
+            | AppEvent::LeaveTab(..) => false
         }
     }
 }
@@ -96,7 +131,7 @@ pub struct SliderProps {
     pub precision: usize,
     #[prop_or("")]
     pub postfix: &'static str,
-    pub id: ParamId,
+    pub setter: Callback<R64>,
     pub initial: R64
 }
 
@@ -114,7 +149,7 @@ impl Component for Slider {
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            let SliderProps{id, min, max, signed, ..} = ctx.props();
+            let SliderProps{setter, min, max, signed, ..} = ctx.props();
             match msg {
                 Cmd::Drag(e) => {
                     let target: Element = e.target_dyn_into().to_js_result(loc!())?;
@@ -138,8 +173,7 @@ impl Component for Slider {
                         .release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
                     self.focused = false;
                     self.floored = e.shift_key();
-                    MainCmd::SetParam(id.clone(),
-                        if self.floored {self.value.floor()} else {self.value}).send();
+                    setter.emit(if self.floored {self.value.floor()} else {self.value});
                 }
 
                 Cmd::HoverIn(_) => self.hovered = true,
@@ -213,7 +247,7 @@ pub struct Switch {
 pub struct SwitchProps {
     pub name: AttrValue,
     pub options: Vec<&'static str>,
-    pub id: ParamId,
+    pub setter: Callback<usize>,
     pub initial: usize
 }
 
@@ -228,7 +262,7 @@ impl Component for Switch {
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            let SwitchProps{options, id, ..} = ctx.props();
+            let SwitchProps{options, setter, ..} = ctx.props();
             match msg {
                 Cmd::Drag(e) => {
                     let old_value = *self.value as usize;
@@ -236,7 +270,7 @@ impl Component for Switch {
                     self.value = (self.value + R64::from(e.movement_y()) / h / -4i8 * options.len())
                         .rem_euclid(options.len().into()).to_js_result(loc!())?;
                     if old_value != *self.value as usize {
-                        MainCmd::SetParam(id.clone(), self.value.floor()).send()
+                        setter.emit(*self.value as usize)
                     }
                 }
 
@@ -309,7 +343,7 @@ pub struct Button;
 pub struct ButtonProps {
     pub name: AttrValue,
     pub children: Children,
-    pub id: ParamId,
+    pub setter: Callback<()>,
     #[prop_or(false)]
     pub svg: bool,
     #[prop_or_default]
@@ -317,34 +351,29 @@ pub struct ButtonProps {
 }
 
 impl Component for Button {
-    type Message = bool;
+    type Message = ();
     type Properties = ButtonProps;
 
     fn create(_: &Context<Self>) -> Self {Self}
 
-    fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        MainCmd::SetParam(ctx.props().id.clone(),
-            msg.choose(R64::INFINITY, R64::NEG_INFINITY)).send();
-        false
-    }
+    #[inline]
+    fn update(&mut self, _: &Context<Self>, _: Self::Message) -> bool {false}
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let ButtonProps{name, children, svg, class, ..} = ctx.props();
+        let ButtonProps{name, children, svg, class, setter} = ctx.props();
         let mut class = class.clone();
         class.push("input button");
         if *svg {
             html!{
                 <g {class} data-main-hint={name}
-                onpointerdown={ctx.link().callback(|_| true)}
-                onpointerup={ctx.link().callback(|_| false)}>
+                onpointerup={setter.reform(|_| ())}>
                     {children.clone()}
                 </g>
             }
         } else {
             html!{
                 <button {class} data-main-hint={name}
-                onpointerdown={ctx.link().callback(|_| true)}
-                onpointerup={ctx.link().callback(|_| false)}>
+                onpointerup={setter.reform(|_| ())}>
                     {children.clone()}
                 </button>
             }
