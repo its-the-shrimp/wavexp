@@ -1,17 +1,17 @@
 use std::{
     ptr,
-    mem::{self, swap},
+    mem::{swap, take},
     fmt::{self, Debug, Formatter, Display},
-    ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Range},
-    cell::{RefMut, Ref, RefCell},
+    ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Rem, RemAssign, Range},
     iter::successors,
     error::Error,
     collections::TryReserveError,
-    cmp::Ordering, any::type_name};
+    cmp::Ordering,
+    any::type_name,
+    num::FpCategory};
 use js_sys::{Object as JsObject, Error as JsError};
 use wasm_bindgen::{JsCast, JsValue, throw_val};
-use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement, Element};
-use crate::MainCmd;
+use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement, Element, console::warn_1, HtmlElement};
 
 pub trait Check: Sized {
 	#[inline] fn check(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
@@ -43,8 +43,13 @@ pub trait Tee: Sized {
 impl<T> Tee for T {}
 
 pub trait Pipe: Sized {
-	#[inline]
-	fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T { f(self) }
+	#[inline] fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
+        f(self)
+    }
+
+    #[inline] fn pipe_if(self, cond: bool, f: impl FnOnce(Self) -> Self) -> Self {
+        if cond {f(self)} else {self}
+    }
 }
 impl<T> Pipe for T {}
 
@@ -55,6 +60,7 @@ pub trait BoolExt {
     fn then_negate<T: Neg<Output=T>>(self, val: T) -> T;
     fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
     fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T>;
+    fn toggle(&mut self) -> Self;
 }
 
 impl BoolExt for bool {
@@ -81,34 +87,14 @@ impl BoolExt for bool {
     #[inline] fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T> {
         if self {f()} else {None}
     }
-}
-/*
-pub trait ArrayExt<T, const M: usize> {
-    fn concat<const N: usize>(self, other: [T; N]) -> [T; N + M];
-    fn split_first(self) -> (T, [T; M - 1]);
-}
 
-impl<T, const M: usize> ArrayExt<T, M> for [T; M] {
-    #[inline] fn concat<const N: usize>(self, other: [T; N]) -> [T; N + M] {
-        let mut res = std::mem::MaybeUninit::<[T; N + M]>::uninit();
-        unsafe {
-            let res_ptr = res.as_mut_ptr() as *mut T;
-            std::ptr::copy_nonoverlapping(self.as_ptr(), res_ptr, M);
-            std::ptr::copy_nonoverlapping(other.as_ptr(), res_ptr.add(M), N);
-            res.assume_init()
-        }
-    }
-
-    #[inline] fn split_first(self) -> (T, [T; M - 1]) {
-        let mut res = std::mem::MaybeUninit::<[T; M - 1]>::uninit();
-        unsafe {
-            let (first, others) = self.as_slice().split_first().unwrap_unchecked();
-            std::ptr::copy_nonoverlapping(others.as_ptr(), res.as_mut_ptr() as *mut T, M - 1);
-            ((first as *const T).read(), res.assume_init())
-        }
+    #[inline] fn toggle(&mut self) -> Self {
+        let res = *self;
+        *self = !*self;
+        res
     }
 }
-*/
+
 #[allow(non_camel_case_types)]
 #[allow(dead_code)]
 pub mod js_types {
@@ -176,6 +162,12 @@ pub fn document() -> HtmlDocument {
 	unsafe {web_sys::window().unwrap_unchecked().document().unwrap_unchecked()}
 }
 
+pub fn report_err(err: JsValue) {
+    warn_1(&err);
+    document().element_dyn_into::<HtmlElement>("error-sign").unwrap_throw(loc!())
+        .set_hidden(false);
+}
+
 fn to_error_with_msg(err: JsValue, msg: &str) -> JsValue {
     let s = format!("{}\n{}", msg, 
         match err.dyn_into::<JsError>() {
@@ -200,7 +192,9 @@ pub trait ResultToJsResult<T, E> {
 pub trait OptionExt<T> {
     fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T>;
     fn report_err(self, loc: (&str, u32, u32)) -> Self;
+    fn unwrap_throw(self, loc: (&str, u32, u32)) -> T;
     fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
+    fn choose<U>(&self, on_some: U, on_none: U) -> U;
     fn drop(self) -> Option<()>;
 }
 
@@ -239,13 +233,21 @@ impl<T> OptionExt<T> for Option<T> {
 
     #[inline] fn report_err(self, loc: (&str, u32, u32)) -> Self {
         if self.is_none() {
-            MainCmd::ReportError(js_error("`Option` contained the `None` value", loc).into_err()).send()
+            report_err(js_error("`Option` contained the `None` value", loc).into_err())
         }
         self
     }
 
+    #[inline] fn unwrap_throw(self, loc: (&str, u32, u32)) -> T {
+        self.to_js_result(loc).unwrap_or_else(|x| throw_val(x))
+    }
+
     #[inline] fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
         match self {Some(x) => f(x), None => U::default()}
+    }
+
+    #[inline] fn choose<U>(&self, on_some: U, on_none: U) -> U {
+        if self.is_some() {on_some} else {on_none}
     }
 
     #[allow(clippy::manual_map)]
@@ -282,7 +284,7 @@ impl<T> JsResultUtils<T> for JsResult<T> {
     fn report_err(mut self, loc: (&str, u32, u32)) -> Self {
         self = self.add_loc(loc);
         if let Err(err) = &self {
-            MainCmd::ReportError(err.clone()).send()
+            report_err(err.clone())
         }
         self
     }
@@ -295,6 +297,7 @@ impl<T> JsResultUtils<T> for JsResult<T> {
 pub trait HtmlCanvasExt {
     fn get_2d_context(&self, loc: (&str, u32, u32)) -> JsResult<CanvasRenderingContext2d>;
     fn rect(&self) -> Rect;
+    fn size(&self) -> [u32; 2];
     fn sync(&self);
 }
 
@@ -309,31 +312,37 @@ impl HtmlCanvasExt for HtmlCanvasElement {
         Rect(Point::ZERO, Point{x: self.width() as i32, y: self.height() as i32})
     }
 
+    fn size(&self) -> [u32; 2] {[self.width(), self.height()]}
+
     fn sync(&self) {
         self.set_height((self.client_height() as f64 / self.client_width() as f64 * self.width() as f64) as u32);
     }
 }
 
 pub trait HtmlDocumentExt {
-    fn element_dyn_into<T: JsCast>(&self, id: &str, loc: (&str, u32, u32)) -> JsResult<T>;
+    fn element_dyn_into<T: JsCast>(&self, id: &str) -> JsResult<T>;
 }
 
 impl HtmlDocumentExt for HtmlDocument {
-    fn element_dyn_into<T: JsCast>(&self, id: &str, loc: (&str, u32, u32)) -> JsResult<T> {
-        self.get_element_by_id(id).to_js_result(loc!()).add_loc(loc)?
+    fn element_dyn_into<T: JsCast>(&self, id: &str) -> JsResult<T> {
+        self.get_element_by_id(id).to_js_result(loc!())?
             .dyn_into::<T>()
             .to_js_result_with(|_| format!("element #{} is not of type `{}`", id, type_name::<T>()), loc!())
-            .add_loc(loc)
     }
 }
 
 pub trait HtmlElementExt {
     fn client_rect(&self) -> Rect;
+    fn client_size(&self) -> [i32; 2];
 }
 
 impl HtmlElementExt for Element {
     fn client_rect(&self) -> Rect {
         Rect(Point::ZERO, Point{x: self.client_width(), y: self.client_height()})
+    }
+
+    fn client_size(&self) -> [i32; 2] {
+        [self.client_width(), self.client_height()]
     }
 }
 
@@ -509,18 +518,18 @@ impl<T> SliceExt<T> for [T] {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct SwapRemoveError {
+pub struct RemoveError {
     index: usize,
     len: usize
 }
 
-impl Display for SwapRemoveError {
+impl Display for RemoveError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "swap_remove index (is {}) should be < len (is {})", self.index, self.len)
+        write!(f, "removal index (is {}) should be < len (is {})", self.index, self.len)
     }
 }
 
-impl Error for SwapRemoveError {}
+impl Error for RemoveError {}
 
 #[derive(Debug)]
 pub enum InsertError {
@@ -540,7 +549,8 @@ impl Display for InsertError {
 impl Error for InsertError {}
 
 pub trait VecExt<T> {
-    fn try_swap_remove(&mut self, index: usize) -> Result<T, SwapRemoveError>;
+    fn try_remove(&mut self, index: usize) -> Result<T, RemoveError>;
+    fn try_swap_remove(&mut self, index: usize) -> Result<T, RemoveError>;
     fn try_insert(&mut self, index: usize, element: T) -> Result<&mut T, InsertError>;
     fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool;
     fn push_sorted(&mut self, value: T) -> usize where T: Ord;
@@ -549,10 +559,24 @@ pub trait VecExt<T> {
 }
 
 impl<T> VecExt<T> for Vec<T> {
-    fn try_swap_remove(&mut self, index: usize) -> Result<T, SwapRemoveError> {
+    fn try_remove(&mut self, index: usize) -> Result<T, RemoveError> {
         let len = self.len();
         if index >= len {
-            return Err(SwapRemoveError{index, len});
+            return Err(RemoveError{index, len})
+        }
+        unsafe {
+            let ptr = self.as_mut_ptr().add(index);
+            let ret = ptr::read(ptr);
+            ptr::copy(ptr.add(1), ptr, len - index - 1);
+            self.set_len(len - 1);
+            Ok(ret)
+        }
+    }
+
+    fn try_swap_remove(&mut self, index: usize) -> Result<T, RemoveError> {
+        let len = self.len();
+        if index >= len {
+            return Err(RemoveError{index, len});
         }
         unsafe {
             let value = ptr::read(self.as_ptr().add(index));
@@ -605,54 +629,9 @@ impl<T> VecExt<T> for Vec<T> {
     }
 }
 
-// this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
-// them from containing types that don't implement `Sync`. On any other architecture this
-// limitation makes sense, but in Webassembly, which doesn't support threading, this limitation is meaningless.
-pub struct WasmCell<T>(T);
-
-unsafe impl<T> Sync for WasmCell<T> {}
-
-impl<T> Deref for WasmCell<T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target {&self.0}
-}
-
-impl<T> WasmCell<T> {
-    pub const fn new(val: T) -> Self {Self(val)}
-}
-
-pub struct MaybeCell<T>(RefCell<Option<T>>);
-
-impl<T> MaybeCell<T> {
-    #[inline] pub const fn new() -> Self {
-        Self(RefCell::new(None))
-    }
-
-    #[inline] pub fn get(&self) -> JsResult<Ref<'_, T>> {
-        Ref::filter_map(self.0.try_borrow().to_js_result(loc!())?,
-            |x| x.as_ref()).to_js_result_with(|_| "MaybeCell object not initialised", loc!())
-    }
-
-    #[inline] pub fn get_mut(&self) -> JsResult<RefMut<'_, T>> {
-        RefMut::filter_map(self.0.try_borrow_mut().to_js_result(loc!())?,
-            |x| x.as_mut()).to_js_result_with(|_| "MaybeCell object not initialised", loc!())
-    }
-
-    #[inline] pub fn set(&self, val: T) -> JsResult<RefMut<'_, T>> {
-        Ok(RefMut::map(self.0.try_borrow_mut().to_js_result(loc!())?,
-            |x| x.insert(val)))
-    }
-
-    /*#[inline] pub fn maybe_set(&self, val: Option<T>) -> JsResult<()> {
-        let mut r = self.0.try_borrow_mut().to_js_result()?;
-        *r = val;
-        Ok(())
-    }*/
-}
-
 pub trait Take: Default {
     /// replaces the value with a default one and returns the previous value
-    #[inline] fn take(&mut self) -> Self {mem::take(self)}
+    #[inline] fn take(&mut self) -> Self {take(self)}
 }
 impl<T: Default> Take for T {}
 
@@ -726,35 +705,42 @@ pub fn total_clamp<T: Ord>(x: T, mut min: T, mut max: T) -> T {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {pub x: i32, pub y: i32}
 
-impl From<Point> for [i32; 2] {
+impl const From<Point> for [i32; 2] {
     #[inline] fn from(value: Point) -> Self {
         [value.x, value.y]
     }
 }
 
-impl Add for Point {
+impl const Add for Point {
     type Output = Self;
     #[inline] fn add(self, rhs: Self) -> Self::Output {
         Self{x: self.x + rhs.x, y: self.y + rhs.y}
     }
 }
 
-impl AddAssign for Point {
+impl const AddAssign for Point {
     #[inline] fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs
     }
 }
 
-impl Sub for Point {
+impl const Sub for Point {
     type Output = Self;
     #[inline] fn sub(self, rhs: Self) -> Self::Output {
         Self{x: self.x - rhs.x, y: self.y - rhs.y}
     }
 }
 
-impl SubAssign for Point {
+impl const SubAssign for Point {
     #[inline] fn sub_assign(&mut self, rhs: Self) {
         *self = *self - rhs
+    }
+}
+
+impl const Neg for Point {
+    type Output = Self;
+    #[inline] fn neg(self) -> Self::Output {
+        Self{x: -self.x, y: -self.y}
     }
 }
 
@@ -762,13 +748,6 @@ impl LooseEq for Point {
     #[inline] fn loose_eq(&self, value: Self, off: Self) -> bool {
         self.x.loose_eq(value.x, off.x)
             && self.y.loose_eq(value.y, off.y)
-    }
-}
-
-impl Neg for Point {
-    type Output = Self;
-    fn neg(self) -> Self::Output {
-        Self{x: -self.x, y: -self.y}
     }
 }
 
@@ -795,6 +774,16 @@ impl Point {
         self.x = (((self.x - old_space.left()) as f32 / old_space.width() as f32)
             * new_space.width() as f32) as i32 + new_space.left();
         self
+    }
+
+    #[inline]
+    pub fn shift_x(self, off: i32) -> Self {Self{x: self.x + off, y: self.y}}
+
+    #[inline]
+    pub fn shift_y(self, off: i32) -> Self {Self{x: self.x, y: self.y + off}}
+
+    #[inline] pub fn map<T>(self, mut f: impl FnMut(i32) -> T) -> [T; 2] {
+        [f(self.x), f(self.y)]
     }
 }
 
@@ -844,37 +833,44 @@ impl HitZone for Rect {
     }
 }
 
+impl From<Point> for Rect {
+    /// same as `Rect::zero`
+    #[inline] fn from(value: Point) -> Self {
+        Rect::zero(value)
+    }
+}
+
 impl Rect {
-    #[inline] pub fn new(top_left: Point, bottom_right: Point) -> Self {
+    #[inline] pub const fn new(top_left: Point, bottom_right: Point) -> Self {
         Self(top_left, bottom_right)
     }
 
-    #[inline] pub fn zero(bottom_right: Point) -> Self {
+    #[inline] pub const fn zero(bottom_right: Point) -> Self {
         Self(Point::ZERO, bottom_right)
     }
 
-    #[inline] pub fn center(center: Point, half_sides: Point) -> Self {
+    #[inline] pub const fn center(center: Point, half_sides: Point) -> Self {
         Self(center - half_sides, center + half_sides)
     }
 
-    #[inline] pub fn zero_center(center: Point) -> Self {
+    #[inline] pub const fn zero_center(center: Point) -> Self {
         Self(Point::ZERO, center + center)
     }
 
-    #[inline] pub fn square(src: Point, side: i32) -> Self {
+    #[inline] pub const fn square(src: Point, side: i32) -> Self {
         Self(src, src + Point{x: side, y: side})
     }
 
-    #[inline] pub fn square_center(center: Point, half_side: i32) -> Self {
+    #[inline] pub const fn square_center(center: Point, half_side: i32) -> Self {
         let half_sides = Point{x: half_side, y: half_side};
         Self(center - half_sides, center + half_sides)
     }
 
-    #[inline] pub fn square_zero(side: i32) -> Self {
+    #[inline] pub const fn square_zero(side: i32) -> Self {
         Self(Point::ZERO, Point{x: side, y: side})
     }
 
-    #[inline] pub fn square_zero_center(half_side: i32) -> Self {
+    #[inline] pub const fn square_zero_center(half_side: i32) -> Self {
         let side = half_side * 2;
         Self(Point::ZERO, Point{x: side, y: side})
     }
@@ -925,46 +921,6 @@ impl Rhombus {
 }
 
 #[derive(Debug)]
-pub struct HorizontalArrow {
-    back_center: Point,
-    w: i32, half_h: i32,
-    is_left: bool
-}
-
-impl HitZone for HorizontalArrow {
-    fn contains(&self, point: Point) -> bool {
-        let offset = self.back_center - point;
-        if self.is_left.then_negate(offset.x) > 0 {return false}
-        offset.x.abs() as f64 / self.w as f64 + offset.y.abs() as f64 / self.half_h as f64 <= 1.0
-    }
-
-    #[inline] fn   left(&self) -> i32 {self.back_center.x - self.w * self.is_left as i32}
-    #[inline] fn    top(&self) -> i32 {self.back_center.y - self.half_h}
-    #[inline] fn  right(&self) -> i32 {self.back_center.x + self.w * !self.is_left as i32}
-    #[inline] fn bottom(&self) -> i32 {self.back_center.y + self.half_h}
-    #[inline] fn center_point(&self) -> Point {self.back_center}
-
-    #[inline] fn shift(mut self, offset: Point) -> Self {
-        self.back_center += offset;
-        self
-    }
-
-    fn draw(&self, ctx: &CanvasRenderingContext2d) {
-        ctx.move_to(self.back_center.x.into(), self.top().into());
-        ctx.line_to((self.back_center.x + self.is_left.then_negate(self.w)).into(),
-            self.back_center.y.into());
-        ctx.line_to(self.back_center.x.into(), self.bottom().into());
-        ctx.close_path();
-    }
-}
-
-impl HorizontalArrow {
-    #[inline] pub fn new(back_center: Point, w: i32, half_h: i32, is_left: bool) -> Self {
-        Self{back_center, w, half_h, is_left}
-    }
-}
-
-#[derive(Debug)]
 pub struct NanError;
 
 impl Display for NanError {
@@ -984,46 +940,46 @@ macro_rules! real_from_ints_impl {
 }
 
 macro_rules! real_float_operator_impl {
-    ($real:ty { $float:ty } : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
+    ($real:ty { $float:ty } , $other_float:ty : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
         $(
-            impl $op<$float> for $real {
+            impl $op<$other_float> for $real {
                 type Output = Self;
-                #[inline(always)] fn $method(self, rhs: $float) -> Self {
-                    let res = Self(self.0.$method(rhs));
+                #[inline(always)] fn $method(self, rhs: $other_float) -> Self {
+                    let res = Self(self.0.$method(rhs as $float));
                     assert!(!res.0.is_nan());
                     res
                 }
             }
 
-            impl $op<&$float> for $real {
+            impl $op<&$other_float> for $real {
                 type Output = $real;
                 #[inline(always)]
-                fn $method(self, rhs: &$float) -> $real {$op::$method(self, *rhs)}
+                fn $method(self, rhs: &$other_float) -> $real {$op::$method(self, *rhs)}
             }
 
-            impl<'a> $op<$float> for &'a $real {
+            impl<'a> $op<$other_float> for &'a $real {
                 type Output = $real;
                 #[inline(always)]
-                fn $method(self, rhs: $float) -> $real {$op::$method(*self, rhs)}
+                fn $method(self, rhs: $other_float) -> $real {$op::$method(*self, rhs)}
             }
 
-            impl<'a> $op<&$float> for &'a $real {
+            impl<'a> $op<&$other_float> for &'a $real {
                 type Output = $real;
                 #[inline(always)]
-                fn $method(self, rhs: &$float) -> $real {$op::$method(*self, *rhs)}
+                fn $method(self, rhs: &$other_float) -> $real {$op::$method(*self, *rhs)}
             }
 
-            impl $assign_op<$float> for $real {
-                #[inline(always)] fn $assign_method(&mut self, rhs: $float) {
-                    let res = Self(self.0.$method(rhs));
+            impl $assign_op<$other_float> for $real {
+                #[inline(always)] fn $assign_method(&mut self, rhs: $other_float) {
+                    let res = Self(self.0.$method(rhs as $float));
                     assert!(!res.0.is_nan());
                     *self = res;
                 }
             }
 
-            impl $assign_op<&$float> for $real {
+            impl $assign_op<&$other_float> for $real {
                 #[inline(always)]
-                fn $assign_method(&mut self, rhs: &$float) {$assign_op::$assign_method(self, *rhs)}
+                fn $assign_method(&mut self, rhs: &$other_float) {$assign_op::$assign_method(self, *rhs)}
             }
         )+
     }
@@ -1168,44 +1124,61 @@ macro_rules! real_impl {
             u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
         real_int_operator_impl!($real{$float}, u8:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, i8:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, u16:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, i16:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, u32:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, i32:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, usize:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, isize:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, u64:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_int_operator_impl!($real{$float}, i64:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
 
-        real_float_operator_impl!($real{$float}:
+        real_float_operator_impl!($real{$float}, $float:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
+        real_float_operator_impl!($real{$float}, $other_float:
+            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_real_operator_impl!($real{$float}, $real{$float}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
         real_real_operator_impl!($real{$float}, $other_real{$other_float}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign);
+            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
+            Rem::rem|RemAssign::rem_assign);
 
         impl $real {
             pub const INFINITY: $real = $real($float::INFINITY);
@@ -1217,6 +1190,11 @@ macro_rules! real_impl {
 
             #[inline]
             pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
+
+            #[inline]
+            pub const fn new_or(default: Self, x: $float) -> Self {
+                if x.is_nan() {default} else {Self(x)}
+            }
 
             #[inline]
             pub fn rem_euclid(self, rhs: Self) -> Option<Self> {
@@ -1243,12 +1221,21 @@ macro_rules! real_impl {
             pub fn ceil(self) -> Self {Self(self.0.ceil())}
 
             #[inline]
-            pub fn floor_to(self, step: Self) -> Self {
-                match Self::try_from(self.0 - self.0.rem_euclid(*step)) {
-                    Ok(x) => x,
-                    Err(_) => if step.is_infinite() {step} else {self}
+            pub fn round(self) -> Self {Self(self.0.round())}
+
+            #[inline] pub fn floor_to(self, step: Self) -> Self {
+                match step.classify() {
+                    FpCategory::Zero => self,
+                    FpCategory::Infinite => step,
+                    _ => (self / step).floor() * step
                 }
             }
+
+            #[inline]
+            pub fn is_finite(&self) -> bool {self.0.is_finite()}
+
+            #[inline]
+            pub fn abs(self) -> Self {Self(self.0.abs())}
         }
     };
 }
@@ -1271,10 +1258,53 @@ macro_rules! r64 {
 }
 
 #[test]
-fn real_floor_to() {
+fn real_round_to() {
     assert!(r64![1.3].floor_to(r64![0.2]).loose_eq(r64![1.2], 0.005));
     assert!(r64![-1.3].floor_to(r64![0.2]).loose_eq(r64![-1.4], 0.005));
 }
+
+pub trait RatioToInt<Int> {
+    fn to_int_in(self, min: Int, max: Int) -> Int;
+    fn to_int_from(self, min: Int) -> Int;
+    fn to_int_to(self, max: Int) -> Int;
+    fn to_int(self) -> Int;
+}
+
+macro_rules! impl_ratio2int {
+    ($ratio:ty, $float:ty : $($int:ty),+) => {
+        $(
+            impl RatioToInt<$int> for $ratio {
+                fn to_int_in(self, mut min: $int, mut max: $int) -> $int {
+                    if min > max {swap(&mut min, &mut max)}
+                    if      self.0 > max as $float {max}
+                    else if self.0 < min as $float {min}
+                    else   {self.0 as $int}
+                }
+
+                fn to_int_from(self, min: $int) -> $int {
+                    if      self.0 > <$int>::MAX as $float {<$int>::MAX}
+                    else if self.0 <         min as $float {min}
+                    else   {self.0 as $int}
+                }
+
+                fn to_int_to(self, max: $int) -> $int {
+                    if      self.0 >         max as $float {max}
+                    else if self.0 < <$int>::MIN as $float {<$int>::MIN}
+                    else   {self.0 as $int}
+                }
+
+                fn to_int(self) -> $int {
+                    if      self.0 > <$int>::MAX as $float {<$int>::MAX}
+                    else if self.0 < <$int>::MIN as $float {<$int>::MIN}
+                    else   {self.0 as $int}
+                }
+            }
+        )+
+    };
+}
+
+impl_ratio2int!(R32, f32: u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
+impl_ratio2int!(R64, f64: u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
 
 pub trait SaturatingFrom<T> {
     fn saturating_from(x: T) -> Self;
