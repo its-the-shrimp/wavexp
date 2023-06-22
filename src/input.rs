@@ -7,8 +7,7 @@ use web_sys::{
     Element,
     HtmlCanvasElement,
     PointerEvent,
-    HtmlElement,
-    MouseEvent};
+    HtmlElement};
 use yew::{
     html, 
     Component,
@@ -20,8 +19,7 @@ use yew::{
     AttrValue,
     NodeRef, Callback};
 use crate::{
-    utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, BoolExt, R64, R32},
-    sound::{SoundType, Beats},
+    utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, BoolExt, R64},
     loc};
 
 #[derive(Debug)]
@@ -31,83 +29,6 @@ pub enum Cmd {
     Unfocus(PointerEvent),
     HoverIn(PointerEvent),
     HoverOut(PointerEvent)
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum AppEvent {
-    Redraw(R64),
-    SetTab(usize),
-    Resize,
-    TogglePlay,
-    Select(Option<usize>),
-    Add(SoundType, i32, Beats),
-    Remove(usize),
-    Duration(usize, R64),
-    Volume(usize, R32),
-    Bpm(R64),
-    MasterGain(R32),
-    SnapStep(R64),
-    FocusPlane(PointerEvent),
-    LeavePlane,
-    HoverPlane(MouseEvent),
-    SetBlockAdd(Option<SoundType>),
-    FocusTab(usize, PointerEvent),
-    HoverTab(usize, MouseEvent),
-    LeaveTab(usize),
-}
-
-impl AppEvent {
-    /// returns `Some(id)` when the parameter ID belongs to a specific sound block
-    pub fn block_id(&self) -> Option<usize> {
-        match self {
-            AppEvent::TogglePlay
-            | AppEvent::Select(..)
-            | AppEvent::Add(..)
-            | AppEvent::Remove(..)
-            | AppEvent::Bpm(..)
-            | AppEvent::MasterGain(..)
-            | AppEvent::SnapStep(..)
-            | AppEvent::FocusPlane(..)
-            | AppEvent::LeavePlane
-            | AppEvent::HoverPlane(..)
-            | AppEvent::SetBlockAdd(..)
-            | AppEvent::SetTab(..)
-            | AppEvent::Resize
-            | AppEvent::Redraw(..) => None,
-
-            AppEvent::Duration(id, _)
-            | AppEvent::Volume(id, _)
-            | AppEvent::FocusTab(id, _)
-            | AppEvent::HoverTab(id, _)
-            | AppEvent::LeaveTab(id) => Some(*id)
-        }
-    }
-
-    /// returns `true` if the events changes the UI layout
-    #[inline] pub fn ui_change(&self) -> bool {
-        match self {
-            AppEvent::SetTab(..)
-            | AppEvent::Select(..)
-            | AppEvent::Remove(..) => true,
-
-            AppEvent::Redraw(_)
-            | AppEvent::Duration(..)
-            | AppEvent::Resize 
-            | AppEvent::TogglePlay 
-            | AppEvent::Add(..) 
-            | AppEvent::Volume(..) 
-            | AppEvent::Bpm(..) 
-            | AppEvent::MasterGain(..) 
-            | AppEvent::SnapStep(..) 
-            | AppEvent::FocusPlane(..) 
-            | AppEvent::LeavePlane 
-            | AppEvent::HoverPlane(..) 
-            | AppEvent::SetBlockAdd(..) 
-            | AppEvent::FocusTab(..) 
-            | AppEvent::HoverTab(..) 
-            | AppEvent::LeaveTab(..) => false
-        }
-    }
 }
 
 pub struct Slider {

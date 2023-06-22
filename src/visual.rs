@@ -1,9 +1,9 @@
 use std::{
     iter::{Iterator, successors as succ},
     slice::from_raw_parts,
-    mem::{Discriminant, discriminant},
+    mem::{Discriminant, discriminant, take},
     ops::{Not, Div, Range, Deref},
-    fmt::Debug
+    fmt::Debug, rc::Rc, borrow::Cow
 };
 use web_sys::{
     HtmlCanvasElement,
@@ -11,18 +11,18 @@ use web_sys::{
     ImageData,
     MouseEvent,
     HtmlElement,
-    Path2d, PointerEvent};
-use wasm_bindgen::{Clamped, JsValue};
+    Path2d, PointerEvent, AudioContext, SvgElement, Element};
+use wasm_bindgen::{Clamped, JsValue, JsCast};
 use yew::{TargetCast, NodeRef};
 use crate::{
     utils::{Check, SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, OptionExt,
         HtmlElementExt, 
-        Pipe, Tee, Take, RatioToInt, BoolExt, RangeExt, VecExt, ResultToJsResult, R64},
-    sound::Beats,
-    input::AppEvent,
+        Pipe, Tee, RatioToInt, BoolExt, RangeExt, VecExt, ResultToJsResult, R64},
+    sound::FromBeats,
+    global::{AppEvent, AppContext},
     loc,
-    r64, js_log
+    r64,
 };
 
 pub struct EveryNth<'a, T> {
@@ -147,35 +147,33 @@ fn interp<const N: usize>(colours: &[Rgba; N], index: u8) -> Rgba {
 }
 
 pub struct SoundVisualiser {
+    input: Rc<AnalyserNode>,
 	out_data: Vec<Rgba>,
 	in_data: Vec<u8>,
     gradient: Vec<Rgba>,
     canvas: NodeRef,
-    width: u32, height: u32,
-    playing: bool
+    width: u32, height: u32
 }
 
 impl SoundVisualiser {
 	pub const FG: Rgba = Rgba{r:0x00, g:0x69, b:0xE1, a:0xFF};
 	pub const BG: Rgba = Rgba{r:0x18, g:0x18, b:0x18, a:0xFF};
-	pub fn new() -> JsResult<Self> {
-		Ok(Self{out_data: vec![], in_data: vec![],
+	pub fn new(ctx: &AudioContext) -> JsResult<Self> {
+		Ok(Self{input: Rc::new(ctx.create_analyser().add_loc(loc!())?),
+            out_data: vec![], in_data: vec![],
             gradient: (0 ..= u8::MAX)
                 .map(|i| interp(&[Self::BG, Self::FG], i))
                 .collect(),
-			width: 0, height: 0, canvas: NodeRef::default(),
-            playing: false})
+			width: 0, height: 0, canvas: NodeRef::default()})
 	}
 
-    #[inline] pub fn canvas(&self) -> &NodeRef {
-        &self.canvas
-    }
+    #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
+
+    #[inline] pub fn input(&self) -> &Rc<AnalyserNode> {&self.input}
 
     // TODO: correctly readjust the graph when shrinked in the UI
-    pub fn handle_event(&mut self, id: AppEvent) -> JsResult<()> {
-        Ok(match id {
-            AppEvent::TogglePlay => _ = self.playing.toggle(),
-
+    pub fn handle_event(&mut self, event: &AppEvent, ctx: &AppContext) -> JsResult<()> {
+        Ok(match event {
             AppEvent::Resize => {
                 let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
                 let [w, h] = canvas.client_size().map(|x| x as u32);
@@ -187,24 +185,23 @@ impl SoundVisualiser {
                 self.out_data.resize(w as usize * w as usize, Self::BG);
             }
 
+            AppEvent::Frame(..) if ctx.play_since.is_finite() => {
+                self.out_data.rotate_right(1);
+                self.input.get_byte_frequency_data(&mut self.in_data);
+                for (&src, dst) in self.in_data.iter().zip(self.out_data.every_nth_mut(self.width as usize)) {
+                    *dst = unsafe {*self.gradient.get_unchecked(src as usize)};
+                }
+
+                let out = unsafe{from_raw_parts(self.out_data.as_ptr().cast(), self.out_data.len() * 4)};
+                let out = ImageData::new_with_u8_clamped_array(Clamped(out), self.width).add_loc(loc!())?;
+                self.canvas.cast::<HtmlCanvasElement>().to_js_result(loc!())?
+                    .get_2d_context(loc!())?
+                    .put_image_data(&out, 0.0, 0.0).add_loc(loc!())?;
+            }
+
             _ => (),
         })
     }
-
-	pub fn redraw(&mut self, input: &AnalyserNode) -> JsResult<()> {
-        if !self.playing {return Ok(())}
-        self.out_data.rotate_right(1);
-        input.get_byte_frequency_data(&mut self.in_data);
-        for (&src, dst) in self.in_data.iter().zip(self.out_data.every_nth_mut(self.width as usize)) {
-            *dst = unsafe {*self.gradient.get_unchecked(src as usize)};
-        }
-
-        let out = unsafe{from_raw_parts(self.out_data.as_ptr().cast(), self.out_data.len() * 4)};
-        let out = ImageData::new_with_u8_clamped_array(Clamped(out), self.width).add_loc(loc!())?;
-        self.canvas.cast::<HtmlCanvasElement>().to_js_result(loc!())?.get_2d_context(loc!())?
-            .put_image_data(&out, 0.0, 0.0).add_loc(loc!())?;
-        Ok(())
-	}
 }
 
 
@@ -215,9 +212,9 @@ pub struct CanvasEvent {
     pub shift: bool
 }
 
-impl TryFrom<MouseEvent> for CanvasEvent {
+impl TryFrom<&MouseEvent> for CanvasEvent {
     type Error = JsValue;
-    fn try_from(value: MouseEvent) -> Result<Self, Self::Error> {
+    fn try_from(value: &MouseEvent) -> Result<Self, Self::Error> {
         let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result(loc!())?;
         let point = Point{x: value.offset_x(), y: value.offset_y()}
             .normalise(canvas.client_rect(), canvas.rect());
@@ -225,9 +222,9 @@ impl TryFrom<MouseEvent> for CanvasEvent {
     }
 }
 
-impl TryFrom<PointerEvent> for CanvasEvent {
+impl TryFrom<&PointerEvent> for CanvasEvent {
     type Error = JsValue;
-    fn try_from(value: PointerEvent) -> Result<Self, Self::Error> {
+    fn try_from(value: &PointerEvent) -> Result<Self, Self::Error> {
         let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result(loc!())?;
         let point = Point{x: value.offset_x(), y: value.offset_y()}
             .normalise(canvas.client_rect(), canvas.rect());
@@ -235,39 +232,68 @@ impl TryFrom<PointerEvent> for CanvasEvent {
     }
 }
 
-#[derive(PartialEq, Default)]
+#[derive(Debug, PartialEq, Default)]
 pub struct HintHandler {
     main_bar: NodeRef,
     aux_bar: NodeRef
 }
 
 impl HintHandler {
-    #[inline] pub fn set_hint(&self, main: &str, aux: &str) -> JsResult<()> {
-        self.main_bar.cast::<HtmlElement>().to_js_result(loc!())?
-            .set_inner_text(main);
-        self.aux_bar.cast::<HtmlElement>().to_js_result(loc!())?
-            .set_inner_text(aux);
-        Ok(())
+    pub fn handle_event(&mut self, event: &AppEvent, _: &AppContext) -> JsResult<()> {
+        Ok(match event {
+            AppEvent::SetHint(main, aux) => {
+                self.main_bar.cast::<HtmlElement>().to_js_result(loc!())?
+                    .set_inner_text(main);
+                self.aux_bar.cast::<HtmlElement>().to_js_result(loc!())?
+                    .set_inner_text(aux);
+            }
+
+            AppEvent::FetchHint(e) => {
+                let main_bar: HtmlElement = self.main_bar.cast().to_js_result(loc!())?;
+                let  aux_bar: HtmlElement = self.aux_bar.cast().to_js_result(loc!())?;
+                let mut src: Element = e.target_dyn_into().to_js_result(loc!())?;
+
+                loop {
+                    let dataset = if let Some(x) = src.dyn_ref::<HtmlElement>() {
+                        x.dataset()
+                    } else if let Some(x) = src.dyn_ref::<SvgElement>() {
+                        x.dataset()
+                    } else {
+                        main_bar.set_inner_text("");
+                        aux_bar.set_inner_text("");
+                        break;
+                    };
+                    if let Some(main) = dataset.get("mainHint") {
+                        main_bar.set_inner_text(&main);
+                        aux_bar.set_inner_text(&dataset.get("auxHint").unwrap_or_default());
+                        break;
+                    }
+                    if let Some(parent) = src.parent_element() {
+                        src = parent
+                    } else {
+                        break Default::default()
+                    }
+                };
+            }
+
+            _ => ()
+        })
     }
 
-    #[inline] pub fn main_bar(&self) -> &NodeRef {
-        &self.main_bar
-    }
+    #[inline] pub fn main_bar(&self) -> &NodeRef {&self.main_bar}
 
-    #[inline] pub fn aux_bar(&self) -> &NodeRef {
-        &self.aux_bar
-    }
+    #[inline] pub fn aux_bar(&self) -> &NodeRef {&self.aux_bar}
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Focus<D: Copy + Debug> {
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum Focus<D: Debug> {
     #[default] None,
     HoverPlane,
     HoverPoint(usize),
     MovePlane(Point),
-    MovePoint(usize, Point),
+    MovePoint(usize),
     AwaitDragIn(D),
-    HoverWDraggable(D, Point),
+    HoverWDraggable(D, Point, Path2d),
     HoverPlaneWShift(Point),
     ZoomPlane{init_offset: Point, pivot: Point, init_scale_x: R64, init_scale_y: R64}
 }
@@ -275,7 +301,7 @@ enum Focus<D: Copy + Debug> {
 impl<D: Copy + Debug> Focus<D> {
     #[inline] pub fn draggable(self) -> Option<D> {
         if let Focus::AwaitDragIn(d)
-            | Focus::HoverWDraggable(d, _) = self {Some(d)}
+            | Focus::HoverWDraggable(d, ..) = self {Some(d)}
         else {None}
     }
 
@@ -312,15 +338,19 @@ pub trait Graphable: Debug {
     /// location of the point in user coordinates
     fn loc(&self) -> [R64; 2];
     /// set the location of the point in user coordinates when moved in the UI
-    fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R64, y: impl FnOnce() -> R64);
+    /// optionally emits an event
+    fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R64, y: impl FnOnce() -> R64)
+    -> Option<Self::Event>;
     /// returns `true` if the given user coordinates are inside the hitbox of the point
     fn in_hitbox(&self, point: [R64; 2]) -> bool;
+
     /// the event to emit when the point is selected/de-selected in the UI
     #[allow(unused_variables)] #[inline]
     fn on_select(self_id: Option<usize>) -> Option<Self::Event> {None}
     /// the event to emit when a `Draggable` is dropped into the UI
     #[allow(unused_variables)] #[inline]
     fn on_drop_in(value: Self::Draggable, loc: impl FnOnce() -> [R64; 2]) -> Option<Self::Event> {None}
+
     /// visual representation of the point's hitbox
     /// `mapper` maps user coordinates to canvas coordinates, all vertices in the
     /// returned `Path2d` must be the result of the `mapper` function
@@ -335,14 +365,12 @@ pub trait Graphable: Debug {
     /// visual representation of `Draggable`, evaluated every time `Draggable` enters the UI
     /// the center of the representation should be 0, it will then be moved accordingly
     #[allow(unused_variables)] #[inline]
-    fn draw_draggable(value: Self::Draggable, step: [R64; 2]) -> JsResult<Path2d> {
-        Path2d::new()
-    }
-    /// set hint when the user enters/leaves/hovers the UI with the `d`
-    /// `loc` is in user coordinates
+    fn draw_draggable(value: Self::Draggable, step: [R64; 2]) -> JsResult<Path2d> {Path2d::new()}
+    /// the hint to return when a `Draggable` is dragged over the UI but not yet dropped in
+    /// `loc` returns the location of the draggable in user coordinates if its inside the editor,
+    /// otherwise it returns `None`
     #[allow(unused_variables)] #[inline]
-    fn set_drag_n_drop_hint(hint_handler: &HintHandler, d: Self::Draggable, loc: impl FnOnce() -> Option<[R64; 2]>)
-    -> JsResult<()> {Ok(())}
+    fn drag_n_drop_hint(d: Self::Draggable, loc: impl FnOnce() -> Option<[R64; 2]>) -> Option<[Cow<'static, str>; 2]> {None}
 }
 
 /// a special reference wrapper: access to everything is immutable,
@@ -366,7 +394,6 @@ pub struct GraphEditor<T: Graphable> {
     offset: Point,
     scale_x: R64,
     scale_y: R64,
-    snap_step: R64,
     focus: Focus<T::Draggable>,
     last_focus: Discriminant<Focus<T::Draggable>>,
     redraw: bool,
@@ -383,7 +410,7 @@ impl<T: Graphable> GraphEditor<T> {
     #[inline] pub fn new(scale_x: R64, scale_y: R64, data: Vec<T>) -> Self {
         Self{canvas: NodeRef::default(), offset: Point::ZERO,
             focus: Focus::None, last_focus: discriminant(&Focus::HoverPlane),
-            scale_x, scale_y, snap_step: r64![1.0],
+            scale_x, scale_y,
             redraw: false, data}
     }
 
@@ -404,10 +431,6 @@ impl<T: Graphable> GraphEditor<T> {
         self.data.get(index)
     }
 
-    #[inline] pub fn get_mut(&mut self, index: usize) -> Option<GraphPointView<'_, T>> {
-        self.data.get_mut(index).map(GraphPointView)
-    }
-
     #[inline] pub fn iter_mut(&mut self) -> impl Iterator<Item=GraphPointView<'_, T>> {
         self.data.iter_mut().map(GraphPointView)
     }
@@ -423,20 +446,33 @@ impl<T: Graphable> GraphEditor<T> {
         self.data.try_remove(index).to_js_result(loc!()).map(|_| ())
     }
 
-    #[inline] pub fn snap_step(&self) -> R64 {
-        self.snap_step
-    }
-
-    #[inline] pub fn set_snap_step(&mut self, snap_step: R64) {
-        self.snap_step = snap_step;
-    }
-
     #[inline] pub fn force_redraw(&mut self) {
         self.redraw = true;
     }
 
     #[inline] pub fn set_draggable(&mut self, value: Option<T::Draggable>) {
         self.set_focus(value.map_or(Focus::None, Focus::AwaitDragIn));
+    }
+
+    /// must be called only when a canvas is bound to the editor
+    /// may be called any number of times
+    pub fn init(&mut self) -> JsResult<()> {
+        self.redraw = true;
+        let ctx = self.canvas.cast::<HtmlCanvasElement>().to_js_result(loc!())?
+            .get_2d_context(loc!())?;
+        ctx.set_font(Self::FONT);
+        ctx.set_line_width(Self::LINE_WIDTH);
+        Ok(())
+    }
+
+    pub fn handle_resize(&mut self) -> JsResult<()> {
+        let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
+        canvas.set_width(canvas.client_width() as u32);
+        canvas.set_height(canvas.client_height() as u32);
+        let ctx = canvas.get_2d_context(loc!())?;
+        ctx.set_font(Self::FONT);
+        ctx.set_line_width(Self::LINE_WIDTH);
+        Ok(())
     }
 
     #[inline] fn id_by_pos(&self, x: R64, y: R64) -> Option<usize> {
@@ -448,30 +484,27 @@ impl<T: Graphable> GraphEditor<T> {
         self.redraw = true;
     }
 
-    pub fn handle_hover(&mut self, event: Option<CanvasEvent>) -> Option<T::Event> {
+    pub fn handle_hover(&mut self, event: Option<CanvasEvent>, ctx: &AppContext) -> JsResult<Option<T::Event>> {
         let Some(mut event) = event else {
-            self.set_focus(self.focus.draggable().map_or(Focus::None, Focus::AwaitDragIn));
-            return None
+            self.focus = take(&mut self.focus)
+                .draggable().map_or(Focus::None, Focus::AwaitDragIn);
+            self.redraw = true;
+            return Ok(None)
         };
 
         event.point += self.offset;
-        let [w, h]   = self.canvas.cast::<HtmlCanvasElement>()?.size();
+        let [w, h]   = self.canvas.cast::<HtmlCanvasElement>()
+            .to_js_result(loc!())?.size();
         let step_x   = R64::from(w) / self.scale_x;
         let step_y   = R64::from(h) / self.scale_y;
         let x        = R64::from(event.point.x) / step_x;
         let y        = R64::from(event.point.y) / step_y;
 
-        let move_point_focus = |id: usize| {
-            let loc = unsafe{self.data.get_unchecked(id)}.loc();
-            let loc = Point{x: (loc[0] * step_x).to_int(), y: (loc[1] * step_y).to_int()};
-            Focus::MovePoint(id, event.point - loc)
-        };
-
         let zoom_plane_focus = || Focus::ZoomPlane{
             init_offset: self.offset, pivot: event.point,
             init_scale_x: self.scale_x, init_scale_y: self.scale_y};
 
-        match self.focus {
+        Ok(match self.focus {
             Focus::None => self.set_focus(Focus::HoverPlane)
                 .pipe(|_| None),
 
@@ -481,7 +514,7 @@ impl<T: Graphable> GraphEditor<T> {
                 (true, false) =>
                     self.id_by_pos(x, y)
                         .map_or_else(|| Focus::MovePlane(event.point - self.offset),
-                            move_point_focus).into(),
+                            Focus::MovePoint).into(),
                 (false, true) =>
                     Some(Focus::HoverPlaneWShift(event.point)),
                 (false, false) =>
@@ -490,7 +523,7 @@ impl<T: Graphable> GraphEditor<T> {
 
             Focus::HoverPoint(id) => match (event.left, event.shift) {
                 (true, true) => Some(zoom_plane_focus()),
-                (true, false) => Some(move_point_focus(id)),
+                (true, false) => Some(Focus::MovePoint(id)),
                 (false, true) => Some(Focus::HoverPlaneWShift(event.point)),
                 (false, false) =>
                     unsafe{self.data.get_unchecked(id)}.in_hitbox([x, y])
@@ -508,13 +541,12 @@ impl<T: Graphable> GraphEditor<T> {
                 T::on_select(None)
             }.tee(|_| self.redraw = true),
 
-            Focus::MovePoint(id, init_offset) => if event.left {
+            Focus::MovePoint(id) => if event.left {
                 let n_points = self.data.len();
                 unsafe{self.data.get_unchecked_mut(id)}.set_loc(n_points, id,
-                    || R64::from(event.point.x - init_offset.x).div(step_x)
-                        .max(r64![0.0]).round_to(self.snap_step),
-                    || (R64::from(event.point.y - init_offset.y) / step_y).max(r64![0.0]));
-                None
+                    || R64::from(event.point.x).div(step_x)
+                        .max(r64![0.0]).floor_to(ctx.snap_step),
+                    || (R64::from(event.point.y) / step_y).max(r64![0.0]))
             } else {
                 self.focus = Focus::HoverPoint(id);
                 T::on_select(Some(id))
@@ -526,21 +558,24 @@ impl<T: Graphable> GraphEditor<T> {
                 (true, false) =>
                     self.focus = self.id_by_pos(x, y)
                         .map_or_else(|| Focus::MovePlane(event.point - self.offset),
-                            move_point_focus),
+                            Focus::MovePoint),
                 (false, true) => *point = event.point,
                 (false, false) => self.focus = Focus::HoverPlane,
             }.pipe(|_| {self.redraw = true; None}),
 
             Focus::AwaitDragIn(d) => if event.left {
-                self.focus = Focus::HoverWDraggable(d, event.point);
+                self.focus = Focus::HoverWDraggable(d, event.point,
+                    T::draw_draggable(d, [step_x, step_y]).add_loc(loc!())?);
                 None
             } else {
                 self.focus = Focus::HoverPlane;
                 T::on_drop_in(d, || [R64::from(event.point.x) / step_x, R64::from(event.point.y) / step_y])
             }.tee(|_| self.redraw = true),
 
-            Focus::HoverWDraggable(d, ref mut point) => if event.left {
+            Focus::HoverWDraggable(d, ref mut point, _) => if event.left {
                 *point = event.point;
+                point.x -= (*ctx.snap_step != 0.0).then_or(0, || point.x % (*step_x * *ctx.snap_step) as i32);
+                point.y = point.y - point.y % *step_y as i32 + (*step_y / 2.0) as i32;
                 None
             } else {
                 self.focus = Focus::HoverPlane;
@@ -564,22 +599,11 @@ impl<T: Graphable> GraphEditor<T> {
 
                 (false, false) => self.focus = Focus::HoverPlane
             }.pipe(|_| {self.redraw = true; None}),
-        }
+        })
     }
 
-    pub fn handle_resize(&mut self) -> JsResult<()> {
-        js_log!("{:?}", self.canvas.get());
-        let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
-        canvas.set_width(canvas.client_width() as u32);
-        canvas.set_height(canvas.client_height() as u32);
-        let ctx = canvas.get_2d_context(loc!())?;
-        ctx.set_font(Self::FONT);
-        ctx.set_line_width(Self::LINE_WIDTH);
-        Ok(())
-    }
-
-    pub fn redraw(&mut self, hint_handler: &HintHandler, play_offset: Beats) -> JsResult<()> {
-        if !self.redraw.take() && play_offset.is_infinite() {return Ok(())}
+    pub fn redraw(&mut self, app_ctx: &AppContext) -> JsResult<Option<[Cow<'static, str>; 2]>> {
+        if !self.redraw {return Ok(None)}
 
         let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
         let [w, h] = canvas.size().map(R64::from);
@@ -623,39 +647,36 @@ impl<T: Graphable> GraphEditor<T> {
         ctx.set_stroke_style(&Self::FG_STYLE.into());
         ctx.stroke_with_path(&points);
 
-        if discriminant(&self.focus) != self.last_focus || self.focus.always_update() {
-            self.last_focus = discriminant(&self.focus);
-            match self.focus {
-                Focus::None => {
-                    ctx.set_font(Self::FONT);
-                    ctx.set_line_width(Self::LINE_WIDTH);
-                }
+        if app_ctx.play_since.is_finite() {
+            ctx.set_fill_style(&Self::FG_STYLE.into());
+            let play_at = (app_ctx.now - app_ctx.play_since).secs_to_beats(app_ctx.bps);
+            ctx.fill_rect(*play_at * *step_x - self.offset.x as f64, 0.0, 3.0, *h);
+        } else {
+            self.redraw = false;
+        }
 
-                Focus::HoverPlane => hint_handler
-                    .set_hint(T::EDITOR_NAME, "").add_loc(loc!())?,
+        Ok(if discriminant(&self.focus) != self.last_focus || self.focus.always_update() {
+            self.last_focus = discriminant(&self.focus);
+            match &self.focus {
+                Focus::None => None,
+
+                Focus::HoverPlane => Some([T::EDITOR_NAME.into(), "".into()]),
 
                 Focus::HoverPoint(id) => {
-                    let point = self.data.get(id).to_js_result(loc!())?;
-                    hint_handler
-                        .set_hint(&format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc())),
-                            "Press and hold to drag")
-                        .add_loc(loc!())?;
+                    let point = self.data.get(*id).to_js_result(loc!())?;
+                    Some([format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc())).into(),
+                        "Press and hold to drag".into()])
                 }
 
-                Focus::MovePlane(_) => hint_handler
-                    .set_hint(T::EDITOR_NAME, "Dragging").add_loc(loc!())?,
+                Focus::MovePlane(_) => Some([T::EDITOR_NAME.into(), "Dragging".into()]),
 
-                Focus::MovePoint(id, _) => {
-                    let point = unsafe{self.data.get_unchecked(id)};
-                    hint_handler
-                        .set_hint(&format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc())),
-                            "Dragging")
-                        .add_loc(loc!())?;
+                Focus::MovePoint(id) => {
+                    let point = unsafe{self.data.get_unchecked(*id)};
+                    Some([format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc())).into(),
+                        "Dragging".into()])
                 }
 
                 Focus::HoverPlaneWShift(at) => {
-                    hint_handler.set_hint(T::EDITOR_NAME, "Press and hold to zoom")
-                        .add_loc(loc!())?;
                     let x = R64::from(at.x) / step_x;
                     let y = R64::from(at.y) / step_y;
                     ctx.set_text_align("left");
@@ -663,10 +684,10 @@ impl<T: Graphable> GraphEditor<T> {
                     ctx.set_fill_style(&Self::FG_STYLE.into());
                     ctx.fill_text(&T::fmt_loc([x, y]), 5.0, *h - 5.0)
                         .add_loc(loc!())?;
+                    Some([T::EDITOR_NAME.into(), "Press and hold to zoom".into()])
                 }
 
                 Focus::AwaitDragIn(d) => {
-                    T::set_drag_n_drop_hint(hint_handler, d, || None).add_loc(loc!())?;
                     ctx.begin_path();
                     ctx.rect(0.0, 0.0, *w, 5.0);
                     ctx.rect(0.0, 0.0, 5.0, *h);
@@ -677,12 +698,13 @@ impl<T: Graphable> GraphEditor<T> {
                     ctx.set_text_align("center");
                     ctx.set_text_baseline("middle");
                     ctx.fill_text("Drag here", *w / 2.0, *h / 2.0).add_loc(loc!())?;
+                    T::drag_n_drop_hint(*d, || None)
                 }
 
-                Focus::HoverWDraggable(d, at) => {
-                    T::set_drag_n_drop_hint(hint_handler, d,
-                       || Some([R64::from(at.x) / step_x, R64::from(at.y) / step_y])).add_loc(loc!())?;
-                    ctx.stroke_with_path(&T::draw_draggable(d, [step_x, step_y]).add_loc(loc!())?);
+                Focus::HoverWDraggable(d, at, visual) => {
+                    ctx.translate(at.x as f64, at.y as f64).add_loc(loc!())?;
+                    ctx.stroke_with_path(visual);
+                    ctx.translate(-at.x as f64, -at.y as f64).add_loc(loc!())?;
                     ctx.begin_path();
                     ctx.rect(0.0, 0.0, *w, 5.0);
                     ctx.rect(0.0, 0.0, 5.0, *h);
@@ -690,12 +712,11 @@ impl<T: Graphable> GraphEditor<T> {
                     ctx.rect(*w - 5.0, 0.0, 5.0, *h);
                     ctx.set_fill_style(&Self::FG_STYLE.into());
                     ctx.fill();
+                    T::drag_n_drop_hint(*d, || Some([R64::from(at.x) / step_x, R64::from(at.y) / step_y]))
                 }
 
                 Focus::ZoomPlane{pivot, init_offset, ..} => {
-                    hint_handler.set_hint(&format!("{}: zooming", T::EDITOR_NAME), "Release to stop")
-                        .add_loc(loc!())?;
-                    let [x, y] = (pivot - init_offset).map(|x| x as f64);
+                    let [x, y] = (*pivot - *init_offset).map(|x| x as f64);
                     ctx.begin_path();
                     ctx.move_to(x - 10.0, y);
                     ctx.line_to(x + 10.0, y);
@@ -703,12 +724,9 @@ impl<T: Graphable> GraphEditor<T> {
                     ctx.line_to(x, y + 10.0);
                     ctx.set_stroke_style(&Self::FG_STYLE.into());
                     ctx.stroke();
+                    Some([format!("{}: zooming", T::EDITOR_NAME).into(), "Release to stop".into()])
                 }
             }
-        }
-
-        ctx.set_fill_style(&Self::FG_STYLE.into());
-        ctx.fill_rect(*play_offset * *step_x - self.offset.x as f64, 0.0, 3.0, *h);
-        Ok(())
+        } else {None})
     }
 }

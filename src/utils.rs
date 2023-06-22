@@ -11,8 +11,7 @@ use std::{
     num::FpCategory};
 use js_sys::{Object as JsObject, Error as JsError};
 use wasm_bindgen::{JsCast, JsValue, throw_val};
-use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement, Element};
-use crate::report_err;
+use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement, Element, console::warn_1, HtmlElement};
 
 pub trait Check: Sized {
 	#[inline] fn check(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
@@ -161,6 +160,12 @@ pub fn window() -> HtmlWindow {
 
 pub fn document() -> HtmlDocument {
 	unsafe {web_sys::window().unwrap_unchecked().document().unwrap_unchecked()}
+}
+
+pub fn report_err(err: JsValue) {
+    warn_1(&err);
+    document().element_dyn_into::<HtmlElement>("error-sign").unwrap_throw(loc!())
+        .set_hidden(false);
 }
 
 fn to_error_with_msg(err: JsValue, msg: &str) -> JsValue {
@@ -1218,11 +1223,11 @@ macro_rules! real_impl {
             #[inline]
             pub fn round(self) -> Self {Self(self.0.round())}
 
-            #[inline] pub fn round_to(self, step: Self) -> Self {
+            #[inline] pub fn floor_to(self, step: Self) -> Self {
                 match step.classify() {
                     FpCategory::Zero => self,
                     FpCategory::Infinite => step,
-                    _ => (self / step).round() * step
+                    _ => (self / step).floor() * step
                 }
             }
 
@@ -1254,8 +1259,8 @@ macro_rules! r64 {
 
 #[test]
 fn real_round_to() {
-    assert!(r64![1.3].round_to(r64![0.2]).loose_eq(r64![1.2], 0.005));
-    assert!(r64![-1.3].round_to(r64![0.2]).loose_eq(r64![-1.4], 0.005));
+    assert!(r64![1.3].floor_to(r64![0.2]).loose_eq(r64![1.2], 0.005));
+    assert!(r64![-1.3].floor_to(r64![0.2]).loose_eq(r64![-1.4], 0.005));
 }
 
 pub trait RatioToInt<Int> {
