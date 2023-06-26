@@ -10,6 +10,7 @@
 #![feature(associated_type_defaults)]
 #![allow(clippy::unit_arg)]
 #![allow(clippy::option_map_unit_fn)]
+#![allow(clippy::comparison_chain)]
 
 mod visual;
 mod utils;

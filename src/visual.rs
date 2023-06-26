@@ -3,8 +3,7 @@ use std::{
     slice::from_raw_parts,
     mem::{Discriminant, discriminant, take},
     ops::{Not, Div, Range, Deref},
-    fmt::Debug, rc::Rc, borrow::Cow
-};
+    fmt::Debug, rc::Rc, borrow::Cow};
 use web_sys::{
     HtmlCanvasElement,
     AnalyserNode,
@@ -18,11 +17,11 @@ use crate::{
     utils::{Check, SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, OptionExt,
         HtmlElementExt, 
-        Pipe, Tee, RatioToInt, BoolExt, RangeExt, VecExt, ResultToJsResult, R64},
+        Pipe, Tee, RatioToInt, BoolExt, RangeExt, VecExt, R64},
     sound::FromBeats,
     global::{AppEvent, AppContext},
     loc,
-    r64,
+    r64, js_assert,
 };
 
 pub struct EveryNth<'a, T> {
@@ -285,34 +284,6 @@ impl HintHandler {
     #[inline] pub fn aux_bar(&self) -> &NodeRef {&self.aux_bar}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-enum Focus<D: Debug> {
-    #[default] None,
-    HoverPlane,
-    HoverPoint(usize),
-    MovePlane(Point),
-    MovePoint(usize),
-    AwaitDragIn(D),
-    HoverWDraggable(D, Point, Path2d),
-    HoverPlaneWShift(Point),
-    ZoomPlane{init_offset: Point, pivot: Point, init_scale_x: R64, init_scale_y: R64}
-}
-
-impl<D: Copy + Debug> Focus<D> {
-    #[inline] pub fn draggable(self) -> Option<D> {
-        if let Focus::AwaitDragIn(d)
-            | Focus::HoverWDraggable(d, ..) = self {Some(d)}
-        else {None}
-    }
-
-    #[inline] pub fn always_update(&self) -> bool {
-        matches!(self, Self::MovePoint(..)
-            | Self::ZoomPlane{..}
-            | Self::HoverPlaneWShift(..)
-            | Self::HoverWDraggable(..))
-    }
-}
-
 /// data that can be edited with a generic graph editor defined below
 pub trait Graphable: Debug {
     /// the name of the plane that will be displayed as a hint when hovered over it
@@ -338,7 +309,7 @@ pub trait Graphable: Debug {
     /// location of the point in user coordinates
     fn loc(&self) -> [R64; 2];
     /// set the location of the point in user coordinates when moved in the UI
-    /// optionally emits an event
+    /// can optionally emit an event
     fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R64, y: impl FnOnce() -> R64)
     -> Option<Self::Event>;
     /// returns `true` if the given user coordinates are inside the hitbox of the point
@@ -388,6 +359,34 @@ impl<'a, T: Graphable> GraphPointView<'a, T> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum Focus<D: Debug> {
+    #[default] None,
+    HoverPlane,
+    HoverPoint(usize),
+    MovePlane(Point),
+    MovePoint(usize),
+    AwaitDragIn(D),
+    HoverWDraggable(D, Point, Path2d),
+    HoverPlaneWShift(Point),
+    ZoomPlane{init_offset: Point, pivot: Point, init_scale_x: R64, init_scale_y: R64}
+}
+
+impl<D: Copy + Debug> Focus<D> {
+    #[inline] pub fn draggable(self) -> Option<D> {
+        if let Focus::AwaitDragIn(d)
+            | Focus::HoverWDraggable(d, ..) = self {Some(d)}
+        else {None}
+    }
+
+    #[inline] pub fn always_update(&self) -> bool {
+        matches!(self, Self::MovePoint{..}
+            | Self::ZoomPlane{..}
+            | Self::HoverPlaneWShift(..)
+            | Self::HoverWDraggable(..))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphEditor<T: Graphable> {
     canvas: NodeRef,
@@ -397,7 +396,8 @@ pub struct GraphEditor<T: Graphable> {
     focus: Focus<T::Draggable>,
     last_focus: Discriminant<Focus<T::Draggable>>,
     redraw: bool,
-    data: Vec<T>
+    data: Vec<T>,
+    fixed: Option<usize>
 }
 
 impl<T: Graphable> GraphEditor<T> {
@@ -411,70 +411,83 @@ impl<T: Graphable> GraphEditor<T> {
         Self{canvas: NodeRef::default(), offset: Point::ZERO,
             focus: Focus::None, last_focus: discriminant(&Focus::HoverPlane),
             scale_x, scale_y,
-            redraw: false, data}
+            redraw: false, data, fixed: None}
     }
 
     #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
 
     #[inline] pub fn data(&self) -> &[T] {&self.data}
 
-    #[inline] pub unsafe fn get_unchecked(&self, index: usize) -> &T {
-        self.data.get_unchecked(index)
-    }
-
     #[inline] pub unsafe fn get_unchecked_mut(&mut self, index: usize)
     -> GraphPointView<'_, T> {
         GraphPointView(self.data.get_unchecked_mut(index))
-    }
-
-    #[inline] pub fn get(&self, index: usize) -> Option<&T> {
-        self.data.get(index)
     }
 
     #[inline] pub fn iter_mut(&mut self) -> impl Iterator<Item=GraphPointView<'_, T>> {
         self.data.iter_mut().map(GraphPointView)
     }
 
-    /// returns the index at which `point` was placed
+    /// the item will be accessible as the last element
     #[inline] pub fn add_point(&mut self, point: T) -> usize {
         self.redraw = true;
-        self.data.push_sorted_by_key(point, |x| x.loc()[0])
+        let id = self.data.push_sorted_by_key(point, |x| x.loc()[0]);
+        if let Some(ref mut x) = self.fixed.filter(|x| *x >= id) {
+            *x += 1
+        }
+        id
     }
 
-    #[inline] pub fn del_point(&mut self, index: usize) -> JsResult<()> {
-        self.redraw = true;
-        self.data.try_remove(index).to_js_result(loc!()).map(|_| ())
+    /// the element at `index`, if `Some`, will be returned from subsequent calls to `fixed(_mut)` 
+    #[inline] pub fn fix_point(&mut self, index: Option<usize>) -> JsResult<()> {
+        if let Some(index) = index {js_assert!(index < self.data.len())?}
+        Ok(self.fixed = index)
     }
 
-    #[inline] pub fn force_redraw(&mut self) {
-        self.redraw = true;
+    /// modify the point at `index` freely in a closure through a mutable reference
+    /// unlike `get_mut`, this method allows moving the point
+    #[inline] pub fn modify_point(&mut self, index: usize, f: impl FnOnce(&mut T)) -> JsResult<()> {
+        let point = self.data.get_mut(index).to_js_result(loc!())?;
+        f(point);
+        unsafe{self.data.reorder_unchecked_by_key(index, |x| x.loc()[0])};
+        Ok(())
     }
+
+    #[inline] pub fn fixed_id(&self) -> Option<usize> {
+        self.fixed
+    }
+
+    #[inline] pub fn del_fixed(&mut self) -> Option<()> {
+        self.fixed.take().map(|x|
+            _ = unsafe{self.data.remove_unchecked(x)})
+    }
+
+    #[inline] pub fn fixed(&self) -> Option<&T> {
+        self.fixed.map(|x| unsafe{self.data.get_unchecked(x)})
+    }
+
+    #[inline] pub fn fixed_mut(&mut self) -> Option<GraphPointView<'_, T>> {
+        self.fixed.map(|x| unsafe{self.get_unchecked_mut(x)})
+    }
+
+    #[inline] pub fn force_redraw(&mut self) {self.redraw = true}
 
     #[inline] pub fn set_draggable(&mut self, value: Option<T::Draggable>) {
         self.set_focus(value.map_or(Focus::None, Focus::AwaitDragIn));
     }
 
-    /// must be called only when a canvas is bound to the editor
-    /// may be called any number of times
-    pub fn init(&mut self) -> JsResult<()> {
-        self.redraw = true;
-        let ctx = self.canvas.cast::<HtmlCanvasElement>().to_js_result(loc!())?
-            .get_2d_context(loc!())?;
-        ctx.set_font(Self::FONT);
-        ctx.set_line_width(Self::LINE_WIDTH);
-        Ok(())
-    }
-
-    pub fn handle_resize(&mut self) -> JsResult<()> {
+    /// must be called when a canvas has just been bound or its dimensions have been changed
+    pub fn init(&mut self, resizer: impl FnOnce(&HtmlCanvasElement) -> JsResult<[u32; 2]>) -> JsResult<()> {
         let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
-        canvas.set_width(canvas.client_width() as u32);
-        canvas.set_height(canvas.client_height() as u32);
+        let [w, h] = resizer(&canvas).add_loc(loc!())?;
+        canvas.set_width(w);
+        canvas.set_height(h);
         let ctx = canvas.get_2d_context(loc!())?;
         ctx.set_font(Self::FONT);
         ctx.set_line_width(Self::LINE_WIDTH);
-        Ok(())
+        Ok(self.redraw = true)
     }
 
+    /// the returned IDs are (back, front)
     #[inline] fn id_by_pos(&self, x: R64, y: R64) -> Option<usize> {
         self.data.iter().position(|point| point.in_hitbox([x, y]))
     }
@@ -543,10 +556,23 @@ impl<T: Graphable> GraphEditor<T> {
 
             Focus::MovePoint(id) => if event.left {
                 let n_points = self.data.len();
-                unsafe{self.data.get_unchecked_mut(id)}.set_loc(n_points, id,
+                let point = unsafe{self.data.get_unchecked_mut(id)};
+                let res = point.set_loc(n_points, id,
                     || R64::from(event.point.x).div(step_x)
                         .max(r64![0.0]).floor_to(ctx.snap_step),
-                    || (R64::from(event.point.y) / step_y).max(r64![0.0]))
+                    || (R64::from(event.point.y) / step_y).max(r64![0.0]));
+                let new_id = unsafe{self.data.reorder_unchecked_by_key(id, |x| x.loc()[0])};
+                if new_id != id {
+                    self.focus = Focus::MovePoint(new_id);
+                    if let Some(ref mut x) = self.fixed.filter(|x| *x == id) {
+                        *x = new_id;
+                    } else if let Some(ref mut x) = self.fixed.filter(|x| new_id < id && *x < id && *x >= new_id) {
+                        *x += 1;
+                    } else if let Some(ref mut x) = self.fixed.filter(|x| new_id > id && *x < new_id && *x >= id) {
+                        *x -= 1;
+                    }
+                }
+                res
             } else {
                 self.focus = Focus::HoverPoint(id);
                 T::on_select(Some(id))
@@ -649,7 +675,7 @@ impl<T: Graphable> GraphEditor<T> {
 
         if app_ctx.play_since.is_finite() {
             ctx.set_fill_style(&Self::FG_STYLE.into());
-            let play_at = (app_ctx.now - app_ctx.play_since).secs_to_beats(app_ctx.bps);
+            let play_at = (app_ctx.now - app_ctx.play_since).secs_to_beats(app_ctx.bps) - app_ctx.offset;
             ctx.fill_rect(*play_at * *step_x - self.offset.x as f64, 0.0, 3.0, *h);
         } else {
             self.redraw = false;
@@ -663,7 +689,7 @@ impl<T: Graphable> GraphEditor<T> {
                 Focus::HoverPlane => Some([T::EDITOR_NAME.into(), "".into()]),
 
                 Focus::HoverPoint(id) => {
-                    let point = self.data.get(*id).to_js_result(loc!())?;
+                    let point = unsafe{self.data.get_unchecked(*id)};
                     Some([format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc())).into(),
                         "Press and hold to drag".into()])
                 }

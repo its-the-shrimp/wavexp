@@ -401,9 +401,24 @@ pub trait SliceExt<T> {
     fn get_wrapping_mut(&mut self, id: usize) -> &mut T;
     fn get_var<'a>(&'a self, ids: &[usize]) -> Result<Vec<&'a T>, GetVarError>;
     fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Result<Vec<&'a mut T>, GetVarError>;
-    unsafe fn reorder_unchecked(&mut self, index: usize) -> usize where T: Ord;
-    fn reorder(&mut self, index: usize) -> Result<usize, ReorderError> where T: Ord;
-    fn set_sorted(&mut self, index: usize, value: T) -> Result<usize, SetSortedError> where T: Ord;
+    unsafe fn reorder_unchecked(&mut self, index: usize) -> usize
+        where T: Ord;
+    // unsafe fn reorder_unchecked_by<F>(&mut self, index: usize, f: F) -> usize
+    //  where F: FnMut(&T, &T) -> Ordering
+    unsafe fn reorder_unchecked_by_key<K, F>(&mut self, index: usize, f: F) -> usize
+        where F: FnMut(&T) -> K, K: Ord;
+    fn reorder(&mut self, index: usize) -> Result<usize, ReorderError>
+        where T: Ord;
+    // fn reorder_by<F>(&mut self, index: usize, f: F) -> Result<usize, ReorderError>
+    //  where F: FnMut(&T, &T) -> Ordering
+    // fn reorder_by_key<K, F>(&mut self, index: usize, f: F) -> Result<usize, ReorderError>
+    //  where F: FnMut(&T) -> K, K: Ord
+    fn set_sorted(&mut self, index: usize, value: T) -> Result<usize, SetSortedError>
+        where T: Ord;
+    // fn set_sorted_by<F>(&mut self, index: usize, value: T, f: F) -> Result<usize, SetSortedError>
+    //  where F: FnMut(&T, &T) -> Ordering
+    // fn set_sorted_by_key<K, F>(&mut self, index: usize, value: T, f: F) -> Result<usize, SetSortedError>
+    //  where F: FnMut(&T) -> K, K: Ord
 }
 
 impl<T> SliceExt<T> for [T] {
@@ -456,6 +471,22 @@ impl<T> SliceExt<T> for [T] {
             self.get_unchecked_mut(new..=index).rotate_right(1);
             return new}
         let new = self.get_unchecked(index+1..).binary_search(element)
+            .unwrap_or_else(|x| x) + index;
+        if new > index {
+            self.get_unchecked_mut(index..=new).rotate_left(1);
+        }
+        new
+    }
+
+    unsafe fn reorder_unchecked_by_key<K, F>(&mut self, index: usize, mut f: F) -> usize
+    where F: FnMut(&T) -> K, K: Ord {
+        let key = f(self.get_unchecked(index));
+        let (new, should_move) = self.get_unchecked(..index).binary_search_by_key(&key, &mut f)
+            .map_or_else(|x| (x, x != index), |x| (x, x < index - 1));
+        if should_move {
+            self.get_unchecked_mut(new..=index).rotate_right(1);
+            return new}
+        let new = self.get_unchecked(index+1..).binary_search_by_key(&key, &mut f)
             .unwrap_or_else(|x| x) + index;
         if new > index {
             self.get_unchecked_mut(index..=new).rotate_left(1);
@@ -550,6 +581,7 @@ impl Error for InsertError {}
 
 pub trait VecExt<T> {
     fn try_remove(&mut self, index: usize) -> Result<T, RemoveError>;
+    unsafe fn remove_unchecked(&mut self, index: usize) -> T;
     fn try_swap_remove(&mut self, index: usize) -> Result<T, RemoveError>;
     fn try_insert(&mut self, index: usize, element: T) -> Result<&mut T, InsertError>;
     fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool;
@@ -559,7 +591,7 @@ pub trait VecExt<T> {
 }
 
 impl<T> VecExt<T> for Vec<T> {
-    fn try_remove(&mut self, index: usize) -> Result<T, RemoveError> {
+    #[inline] fn try_remove(&mut self, index: usize) -> Result<T, RemoveError> {
         let len = self.len();
         if index >= len {
             return Err(RemoveError{index, len})
@@ -573,7 +605,16 @@ impl<T> VecExt<T> for Vec<T> {
         }
     }
 
-    fn try_swap_remove(&mut self, index: usize) -> Result<T, RemoveError> {
+    #[inline] unsafe fn remove_unchecked(&mut self, index: usize) -> T {
+        let len = self.len();
+        let ptr = self.as_mut_ptr().add(index);
+        let ret = ptr::read(ptr);
+        ptr::copy(ptr.add(1), ptr, len - index - 1);
+        self.set_len(len - 1);
+        ret
+    }
+
+    #[inline] fn try_swap_remove(&mut self, index: usize) -> Result<T, RemoveError> {
         let len = self.len();
         if index >= len {
             return Err(RemoveError{index, len});
@@ -587,7 +628,7 @@ impl<T> VecExt<T> for Vec<T> {
         }
     }
 
-    fn try_insert(&mut self, index: usize, element: T) -> Result<&mut T, InsertError> {
+    #[inline] fn try_insert(&mut self, index: usize, element: T) -> Result<&mut T, InsertError> {
         let len = self.len();
         if index > len {
             return Err(InsertError::Index{index, len});

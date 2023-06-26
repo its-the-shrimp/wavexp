@@ -28,23 +28,29 @@ pub enum AppEvent {
     /// emitted every frame, i.e. roughly every 17 ms
     /// the field is the current time, but in milliseconds, unlike `AppContext::now`
     Frame(MSecs),
-    /// emitted when the page layout has been updated
-    LayoutChanged,
     /// emitted by the selected sound bloock when its visual representation is expected to have
     /// changed
     RedrawEditorPlane,
     /// emitted when the user switches tabs in the side editor
     SetTab(usize),
+    /// epilog variant of `SetTab`
+    AfterSetTab(usize),
     /// emitted when the viewport of the app changes its dimensions
     Resize,
     /// emitted when the user clicks the `Play` button
     TogglePlay,
+    /// epllog version of `TogglePlay`
+    AfterTogglePlay,
     /// emitted when the user selects a sound block to edit in the side editor
     Select(Option<usize>),
+    /// epliog version of `Select`
+    AfterSelect(Option<usize>),
     /// emitted when the user adds a sound block
     Add(SoundType, i32, Beats),
     /// emitted when the user deletes the selected sound block
     Remove,
+    /// epilog version of `Remove`
+    AfterRemove,
     /// emitted when a `Noise` sound block's duration has been changed
     Duration(R64),
     /// emitted when a `Noise` sound block's volume ha been changed
@@ -77,15 +83,20 @@ pub enum AppEvent {
 }
 
 impl AppEvent {
-    /// returns `true` if the events changes the UI layout
-    #[inline] pub fn ui_change(&self) -> bool {
+    /// returns an event that should be returned after re-rendering the page layout
+    /// if page layout re-render is not needed, `None` is returned
+    #[inline] pub fn epilog(&self) -> Option<Self> {
         match self {
-            Self::SetTab(..)
-            | Self::Select(..)
-            | Self::TogglePlay 
-            | Self::Remove => true,
+            Self::SetTab(id)   => Some(Self::AfterSetTab(*id)),
+            | Self::Select(id) => Some(Self::AfterSelect(*id)),
+            | Self::TogglePlay => Some(Self::AfterTogglePlay),
+            | Self::Remove     => Some(Self::AfterRemove),
 
             Self::Frame(..)
+            | Self::AfterSetTab(..)
+            | Self::AfterSelect(..)
+            | Self::AfterTogglePlay
+            | Self::AfterRemove
             | Self::SetHint(..)
             | Self::FetchHint(..)
             | Self::RedrawEditorPlane
@@ -102,8 +113,7 @@ impl AppEvent {
             | Self::SetBlockAdd(..) 
             | Self::FocusTab(..) 
             | Self::HoverTab(..) 
-            | Self::LeaveTab
-            | Self::LayoutChanged => false
+            | Self::LeaveTab => None
         }
     }
 }
@@ -114,13 +124,15 @@ pub struct AppContext {
     pub play_since: Secs,
     pub now: Secs,
     pub offset: Beats,
-    pub snap_step: R64
+    pub snap_step: R64,
+    pub selected_tab: usize
 }
 
 impl AppContext {
     pub fn new(bps: Beats, snap_step: R64) -> Self {
         Self{bps, offset: r64![0.0], snap_step,
-            play_since: Secs::NEG_INFINITY, now: Secs::NEG_INFINITY}
+            play_since: Secs::NEG_INFINITY, now: Secs::NEG_INFINITY,
+            selected_tab: 0}
     }
 
     pub fn handle_event(&mut self, event: &AppEvent) {
@@ -133,6 +145,10 @@ impl AppContext {
                 self.now = *now / 1000u16,
             AppEvent::SnapStep(value) =>
                 self.snap_step = *value,
+            AppEvent::Select(_) =>
+                self.selected_tab = 0,
+            AppEvent::SetTab(id) =>
+                self.selected_tab = *id,
             _ => ()
         }
     }
@@ -144,8 +160,7 @@ pub struct App {
     ctx: AppContext,
     hint_handler: HintHandler,
     frame_emitter: Function,
-    tab_id: usize,
-    selected_id: Option<usize>
+    epilog: Option<AppEvent>
 }
 
 impl Component for App {
@@ -157,7 +172,7 @@ impl Component for App {
         let ctx = AudioContext::new().unwrap_throw(loc!());
         let sound_visualiser = SoundVisualiser::new(&ctx).unwrap_throw(loc!());
 
-        let res = Self{tab_id: 0, selected_id: None,
+        let res = Self{epilog: None,
             hint_handler: HintHandler::default(),
             ctx: AppContext::new(r64![2.0], r64![1.0]),
             sequencer: Sequencer::new(ctx, Rc::clone(sound_visualiser.input())).unwrap_throw(loc!()),
@@ -170,38 +185,29 @@ impl Component for App {
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            match &msg {
+            match msg {
                 AppEvent::Frame(_) => _ = window()
                     .request_animation_frame(&self.frame_emitter).add_loc(loc!())?,
 
-                AppEvent::Remove => {
-                    let id = self.selected_id.take().to_js_result(loc!())?;
-                    self.sequencer.pattern_mut().del_point(id).add_loc(loc!())?;
-                }
+                AppEvent::Remove => self.sequencer.pattern_mut()
+                    .del_fixed().to_js_result(loc!())?,
 
-                AppEvent::Select(id) => {
-                    self.selected_id = id.filter(|x| Some(*x) != self.selected_id);
-                    self.tab_id = 0;
-                }
-
-                AppEvent::SetTab(tab_id) => self.tab_id = *tab_id,
-    
                 _ => ()
             }
-            let res = msg.ui_change();
+            self.epilog = msg.epilog();
             self.forward_event(ctx, msg).add_loc(loc!())?;
-            return res
+            return self.epilog.is_some()
         }.report_err(loc!());
         false
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let block = self.selected_id.map(|x| unsafe{self.sequencer.pattern().get_unchecked(x)});
+        let block = self.sequencer.pattern().fixed();
 
         let setter = ctx.link().callback(|x| x);
         let render_tab_info = |info: &TabInfo, tab_id: usize, desc: String| -> Html {
             html!{
-                <div id={(self.tab_id == tab_id).then_some("selected-tab")}
+                <div id={(self.ctx.selected_tab == tab_id).then_some("selected-tab")}
                 onpointerup={ctx.link().callback(move |_| AppEvent::SetTab(tab_id))}
                 data-main-hint={info.name} data-aux-hint={desc}>
                     <p>{info.name}</p>
@@ -224,7 +230,7 @@ impl Component for App {
                             {for block.sound.tabs().iter().enumerate()
                                 .map(|(tab_id, tab)| render_tab_info(tab, tab_id, tab_aux_hint.clone()))}
                         </div>
-                        {block.sound.params(self.tab_id, setter.clone())}
+                        {block.sound.params(self.ctx.selected_tab, setter.clone())}
                         <div id="general-ctrl" class="dark-bg">
                             <Button name="Back to project-wide settings"
                             setter={setter.reform(|_| AppEvent::Select(None))}>
@@ -245,7 +251,7 @@ impl Component for App {
                             {render_tab_info(&TabInfo{name: "General"}, 0, "Settings tab".to_owned())}
                             {render_tab_info(&TabInfo{name: "Add block"}, 1, "Settings tab".to_owned())}
                         </div>
-                        if self.tab_id == 0 {
+                        if self.ctx.selected_tab == 0 {
                             <div id="inputs">
                                 <Slider key="tmp" name="Tempo"
                                     setter={setter.reform(AppEvent::Bpm)}
@@ -256,7 +262,7 @@ impl Component for App {
                                 setter={setter.reform(|x| AppEvent::MasterGain(R32::from(x)))}
                                     initial={R64::from(self.sequencer.gain())}/>
                             </div>
-                        } else if self.tab_id == 1 {
+                        } else if self.ctx.selected_tab == 1 {
                             <div id="block-add-menu">
                                 {for Sound::TYPES.iter().map(|x| html!{
                                     <div draggable="true"
@@ -319,7 +325,10 @@ impl Component for App {
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
-        _ = self.forward_event(ctx, AppEvent::LayoutChanged).report_err(loc!());
+        if let Some(event) = self.epilog.take() {
+            _ = self.forward_event(ctx, event).report_err(loc!());
+        }
+
         if !first_render {return}
         let window = window();
 
@@ -345,8 +354,7 @@ impl App {
         if let Some(next) = self.sequencer.handle_event(&event, &self.ctx).add_loc(loc!())? {
             ctx.link().send_message(next);
         }
-        if let Some(id) = self.selected_id {
-            let mut block = unsafe{self.sequencer.pattern_mut().get_unchecked_mut(id)};
+        if let Some(mut block) = self.sequencer.pattern_mut().fixed_mut() {
             self.ctx.offset = block.offset;
             if let Some(next) = block.inner().handle_event(&event, &self.ctx).add_loc(loc!())? {
                 ctx.link().send_message(next);
