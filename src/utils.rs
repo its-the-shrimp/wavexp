@@ -683,7 +683,11 @@ pub trait RangeExt<T> {
     O: Copy,
     I: PartialOrd<T> + Add<O, Output=I> + Sub<O, Output=I> + Copy,
     T: PartialOrd<I>;
-    fn fit(&self, item: T) -> T where T: Clone + PartialOrd;
+    fn fit<R>(&self, item: R) -> R where T: Clone + Into<R> + PartialOrd<R>;
+    /// if `value` is outside of `self`, extend `self` just enough for `value` to be inside it
+    fn extend<R>(self, value: R) -> Self where T: PartialOrd<R> + From<R>;
+    /// turns `x .. y` into `f(x) .. f(y)`
+    fn map<R>(self, f: impl FnMut(T) -> R) -> Range<R>;
 }
 
 impl<T> RangeExt<T> for Range<T> {
@@ -694,19 +698,29 @@ impl<T> RangeExt<T> for Range<T> {
             || other.contains(&self.start)
     }
 
-    #[inline]
-    fn loose_contain<O, I>(&self, item: I, offset: O) -> bool where
-    O: Copy,
+    #[inline] fn loose_contain<O, I>(&self, item: I, offset: O) -> bool
+    where O: Copy,
     I: PartialOrd<T> + Add<O, Output=I> + Sub<O, Output=I> + Copy,
     T: PartialOrd<I> {
         self.overlap(&(item - offset .. item + offset))
     }
 
-    #[inline]
-    fn fit(&self, item: T) -> T where T: Clone + PartialOrd {
-             if item >= self.end   {self.end.clone()}
-        else if item <  self.start {self.start.clone()}
+    #[inline] fn fit<R>(&self, item: R) -> R
+    where T: Clone + Into<R> + PartialOrd<R> {
+        if      self.end  <= item {self.end.clone().into()}
+        else if self.start > item {self.start.clone().into()}
         else                       {item}
+    }
+
+    #[inline] fn extend<R>(self, value: R) -> Self
+    where T: PartialOrd<R> + From<R> {
+        if      self.start > value {value.into() .. self.end}
+        else if self.end  <= value {self.start .. value.into()}
+        else {self}
+    }
+
+    #[inline] fn map<R>(self, mut f: impl FnMut(T) -> R) -> Range<R> {
+        f(self.start) .. f(self.end)
     }
 }
 
@@ -974,7 +988,27 @@ macro_rules! real_from_ints_impl {
     ($real:ty { $float:ty } : $($int:ty),+) => {
         $(
             impl From<$int> for $real {
-                #[inline(always)] fn from(x: $int) -> Self {Self(x as $float)}
+                #[inline] fn from(x: $int) -> Self {Self(x as $float)}
+            }
+
+            impl From<$real> for $int {
+                #[inline] fn from(x: $real) -> Self {
+                    if      *x >= <$int>::MAX as $float {<$int>::MAX}
+                    else if *x <= <$int>::MIN as $float {<$int>::MIN}
+                    else {*x as $int}
+                }
+            }
+
+            impl PartialEq<$int> for $real {
+                #[inline] fn eq(&self, other: &$int) -> bool {
+                    PartialEq::eq(&self.0, &(*other as $float))
+                }
+            }
+
+            impl PartialOrd<$int> for $real {
+                #[inline] fn partial_cmp(&self, other: &$int) -> Option<Ordering> {
+                    PartialOrd::partial_cmp(&self.0, &(*other as $float))
+                }
             }
         )+
     };
@@ -1114,7 +1148,7 @@ macro_rules! real_real_operator_impl {
 
 macro_rules! real_impl {
     ($real:ident { $float:ident }, $other_real:ty { $other_float:ty }) => {
-        #[derive(Debug, PartialEq, Clone, Copy)]
+        #[derive(Debug, Default, PartialEq, Clone, Copy)]
         pub struct $real($float);
 
         impl Deref for $real {
@@ -1151,7 +1185,7 @@ macro_rules! real_impl {
 
         impl Display for $real {
             #[inline] fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                write!(f, "{}", self.0)
+                Display::fmt(&self.0, f)
             }
         }
 
@@ -1303,49 +1337,6 @@ fn real_round_to() {
     assert!(r64![1.3].floor_to(r64![0.2]).loose_eq(r64![1.2], 0.005));
     assert!(r64![-1.3].floor_to(r64![0.2]).loose_eq(r64![-1.4], 0.005));
 }
-
-pub trait RatioToInt<Int> {
-    fn to_int_in(self, min: Int, max: Int) -> Int;
-    fn to_int_from(self, min: Int) -> Int;
-    fn to_int_to(self, max: Int) -> Int;
-    fn to_int(self) -> Int;
-}
-
-macro_rules! impl_ratio2int {
-    ($ratio:ty, $float:ty : $($int:ty),+) => {
-        $(
-            impl RatioToInt<$int> for $ratio {
-                fn to_int_in(self, mut min: $int, mut max: $int) -> $int {
-                    if min > max {swap(&mut min, &mut max)}
-                    if      self.0 > max as $float {max}
-                    else if self.0 < min as $float {min}
-                    else   {self.0 as $int}
-                }
-
-                fn to_int_from(self, min: $int) -> $int {
-                    if      self.0 > <$int>::MAX as $float {<$int>::MAX}
-                    else if self.0 <         min as $float {min}
-                    else   {self.0 as $int}
-                }
-
-                fn to_int_to(self, max: $int) -> $int {
-                    if      self.0 >         max as $float {max}
-                    else if self.0 < <$int>::MIN as $float {<$int>::MIN}
-                    else   {self.0 as $int}
-                }
-
-                fn to_int(self) -> $int {
-                    if      self.0 > <$int>::MAX as $float {<$int>::MAX}
-                    else if self.0 < <$int>::MIN as $float {<$int>::MIN}
-                    else   {self.0 as $int}
-                }
-            }
-        )+
-    };
-}
-
-impl_ratio2int!(R32, f32: u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
-impl_ratio2int!(R64, f64: u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
 
 pub trait SaturatingFrom<T> {
     fn saturating_from(x: T) -> Self;

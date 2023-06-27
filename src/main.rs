@@ -8,6 +8,7 @@
 #![feature(array_windows)]
 #![feature(drain_filter)]
 #![feature(associated_type_defaults)]
+#![feature(const_range_bounds)]
 #![allow(clippy::unit_arg)]
 #![allow(clippy::option_map_unit_fn)]
 #![allow(clippy::comparison_chain)]

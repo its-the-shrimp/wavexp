@@ -17,7 +17,7 @@ use crate::{
     utils::{Check, SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, OptionExt,
         HtmlElementExt, 
-        Pipe, Tee, RatioToInt, BoolExt, RangeExt, VecExt, R64},
+        Pipe, Tee, BoolExt, RangeExt, VecExt, R64},
     sound::FromBeats,
     global::{AppEvent, AppContext},
     loc,
@@ -208,7 +208,8 @@ impl SoundVisualiser {
 pub struct CanvasEvent {
     pub point: Point,
     pub left: bool,
-    pub shift: bool
+    pub shift: bool,
+    pub meta: bool
 }
 
 impl TryFrom<&MouseEvent> for CanvasEvent {
@@ -217,7 +218,8 @@ impl TryFrom<&MouseEvent> for CanvasEvent {
         let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result(loc!())?;
         let point = Point{x: value.offset_x(), y: value.offset_y()}
             .normalise(canvas.client_rect(), canvas.rect());
-        Ok(Self{point, left: value.buttons() & 1 == 1, shift: value.shift_key()})
+        Ok(Self{point, left: value.buttons() & 1 == 1,
+            shift: value.shift_key(), meta: value.meta_key()})
     }
 }
 
@@ -227,7 +229,8 @@ impl TryFrom<&PointerEvent> for CanvasEvent {
         let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result(loc!())?;
         let point = Point{x: value.offset_x(), y: value.offset_y()}
             .normalise(canvas.client_rect(), canvas.rect());
-        Ok(Self{point, left: value.buttons() & 1 == 1, shift: value.shift_key()})
+        Ok(Self{point, left: value.buttons() & 1 == 1,
+            shift: value.shift_key(), meta: value.meta_key()})
     }
 }
 
@@ -288,10 +291,18 @@ impl HintHandler {
 pub trait Graphable: Debug {
     /// the name of the plane that will be displayed as a hint when hovered over it
     const EDITOR_NAME: &'static str;
+    /// bounds for the points along the X axis
+    const X_BOUND: Range<R64> = r64![0.0] .. R64::INFINITY;
     /// bounds for the scale of the X axis of the graph
-    const SCALE_X_BOUND: Range<R64>;
+    const SCALE_X_BOUND: Range<R64> = r64![3.0] .. r64![30.0];
+    /// bounds for the offset of the X axis of the graph
+    const OFFSET_X_BOUND: Range<R64> = r64![-1.0] .. R64::INFINITY;
+    /// bounds for the points along the Y axis
+    const Y_BOUND: Range<R64>;
     /// bounds for the scale of the Y axis of the graph
     const SCALE_Y_BOUND: Range<R64>;
+    /// bounds for the offset of the Y axis of the graph
+    const OFFSET_Y_BOUND: Range<R64>;
     /// type of the inner data of the point, can be whatever and,
     /// unlike the coordinates, can be freely mutated
     type Inner;
@@ -321,6 +332,9 @@ pub trait Graphable: Debug {
     /// the event to emit when a `Draggable` is dropped into the UI
     #[allow(unused_variables)] #[inline]
     fn on_drop_in(value: Self::Draggable, loc: impl FnOnce() -> [R64; 2]) -> Option<Self::Event> {None}
+    /// event to emit when the meta key is clicked, i.e. pressed and released
+    #[allow(unused_variables)] #[inline]
+    fn on_meta_click(loc: impl FnOnce() -> Option<[R64; 2]>) -> Option<Self::Event> {None}
 
     /// visual representation of the point's hitbox
     /// `mapper` maps user coordinates to canvas coordinates, all vertices in the
@@ -332,16 +346,27 @@ pub trait Graphable: Debug {
     #[allow(unused_variables)] #[inline]
     fn desc(&self) -> String {String::new()}
     /// format the location of a point in user coordinates
-    fn fmt_loc(loc: [R64; 2]) -> String;
+    /// `loc`, if present, will always be in bounds, otherwise it'll be `None`
+    fn fmt_loc(loc: Option<[R64; 2]>) -> String;
     /// visual representation of `Draggable`, evaluated every time `Draggable` enters the UI
     /// the center of the representation should be 0, it will then be moved accordingly
     #[allow(unused_variables)] #[inline]
-    fn draw_draggable(value: Self::Draggable, step: [R64; 2]) -> JsResult<Path2d> {Path2d::new()}
+    fn draw_draggable(value: Self::Draggable, canvas_size: [R64; 2], scale: [R64; 2]) -> JsResult<Path2d> {Path2d::new()}
     /// the hint to return when a `Draggable` is dragged over the UI but not yet dropped in
     /// `loc` returns the location of the draggable in user coordinates if its inside the editor,
     /// otherwise it returns `None`
     #[allow(unused_variables)] #[inline]
     fn drag_n_drop_hint(d: Self::Draggable, loc: impl FnOnce() -> Option<[R64; 2]>) -> Option<[Cow<'static, str>; 2]> {None}
+
+    /// visual representation of the meta key held down, evaluated every time meta key becomes pressed
+    /// the center of the representation should be 0, it will then be moved accordingly
+    #[allow(unused_variables)] #[inline]
+    fn draw_meta_held(canvas_size: [R64; 2], scale: [R64; 2]) -> JsResult<Path2d> {Path2d::new()}
+    /// the hint to return when the editor is being hovered with the meta key pressed
+    /// `loc` returns the location of the draggable in user coordinates if its inside the editor,
+    /// otherwise it returns `None`
+    #[allow(unused_variables)] #[inline]
+    fn meta_held_hint(loc: impl FnOnce() -> Option<[R64; 2]>) -> Option<[Cow<'static, str>; 2]> {None}
 }
 
 /// a special reference wrapper: access to everything is immutable,
@@ -369,7 +394,8 @@ enum Focus<D: Debug> {
     AwaitDragIn(D),
     HoverWDraggable(D, Point, Path2d),
     HoverPlaneWShift(Point),
-    ZoomPlane{init_offset: Point, pivot: Point, init_scale_x: R64, init_scale_y: R64}
+    ZoomPlane{init_offset: Point, pivot: Point, init_scale_x: R64, init_scale_y: R64},
+    HoverPlaneWMeta(Point, bool, Path2d)
 }
 
 impl<D: Copy + Debug> Focus<D> {
@@ -383,6 +409,7 @@ impl<D: Copy + Debug> Focus<D> {
         matches!(self, Self::MovePoint{..}
             | Self::ZoomPlane{..}
             | Self::HoverPlaneWShift(..)
+            | Self::HoverPlaneWMeta(..)
             | Self::HoverWDraggable(..))
     }
 }
@@ -407,10 +434,11 @@ impl<T: Graphable> GraphEditor<T> {
     const FG_STYLE: &str = "#0069E1";
     const LINE_WIDTH: f64 = 3.0;
 
-    #[inline] pub fn new(scale_x: R64, scale_y: R64, data: Vec<T>) -> Self {
+    #[inline] pub fn new(data: Vec<T>) -> Self {
         Self{canvas: NodeRef::default(), offset: Point::ZERO,
             focus: Focus::None, last_focus: discriminant(&Focus::HoverPlane),
-            scale_x, scale_y,
+            scale_x: T::SCALE_X_BOUND.start * r64![0.75] + T::SCALE_X_BOUND.end * r64![0.25],
+            scale_y: T::SCALE_Y_BOUND.start * r64![0.75] + T::SCALE_Y_BOUND.end * r64![0.25],
             redraw: false, data, fixed: None}
     }
 
@@ -427,13 +455,14 @@ impl<T: Graphable> GraphEditor<T> {
         self.data.iter_mut().map(GraphPointView)
     }
 
-    /// the item will be accessible as the last element
+    /// returns the index at which the new point will be available
     #[inline] pub fn add_point(&mut self, point: T) -> usize {
         self.redraw = true;
         let id = self.data.push_sorted_by_key(point, |x| x.loc()[0]);
         if let Some(ref mut x) = self.fixed.filter(|x| *x >= id) {
             *x += 1
         }
+        self.redraw = true;
         id
     }
 
@@ -457,6 +486,7 @@ impl<T: Graphable> GraphEditor<T> {
     }
 
     #[inline] pub fn del_fixed(&mut self) -> Option<()> {
+        self.redraw = true;
         self.fixed.take().map(|x|
             _ = unsafe{self.data.remove_unchecked(x)})
     }
@@ -481,6 +511,12 @@ impl<T: Graphable> GraphEditor<T> {
         let [w, h] = resizer(&canvas).add_loc(loc!())?;
         canvas.set_width(w);
         canvas.set_height(h);
+        if self.offset.x <= 0 {
+            self.offset.x = (T::OFFSET_X_BOUND.start * R64::from(w) / self.scale_x).into();
+        }
+        if self.offset.y <= 0 {
+            self.offset.y = (T::OFFSET_Y_BOUND.start * R64::from(h) / self.scale_y).into();
+        }
         let ctx = canvas.get_2d_context(loc!())?;
         ctx.set_font(Self::FONT);
         ctx.set_line_width(Self::LINE_WIDTH);
@@ -521,32 +557,44 @@ impl<T: Graphable> GraphEditor<T> {
             Focus::None => self.set_focus(Focus::HoverPlane)
                 .pipe(|_| None),
 
-            Focus::HoverPlane => match (event.left, event.shift) {
-                (true, true) =>
+            Focus::HoverPlane => match (event.left, event.shift, event.meta) {
+                (x, _, true) =>
+                    Some(Focus::HoverPlaneWMeta(event.point, x,
+                        T::draw_meta_held([w.into(), h.into()], [self.scale_x, self.scale_y]).add_loc(loc!())?)),
+                (true, true, _) =>
                     Some(zoom_plane_focus()),
-                (true, false) =>
+                (true, false, _) =>
                     self.id_by_pos(x, y)
                         .map_or_else(|| Focus::MovePlane(event.point - self.offset),
                             Focus::MovePoint).into(),
-                (false, true) =>
+                (false, true, _) =>
                     Some(Focus::HoverPlaneWShift(event.point)),
-                (false, false) =>
+                (false, false, _) =>
                     self.id_by_pos(x, y).map(Focus::HoverPoint)
             }.map(|x| self.set_focus(x)).pipe(|_| None),
 
-            Focus::HoverPoint(id) => match (event.left, event.shift) {
-                (true, true) => Some(zoom_plane_focus()),
-                (true, false) => Some(Focus::MovePoint(id)),
-                (false, true) => Some(Focus::HoverPlaneWShift(event.point)),
-                (false, false) =>
+            Focus::HoverPoint(id) => match (event.left, event.shift, event.meta) {
+                (x, _, true) =>
+                    Some(Focus::HoverPlaneWMeta(event.point, x,
+                        T::draw_meta_held([w.into(), h.into()], [self.scale_x, self.scale_y]).add_loc(loc!())?)),
+                (true, true, _) => Some(zoom_plane_focus()),
+                (true, false, _) => Some(Focus::MovePoint(id)),
+                (false, true, _) => Some(Focus::HoverPlaneWShift(event.point)),
+                (false, false, _) =>
                     unsafe{self.data.get_unchecked(id)}.in_hitbox([x, y])
                         .not().then_some(Focus::HoverPlane),
             }.map(|x| self.set_focus(x)).pipe(|_| None),
 
             Focus::MovePlane(ref mut last) => if event.left {
                 event.point -= self.offset;
-                self.offset.x = (self.offset.x + last.x - event.point.x).max(self.offset.x.min(-5));
-                self.offset.y = (self.offset.y + last.y - event.point.y).max(self.offset.y.min(-5));
+                if !T::OFFSET_X_BOUND.is_empty() {
+                    self.offset.x = T::OFFSET_X_BOUND.map(|x| x * step_x)
+                        .extend(self.offset.x).fit(self.offset.x + last.x - event.point.x);
+                }
+                if !T::OFFSET_Y_BOUND.is_empty() {
+                    self.offset.y = T::OFFSET_Y_BOUND.map(|x| x * step_y)
+                        .extend(self.offset.y).fit(self.offset.y + last.y - event.point.y);
+                }
                 *last = event.point;
                 None
             } else {
@@ -558,9 +606,8 @@ impl<T: Graphable> GraphEditor<T> {
                 let n_points = self.data.len();
                 let point = unsafe{self.data.get_unchecked_mut(id)};
                 let res = point.set_loc(n_points, id,
-                    || R64::from(event.point.x).div(step_x)
-                        .max(r64![0.0]).floor_to(ctx.snap_step),
-                    || (R64::from(event.point.y) / step_y).max(r64![0.0]));
+                    || T::X_BOUND.fit(R64::from(event.point.x).div(step_x).floor_to(ctx.snap_step)),
+                    || T::Y_BOUND.fit(R64::from(event.point.y) / step_y));
                 let new_id = unsafe{self.data.reorder_unchecked_by_key(id, |x| x.loc()[0])};
                 if new_id != id {
                     self.focus = Focus::MovePoint(new_id);
@@ -591,7 +638,7 @@ impl<T: Graphable> GraphEditor<T> {
 
             Focus::AwaitDragIn(d) => if event.left {
                 self.focus = Focus::HoverWDraggable(d, event.point,
-                    T::draw_draggable(d, [step_x, step_y]).add_loc(loc!())?);
+                    T::draw_draggable(d, [w.into(), h.into()], [self.scale_x, self.scale_y]).add_loc(loc!())?);
                 None
             } else {
                 self.focus = Focus::HoverPlane;
@@ -600,7 +647,7 @@ impl<T: Graphable> GraphEditor<T> {
 
             Focus::HoverWDraggable(d, ref mut point, _) => if event.left {
                 *point = event.point;
-                point.x -= (*ctx.snap_step != 0.0).then_or(0, || point.x % (*step_x * *ctx.snap_step) as i32);
+                point.x -= if *ctx.snap_step != 0.0 {point.x % (*step_x * *ctx.snap_step) as i32} else {0};
                 point.y = point.y - point.y % *step_y as i32 + (*step_y / 2.0) as i32;
                 None
             } else {
@@ -611,20 +658,51 @@ impl<T: Graphable> GraphEditor<T> {
             Focus::ZoomPlane{init_offset, init_scale_x, init_scale_y, pivot} => match (event.left, event.shift) {
                 (true, _) => {
                     event.point -= self.offset - init_offset;
-
-                    self.scale_x = T::SCALE_X_BOUND.fit(r64![50.0] / h * (event.point.x - pivot.x) + init_scale_x);
-                    self.offset.x = ((init_scale_x - self.scale_x) * pivot.x / self.scale_x + init_offset.x)
-                        .to_int();
-
-                    self.scale_y = T::SCALE_Y_BOUND.fit(r64![50.0] / w * (event.point.y - pivot.y) + init_scale_y);
-                    self.offset.y = ((init_scale_y - self.scale_y) * pivot.y / self.scale_y + init_offset.y)
-                        .to_int();
+                    if !T::SCALE_X_BOUND.is_empty() {
+                        self.scale_x = T::SCALE_X_BOUND.fit(r64![50.0] / h * (event.point.x - pivot.x) + init_scale_x);
+                        self.offset.x = ((init_scale_x - self.scale_x) * pivot.x / self.scale_x + init_offset.x).into();
+                    }
+                    if !T::SCALE_Y_BOUND.is_empty() {
+                        self.scale_y = T::SCALE_Y_BOUND.fit(r64![50.0] / w * (event.point.y - pivot.y) + init_scale_y);
+                        self.offset.y = ((init_scale_y - self.scale_y) * pivot.y / self.scale_y + init_offset.y).into();
+                    }
                 }
 
                 (false, true) => self.focus = Focus::HoverPlaneWShift(event.point),
 
                 (false, false) => self.focus = Focus::HoverPlane
             }.pipe(|_| {self.redraw = true; None}),
+
+            Focus::HoverPlaneWMeta(ref mut point, ref mut clicked, _) => match (event.left, *clicked, event.meta) {
+                (false, false, false) => {
+                    self.focus = Focus::HoverPlane;
+                    None
+                }
+                (false, false, true) | (true, true, _) => {
+                    *point = event.point;
+                    None
+                }
+                (true, false, false) => {
+                    self.focus = self.id_by_pos(x, y)
+                        .map_or_else(|| Focus::MovePlane(event.point - self.offset),
+                            Focus::MovePoint);
+                    None
+                }
+                (true, false, true) => {
+                    *point = event.point;
+                    *clicked = true;
+                    None
+                }
+                (false, true, _) => {
+                    let res = T::on_meta_click(|| {
+                        let x = (R64::from(point.x) / step_x).check_in(T::X_BOUND).ok()?;
+                        let y = (R64::from(point.y) / step_y).check_in(T::Y_BOUND).ok()?;
+                        Some([x, y])
+                    });
+                    self.set_focus(Focus::HoverPlane);
+                    res
+                }
+            }.tee(|_| self.redraw = true)
         })
     }
 
@@ -641,20 +719,24 @@ impl<T: Graphable> GraphEditor<T> {
         let step_x = w / self.scale_x;
         let step_y = h / self.scale_y;
         let offset_x = R64::from(-self.offset.x)
-            % (self.offset.x > 0).choose(step_x, R64::INFINITY);
+            % (self.offset.x > (T::X_BOUND.start * step_x).into())
+                .choose(step_x, R64::INFINITY);
         let offset_y = R64::from(-self.offset.y)
-            % (self.offset.y > 0).choose(step_y * 2.0, R64::INFINITY);
+            % (self.offset.y > (T::Y_BOUND.start * step_y).into())
+            .choose(step_y * 2.0, R64::INFINITY);
+        let max_x = w.min(T::X_BOUND.end * step_x - self.offset.x);
+        let max_y = h.min(T::Y_BOUND.end * step_y - self.offset.y);
 
         // lighter horizontal bars
         ctx.begin_path();
-        for y in succ(Some(offset_y), |y| (y + step_y * 2u8).check_in(..h).ok()) {
-            for x in succ(Some(offset_x), |x| (x + step_x).check_in(..w).ok()) {
+        for y in succ(Some(offset_y), |y| (y + step_y * 2u8).check_in(..max_y).ok()) {
+            for x in succ(Some(offset_x), |x| (x + step_x).check_in(..max_x).ok()) {
                 ctx.rect(*x + Self::LINE_WIDTH, *y, *step_x - Self::LINE_WIDTH, *step_y);
             }
         }
         // lighter vertical lines
-        for y in succ(Some(step_y + offset_y), |y| (y + step_y * 2u8).check_in(..h).ok()) {
-            for x in succ(Some(offset_x), |x| (x + step_x).check_in(..w).ok()) {
+        for y in succ(Some(step_y + offset_y), |y| (y + step_y * 2u8).check_in(..max_y).ok()) {
+            for x in succ(Some(offset_x), |x| (x + step_x).check_in(..max_x).ok()) {
                 ctx.rect(*x, *y, Self::LINE_WIDTH, *step_y);
             }
         }
@@ -675,7 +757,7 @@ impl<T: Graphable> GraphEditor<T> {
 
         if app_ctx.play_since.is_finite() {
             ctx.set_fill_style(&Self::FG_STYLE.into());
-            let play_at = (app_ctx.now - app_ctx.play_since).secs_to_beats(app_ctx.bps) - app_ctx.offset;
+            let play_at = (app_ctx.now - app_ctx.play_since).secs_to_beats(app_ctx.bps);
             ctx.fill_rect(*play_at * *step_x - self.offset.x as f64, 0.0, 3.0, *h);
         } else {
             self.redraw = false;
@@ -690,7 +772,7 @@ impl<T: Graphable> GraphEditor<T> {
 
                 Focus::HoverPoint(id) => {
                     let point = unsafe{self.data.get_unchecked(*id)};
-                    Some([format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc())).into(),
+                    Some([format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc().into())).into(),
                         "Press and hold to drag".into()])
                 }
 
@@ -698,17 +780,18 @@ impl<T: Graphable> GraphEditor<T> {
 
                 Focus::MovePoint(id) => {
                     let point = unsafe{self.data.get_unchecked(*id)};
-                    Some([format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc())).into(),
+                    Some([format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc().into())).into(),
                         "Dragging".into()])
                 }
 
                 Focus::HoverPlaneWShift(at) => {
                     let x = R64::from(at.x) / step_x;
                     let y = R64::from(at.y) / step_y;
+                    let loc = x.check_in(T::X_BOUND).ok().zip(y.check_in(T::Y_BOUND).ok()).map(|(x, y)| [x, y]);
                     ctx.set_text_align("left");
                     ctx.set_text_baseline("bottom");
                     ctx.set_fill_style(&Self::FG_STYLE.into());
-                    ctx.fill_text(&T::fmt_loc([x, y]), 5.0, *h - 5.0)
+                    ctx.fill_text(&T::fmt_loc(loc), 5.0, *h - 5.0)
                         .add_loc(loc!())?;
                     Some([T::EDITOR_NAME.into(), "Press and hold to zoom".into()])
                 }
@@ -727,7 +810,8 @@ impl<T: Graphable> GraphEditor<T> {
                     T::drag_n_drop_hint(*d, || None)
                 }
 
-                Focus::HoverWDraggable(d, at, visual) => {
+                Focus::HoverWDraggable(d, mut at, visual) => {
+                    at -= self.offset;
                     ctx.translate(at.x as f64, at.y as f64).add_loc(loc!())?;
                     ctx.stroke_with_path(visual);
                     ctx.translate(-at.x as f64, -at.y as f64).add_loc(loc!())?;
@@ -738,6 +822,7 @@ impl<T: Graphable> GraphEditor<T> {
                     ctx.rect(*w - 5.0, 0.0, 5.0, *h);
                     ctx.set_fill_style(&Self::FG_STYLE.into());
                     ctx.fill();
+                    at += self.offset;
                     T::drag_n_drop_hint(*d, || Some([R64::from(at.x) / step_x, R64::from(at.y) / step_y]))
                 }
 
@@ -751,6 +836,19 @@ impl<T: Graphable> GraphEditor<T> {
                     ctx.set_stroke_style(&Self::FG_STYLE.into());
                     ctx.stroke();
                     Some([format!("{}: zooming", T::EDITOR_NAME).into(), "Release to stop".into()])
+                }
+
+                Focus::HoverPlaneWMeta(mut at, _, visual) => {
+                    at -= self.offset;
+                    ctx.translate(at.x as f64, at.y as f64).add_loc(loc!())?;
+                    ctx.stroke_with_path(visual);
+                    ctx.translate(-at.x as f64, -at.y as f64).add_loc(loc!())?;
+                    at += self.offset;
+                    T::meta_held_hint(|| {
+                        let x = (R64::from(at.x) / step_x).check_in(T::X_BOUND).ok()?;
+                        let y = (R64::from(at.y) / step_y).check_in(T::Y_BOUND).ok()?;
+                        Some([x, y])
+                    })
                 }
             }
         } else {None})

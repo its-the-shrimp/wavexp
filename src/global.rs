@@ -1,6 +1,7 @@
 use std::{
     rc::Rc,
-    borrow::Cow};
+    borrow::Cow,
+    ops::{Deref, DerefMut}};
 use js_sys::Function;
 use wasm_bindgen::{
     closure::Closure,
@@ -16,9 +17,9 @@ use yew::{
     Html,
     html};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sound, Sequencer, PatternBlock},
+    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sound, Sequencer, PatternBlock, SoundContext, FromBeats},
     visual::{HintHandler, SoundVisualiser, Graphable},
-    utils::{R64, R32, JsResultUtils, window, OptionExt, SliceExt, JsResult, BoolExt},
+    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, BoolExt},
     input::{Button, Slider, Switch},
     loc, r64, js_try};
 
@@ -73,6 +74,8 @@ pub enum AppEvent {
     FocusTab(PointerEvent),
     /// emitted when the user moves the cursor across the side editor plane
     HoverTab(MouseEvent),
+    /// emitted when a side editor plane is clicked twice in a row
+    DoubleClickTab(MouseEvent),
     /// emitted when the user drags the cursor out of the side editor plane
     LeaveTab,
     /// emitted to set the hint for the user
@@ -112,6 +115,7 @@ impl AppEvent {
             | Self::HoverPlane(..) 
             | Self::SetBlockAdd(..) 
             | Self::FocusTab(..) 
+            | Self::DoubleClickTab(..)
             | Self::HoverTab(..) 
             | Self::LeaveTab => None
         }
@@ -119,22 +123,23 @@ impl AppEvent {
 }
 
 /// carries all the app-wide settings that are passed to all the event receivers
+#[derive(Default, Debug, Clone, Copy)]
 pub struct AppContext {
-    pub bps: Beats,
-    pub play_since: Secs,
-    pub now: Secs,
-    pub offset: Beats,
+    inner: SoundContext,
     pub snap_step: R64,
     pub selected_tab: usize
 }
 
-impl AppContext {
-    pub fn new(bps: Beats, snap_step: R64) -> Self {
-        Self{bps, offset: r64![0.0], snap_step,
-            play_since: Secs::NEG_INFINITY, now: Secs::NEG_INFINITY,
-            selected_tab: 0}
-    }
+impl Deref for AppContext {
+    type Target = SoundContext;
+    #[inline] fn deref(&self) -> &Self::Target {&self.inner}
+}
 
+impl DerefMut for AppContext {
+    #[inline] fn deref_mut(&mut self) -> &mut Self::Target {&mut self.inner}
+}
+
+impl AppContext {
     pub fn handle_event(&mut self, event: &AppEvent) {
         match event {
             AppEvent::Bpm(bpm) =>
@@ -174,7 +179,7 @@ impl Component for App {
 
         let res = Self{epilog: None,
             hint_handler: HintHandler::default(),
-            ctx: AppContext::new(r64![2.0], r64![1.0]),
+            ctx: AppContext::default(),
             sequencer: Sequencer::new(ctx, Rc::clone(sound_visualiser.input())).unwrap_throw(loc!()),
             sound_visualiser,
             frame_emitter: Closure::<dyn Fn(f64)>::new(move |x| cb.emit(R64::new_or(r64![0.0], x)))
@@ -185,14 +190,8 @@ impl Component for App {
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            match msg {
-                AppEvent::Frame(_) => _ = window()
-                    .request_animation_frame(&self.frame_emitter).add_loc(loc!())?,
-
-                AppEvent::Remove => self.sequencer.pattern_mut()
-                    .del_fixed().to_js_result(loc!())?,
-
-                _ => ()
+            if let AppEvent::Frame(_) = msg {
+                window().request_animation_frame(&self.frame_emitter).add_loc(loc!())?;
             }
             self.epilog = msg.epilog();
             self.forward_event(ctx, msg).add_loc(loc!())?;
@@ -355,11 +354,12 @@ impl App {
             ctx.link().send_message(next);
         }
         if let Some(mut block) = self.sequencer.pattern_mut().fixed_mut() {
-            self.ctx.offset = block.offset;
+            let (prev, bps) = (self.ctx.play_since, self.ctx.bps);
+            self.ctx.play_since += block.offset.to_secs(bps);
             if let Some(next) = block.inner().handle_event(&event, &self.ctx).add_loc(loc!())? {
                 ctx.link().send_message(next);
             }
-            self.ctx.offset = r64![0.0];
+            self.ctx.play_since = prev;
         }
         Ok(())
     }
