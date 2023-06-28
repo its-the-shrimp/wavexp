@@ -17,7 +17,7 @@ use yew::{
     Html,
     html};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sound, Sequencer, PatternBlock, SoundContext, FromBeats},
+    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, PatternBlock, SoundContext, FromBeats},
     visual::{HintHandler, SoundVisualiser, Graphable},
     utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, BoolExt},
     input::{Button, Slider, Switch},
@@ -47,7 +47,7 @@ pub enum AppEvent {
     /// epliog version of `Select`
     AfterSelect(Option<usize>),
     /// emitted when the user adds a sound block
-    Add(SoundType, i32, Beats),
+    Add(i32, Beats),
     /// emitted when the user deletes the selected sound block
     Remove,
     /// epilog version of `Remove`
@@ -68,8 +68,10 @@ pub enum AppEvent {
     HoverPlane(MouseEvent),
     /// emitted when the user drags the cursor out of the main editor plane
     LeavePlane,
-    /// emitted when the user starts dragging a new sound block 
-    SetBlockAdd(Option<SoundType>),
+    /// emitted when the user selects the type of sound block for the selected sound block
+    SetBlockType(SoundType),
+    /// epilog version of `SetBlockType`
+    AfterSetBlockType(SoundType),
     /// emitted when the user focuses the side editor plane i.e. by holding left click
     FocusTab(PointerEvent),
     /// emitted when the user moves the cursor across the side editor plane
@@ -90,16 +92,18 @@ impl AppEvent {
     /// if page layout re-render is not needed, `None` is returned
     #[inline] pub fn epilog(&self) -> Option<Self> {
         match self {
-            Self::SetTab(id)   => Some(Self::AfterSetTab(*id)),
-            | Self::Select(id) => Some(Self::AfterSelect(*id)),
-            | Self::TogglePlay => Some(Self::AfterTogglePlay),
-            | Self::Remove     => Some(Self::AfterRemove),
+            Self::SetTab(id)         => Some(Self::AfterSetTab(*id)),
+            | Self::Select(id)       => Some(Self::AfterSelect(*id)),
+            | Self::TogglePlay       => Some(Self::AfterTogglePlay),
+            | Self::SetBlockType(ty) => Some(Self::AfterSetBlockType(*ty)),
+            | Self::Remove           => Some(Self::AfterRemove),
 
             Self::Frame(..)
             | Self::AfterSetTab(..)
             | Self::AfterSelect(..)
             | Self::AfterTogglePlay
             | Self::AfterRemove
+            | Self::AfterSetBlockType(..)
             | Self::SetHint(..)
             | Self::FetchHint(..)
             | Self::RedrawEditorPlane
@@ -113,7 +117,6 @@ impl AppEvent {
             | Self::FocusPlane(..) 
             | Self::LeavePlane 
             | Self::HoverPlane(..) 
-            | Self::SetBlockAdd(..) 
             | Self::FocusTab(..) 
             | Self::DoubleClickTab(..)
             | Self::HoverTab(..) 
@@ -123,11 +126,19 @@ impl AppEvent {
 }
 
 /// carries all the app-wide settings that are passed to all the event receivers
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct AppContext {
     inner: SoundContext,
     pub snap_step: R64,
-    pub selected_tab: usize
+    pub selected_tab: usize,
+    pub audio_ctx: AudioContext
+}
+
+impl AppContext {
+    #[inline] fn new() -> JsResult<Self> {
+        Ok(Self{inner: Default::default(), snap_step: r64![1.0], selected_tab: 0,
+            audio_ctx: AudioContext::new().add_loc(loc!())?})
+    }
 }
 
 impl Deref for AppContext {
@@ -174,14 +185,13 @@ impl Component for App {
 
     fn create(ctx: &Context<Self>) -> Self {
         let cb = ctx.link().callback(AppEvent::Frame);
-        let ctx = AudioContext::new().unwrap_throw(loc!());
-        let sound_visualiser = SoundVisualiser::new(&ctx).unwrap_throw(loc!());
+        let ctx = AppContext::new().unwrap_throw(loc!());
+        let sound_visualiser = SoundVisualiser::new(&ctx.audio_ctx).unwrap_throw(loc!());
 
         let res = Self{epilog: None,
             hint_handler: HintHandler::default(),
-            ctx: AppContext::default(),
-            sequencer: Sequencer::new(ctx, Rc::clone(sound_visualiser.input())).unwrap_throw(loc!()),
-            sound_visualiser,
+            sequencer: Sequencer::new(&ctx.audio_ctx, Rc::clone(sound_visualiser.input())).unwrap_throw(loc!()),
+            sound_visualiser, ctx,
             frame_emitter: Closure::<dyn Fn(f64)>::new(move |x| cb.emit(R64::new_or(r64![0.0], x)))
                 .into_js_value().unchecked_into()};
         window().request_animation_frame(&res.frame_emitter).unwrap_throw(loc!());
@@ -246,43 +256,24 @@ impl Component for App {
                         </div>
                     } else {
                         // TODO: fix tilted edges of the borders of the tab menu
-                        <div id="tab-list">
-                            {render_tab_info(&TabInfo{name: "General"}, 0, "Settings tab".to_owned())}
-                            {render_tab_info(&TabInfo{name: "Add block"}, 1, "Settings tab".to_owned())}
+                        <div id="tab-list"></div>
+                        <div id="inputs">
+                            <Slider key="tmp" name="Tempo"
+                                setter={setter.reform(AppEvent::Bpm)}
+                                min={r64![30.0]} max={r64![240.0]}
+                                postfix="BPM"
+                                initial={self.ctx.bps * r64![60.0]}/>
+                            <Slider key="gain" name="Master gain level"
+                            setter={setter.reform(|x| AppEvent::MasterGain(R32::from(x)))}
+                                initial={R64::from(self.sequencer.gain())}/>
                         </div>
-                        if self.ctx.selected_tab == 0 {
-                            <div id="inputs">
-                                <Slider key="tmp" name="Tempo"
-                                    setter={setter.reform(AppEvent::Bpm)}
-                                    min={r64![30.0]} max={r64![240.0]}
-                                    postfix="BPM"
-                                    initial={self.ctx.bps * r64![60.0]}/>
-                                <Slider key="gain" name="Master gain level"
-                                setter={setter.reform(|x| AppEvent::MasterGain(R32::from(x)))}
-                                    initial={R64::from(self.sequencer.gain())}/>
-                            </div>
-                        } else if self.ctx.selected_tab == 1 {
-                            <div id="block-add-menu">
-                                {for Sound::TYPES.iter().map(|x| html!{
-                                    <div draggable="true"
-                                    data-main-hint={x.name()} data-aux-hint="Hold and drag to add block to plane"
-                                    ondragstart={ctx.link().callback(|_| AppEvent::SetBlockAdd(Some(*x)))}
-                                    ondragend={ctx.link().callback(|_| AppEvent::SetBlockAdd(None))}>
-                                        <p>{x.name()}</p>
-                                    </div>
-                                })}
-                            </div>
-                        }
                     }
                 </div>
                 <canvas ref={self.sequencer.canvas().clone()} id="plane"
                 onpointerdown={ctx.link().callback(    AppEvent::FocusPlane)}
                 onpointerup={ctx.link().callback(|e|   AppEvent::HoverPlane(MouseEvent::from(e)))}
                 onpointermove={ctx.link().callback(|e| AppEvent::HoverPlane(MouseEvent::from(e)))}
-                onpointerout={ctx.link().callback(|_|  AppEvent::LeavePlane)}
-                ondragover={ctx.link().callback(|e|    AppEvent::HoverPlane(MouseEvent::from(e)))}
-                ondragleave={ctx.link().callback(|_|   AppEvent::LeavePlane)}
-                ondrop={ctx.link().callback(|e|        AppEvent::HoverPlane(MouseEvent::from(e)))}/>
+                onpointerout={ctx.link().callback(|_|  AppEvent::LeavePlane)}/>
             </div>
             <div id="io-panel" data-main-hint="Editor plane settings">
                 <div id="plane-settings" data-main-hint="Editor plane settings">

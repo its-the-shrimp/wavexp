@@ -73,6 +73,7 @@
 				height: 6em
 			}
 			.button {
+				width: auto;
 				font: 1em consolas;
 				color: #0069E1;
 				border: solid 3px transparent;
@@ -174,15 +175,14 @@
 				flex-direction: column;
 				justify-content: start
 			}
-			#block-add-menu div {
+			#block-add-menu button {
 				flex: 1;
 				border: 3px solid transparent;
 				border-top-color: #0069E1;
 				border-bottom-color: #0069E1;
-				cursor: move;
-				user-select: none;
+				align-self: stretch;
 			}
-			#block-add-menu div:hover {
+			#block-add-menu button:hover {
 				border-style: dashed;
 				border-color: #0069E1
 			}

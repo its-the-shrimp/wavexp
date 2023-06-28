@@ -95,6 +95,22 @@ impl BoolExt for bool {
     }
 }
 
+// this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
+// them from containing types that don't implement `Sync`. On any other architecture this
+// limitation makes sense, but in Webassembly, which doesn't support threading, this limitation is meaningless.
+pub struct WasmCell<T>(T);
+
+unsafe impl<T> Sync for WasmCell<T> {}
+
+impl<T> Deref for WasmCell<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {&self.0}
+}
+
+impl<T> WasmCell<T> {
+    pub const fn new(val: T) -> Self {Self(val)}
+}
+
 #[allow(non_camel_case_types)]
 #[allow(dead_code)]
 pub mod js_types {
@@ -103,6 +119,16 @@ pub mod js_types {
 	pub type number = JsNumber;
 	pub type str = JsString;
 }
+
+#[macro_export]
+macro_rules! js_array {
+    ($($t:ident $v:expr),*) => {{
+        let res = $crate::js_sys::Array::new();
+        $( res.push(&*$crate::utils::js_types::$t::from($v)); )*
+        $crate::wasm_bindgen::JsValue::from(res)
+    }};
+}
+pub use js_array;
 
 #[macro_export]
 macro_rules! js_obj {
@@ -153,6 +179,14 @@ macro_rules! js_assert {
     };
 }
 pub use js_assert;
+
+#[macro_export]
+macro_rules! eval_once {
+    ($t:ty : $e:expr) => {{
+        static RES: $crate::utils::WasmCell<std::cell::OnceCell<$t>> = $crate::utils::WasmCell::new(std::cell::OnceCell::new());
+        RES.get_or_init(|| $e)
+    }};
+}
 
 pub fn window() -> HtmlWindow {
 	unsafe {web_sys::window().unwrap_unchecked()}
@@ -760,39 +794,39 @@ pub fn total_clamp<T: Ord>(x: T, mut min: T, mut max: T) -> T {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {pub x: i32, pub y: i32}
 
-impl const From<Point> for [i32; 2] {
+impl From<Point> for [i32; 2] {
     #[inline] fn from(value: Point) -> Self {
         [value.x, value.y]
     }
 }
 
-impl const Add for Point {
+impl Add for Point {
     type Output = Self;
     #[inline] fn add(self, rhs: Self) -> Self::Output {
         Self{x: self.x + rhs.x, y: self.y + rhs.y}
     }
 }
 
-impl const AddAssign for Point {
+impl AddAssign for Point {
     #[inline] fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs
     }
 }
 
-impl const Sub for Point {
+impl Sub for Point {
     type Output = Self;
     #[inline] fn sub(self, rhs: Self) -> Self::Output {
         Self{x: self.x - rhs.x, y: self.y - rhs.y}
     }
 }
 
-impl const SubAssign for Point {
+impl SubAssign for Point {
     #[inline] fn sub_assign(&mut self, rhs: Self) {
         *self = *self - rhs
     }
 }
 
-impl const Neg for Point {
+impl Neg for Point {
     type Output = Self;
     #[inline] fn neg(self) -> Self::Output {
         Self{x: -self.x, y: -self.y}
@@ -896,36 +930,36 @@ impl From<Point> for Rect {
 }
 
 impl Rect {
-    #[inline] pub const fn new(top_left: Point, bottom_right: Point) -> Self {
+    #[inline] pub fn new(top_left: Point, bottom_right: Point) -> Self {
         Self(top_left, bottom_right)
     }
 
-    #[inline] pub const fn zero(bottom_right: Point) -> Self {
+    #[inline] pub fn zero(bottom_right: Point) -> Self {
         Self(Point::ZERO, bottom_right)
     }
 
-    #[inline] pub const fn center(center: Point, half_sides: Point) -> Self {
+    #[inline] pub fn center(center: Point, half_sides: Point) -> Self {
         Self(center - half_sides, center + half_sides)
     }
 
-    #[inline] pub const fn zero_center(center: Point) -> Self {
+    #[inline] pub fn zero_center(center: Point) -> Self {
         Self(Point::ZERO, center + center)
     }
 
-    #[inline] pub const fn square(src: Point, side: i32) -> Self {
+    #[inline] pub fn square(src: Point, side: i32) -> Self {
         Self(src, src + Point{x: side, y: side})
     }
 
-    #[inline] pub const fn square_center(center: Point, half_side: i32) -> Self {
+    #[inline] pub fn square_center(center: Point, half_side: i32) -> Self {
         let half_sides = Point{x: half_side, y: half_side};
         Self(center - half_sides, center + half_sides)
     }
 
-    #[inline] pub const fn square_zero(side: i32) -> Self {
+    #[inline] pub fn square_zero(side: i32) -> Self {
         Self(Point::ZERO, Point{x: side, y: side})
     }
 
-    #[inline] pub const fn square_zero_center(half_side: i32) -> Self {
+    #[inline] pub fn square_zero_center(half_side: i32) -> Self {
         let side = half_side * 2;
         Self(Point::ZERO, Point{x: side, y: side})
     }

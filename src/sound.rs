@@ -4,7 +4,7 @@ use std::{
     f64::consts::PI,
     mem::{transmute, replace},
     cmp::Ordering,
-    rc::Rc};
+    rc::Rc, borrow::Cow};
 use js_sys::Math::random;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -22,7 +22,7 @@ use crate::{
         JsResultUtils,
         R64, R32,
         SaturatingInto, LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt},
-    input::Slider,
+    input::{Slider, Button},
     visual::{GraphEditor, Graphable},
     global::{AppContext, AppEvent},
     loc,
@@ -132,7 +132,7 @@ impl Note {
         self.0 as usize
     }
 
-    #[inline] pub const fn freq(&self) -> R32 {
+    #[inline] pub fn freq(&self) -> R32 {
         unsafe{*Self::FREQS.get_unchecked(self.0 as usize)}
     }
 
@@ -229,6 +229,7 @@ impl Graphable for PitchPoint {
     const Y_BOUND: Range<R64> = r64![0.0] .. r64![36.0];
     const SCALE_Y_BOUND: Range<R64> = r64![40.0] .. r64![40.0];
     const OFFSET_Y_BOUND: Range<R64> = r64![-2.0] .. r64![-2.0];
+    const Y_SNAP: R64 = r64![1.0];
     type Inner = ();
     type Event = (R64, Option<Note>);
 
@@ -265,6 +266,15 @@ impl Graphable for PitchPoint {
         Ok(res)
     }
 
+    fn draw_meta_held(canvas_size: [R64; 2], _: [R64; 2]) -> JsResult<Path2d> {
+        let res = Path2d::new().add_loc(loc!())?;
+        res.move_to(-*canvas_size[0], 0.0);
+        res.line_to( *canvas_size[0], 0.0);
+        res.move_to(0.0, -*canvas_size[1]);
+        res.line_to(0.0,  *canvas_size[1]);
+        Ok(res)
+    }
+
     #[inline] fn on_meta_click(loc: impl FnOnce() -> Option<[R64; 2]>) -> Option<Self::Event> {
         loc().map(|[x, y]| (x, Note::from_index(y.into()).recip().into()))
     }
@@ -279,6 +289,11 @@ impl Graphable for PitchPoint {
             format!("{x:.3}, {}", Note::from_index(y.into()).recip())
         } else {"--.---, --".to_owned()}
     }
+
+    #[inline] fn meta_held_hint(loc: Option<[R64; 2]>) -> Option<[Cow<'static, str>; 2]> {
+        Some(["Pitch Editor: adding new point".into(), loc.map_or_default(|[x, y]|
+            format!("Click to add a point at {x:.3}, {}", Note::from_index(y.into()).recip()).into())])
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +307,7 @@ impl Graphable for VolumePoint {
     const Y_BOUND: Range<R64> = r64![0.0] .. r64![10.0];
     const SCALE_Y_BOUND: Range<R64> = r64![12.0] .. r64![12.0];
     const OFFSET_Y_BOUND: Range<R64> = r64![-1.0] .. r64![-1.0];
+    const Y_SNAP: R64 = r64![0.0];
     type Inner = ();
     type Event = (R64, Option<R32>);
 
@@ -332,6 +348,15 @@ impl Graphable for VolumePoint {
         Ok(res)
     }
 
+    fn draw_meta_held(canvas_size: [R64; 2], _: [R64; 2]) -> JsResult<Path2d> {
+        let res = Path2d::new().add_loc(loc!())?;
+        res.move_to(-*canvas_size[0], 0.0);
+        res.line_to( *canvas_size[0], 0.0);
+        res.move_to(0.0, -*canvas_size[1]);
+        res.line_to(0.0,  *canvas_size[1]);
+        Ok(res)
+    }
+
     #[inline] fn in_hitbox(&self, point: [R64; 2]) -> bool {
         (*self.value * -10.0 + 10.0).loose_eq(*point[1] as f32, 0.25)
             && self.offset.loose_eq(point[0], 0.25)
@@ -342,10 +367,16 @@ impl Graphable for VolumePoint {
             format!("{x:.3}, {:.3}%", *y * 10.0)
         } else {"--.--- --%".to_owned()}
     }
+
+    #[inline] fn meta_held_hint(loc: Option<[R64; 2]>) -> Option<[Cow<'static, str>; 2]> {
+        Some(["Volume Editor: adding new point".into(), loc.map_or_default(|[x, y]|
+            format!("Click to add a point at {x:.3}, {:.3}%", *y * 10.0).into())])
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub enum Sound {
+    #[default] None,
     Note{gen: OscillatorNode, gain: GainNode,
         pitch: StateFulGraphEditor<PitchPoint>, volume: StateFulGraphEditor<VolumePoint>},
     Noise{gen: AudioBufferSourceNode, src: AudioBuffer,
@@ -395,6 +426,7 @@ impl Sound {
 
     #[inline] pub fn name(&self) -> &'static str {
         match self {
+            Sound::None => "Undefined",
             Sound::Note{..} => "Note",
             Sound::Noise{..} => "Noise"
         }
@@ -402,6 +434,8 @@ impl Sound {
 
     pub fn reset(&mut self, ctx: &AudioContext) -> JsResult<()> {
         Ok(match self {
+            Sound::None => (),
+
             Sound::Note{gen, gain, pitch, volume, ..} => {
                 pitch.reset();
                 volume.reset();
@@ -425,6 +459,8 @@ impl Sound {
 
     pub fn poll(&mut self, plug: &AudioNode, ctx: &SoundContext) -> JsResult<Secs> {
         Ok(match self {
+            Sound::None => Secs::INFINITY,
+
             Sound::Note{gen, gain, pitch, volume} => {
                 if pitch.state() == 0 {
                     gain.connect_with_audio_node(plug).add_loc(loc!())?;
@@ -473,6 +509,8 @@ impl Sound {
     /// expected guarantee: called in the same manner as `poll` would be called
     pub fn stop(&mut self, ctx: &SoundContext) -> JsResult<Secs> {
         Ok(match self {
+            Sound::None => Secs::INFINITY,
+
             Sound::Note{gen, gain, pitch, volume} => {
                 let off = (ctx.now - ctx.play_since).secs_to_beats(ctx.bps);
                 let pitch = pitch.finalise(off, |start, end, off| {
@@ -512,6 +550,7 @@ impl Sound {
 
     #[inline] pub fn len(&self) -> Beats {
         match self {
+            Sound::None => r64![1.0],
             Sound::Note{pitch, ..} =>
                 pitch.data().get(pitch.data().len() - 2)
                     .map_or(r64!{0.0}, |x| x.offset),
@@ -521,6 +560,8 @@ impl Sound {
 
     #[inline] pub fn tabs(&self) -> &'static [TabInfo] {
         match self {
+            Sound::None =>
+                &[TabInfo{name: "Choose Sound Type"}],
             Sound::Note{..} =>
                 &[TabInfo{name: "Volume"}, TabInfo{name: "Pitch"}],
             Sound::Noise{..} =>
@@ -530,6 +571,15 @@ impl Sound {
 
     pub fn params(&self, tab_id: usize, setter: Callback<AppEvent>) -> Html {
         match self {
+            Sound::None => html!{<div id="block-add-menu">
+                {for Sound::TYPES.iter().map(|x| html!{
+                    <Button name={x.name()}
+                        setter={setter.reform(|_| AppEvent::SetBlockType(*x))}>
+                        <p>{x.name()}</p>
+                    </Button>
+                })}
+            </div>},
+
             Sound::Note{pitch, volume, ..} => match tab_id {
                 0 /* Volume */ => html!{
                     <canvas ref={volume.canvas().clone()} class="blue-border"
@@ -571,6 +621,10 @@ impl Sound {
 
     pub fn handle_event(&mut self, event: &AppEvent, ctx: &AppContext) -> JsResult<Option<AppEvent>> {
         Ok(match self {
+            Sound::None => if let AppEvent::SetBlockType(ty) = event {
+                *self = Self::new(*ty, &ctx.audio_ctx).add_loc(loc!())?;
+            }.pipe(|_| None),
+
             Sound::Note{pitch, volume, ..} => match event {
                 AppEvent::FocusTab(e) => {
                     e.target_dyn_into::<Element>().to_js_result(loc!())?
@@ -619,7 +673,7 @@ impl Sound {
                     .handle_hover(None, ctx).add_loc(loc!())?
                     .pipe(|_| None),
 
-                AppEvent::AfterSetTab(0) |AppEvent::AfterSelect(_) => volume
+                AppEvent::AfterSetTab(0) |AppEvent::AfterSelect(_) |AppEvent::AfterSetBlockType(..) => volume
                     .init(|c| Ok([c.client_width() as u32, c.client_height() as u32]))
                     .add_loc(loc!())?.pipe(|_| None),
 
@@ -700,9 +754,9 @@ impl Graphable for PatternBlock {
     const Y_BOUND: Range<R64> = r64![0.0] .. R64::INFINITY;
     const SCALE_Y_BOUND: Range<R64> = r64![5.0] .. r64![30.0];
     const OFFSET_Y_BOUND: Range<R64> = r64![-1.0] .. R64::INFINITY;
+    const Y_SNAP: R64 = r64![1.0];
     type Inner = Sound;
     type Event = AppEvent;
-    type Draggable = SoundType;
 
     #[inline] fn inner(&self) -> &Self::Inner {
         &self.sound
@@ -735,6 +789,15 @@ impl Graphable for PatternBlock {
         Ok(res)
     }
 
+    fn draw_meta_held(canvas_size: [R64; 2], _: [R64; 2]) -> JsResult<Path2d> {
+        let res = Path2d::new().add_loc(loc!())?;
+        res.move_to(-*canvas_size[0], 0.0);
+        res.line_to( *canvas_size[0], 0.0);
+        res.move_to(0.0, -*canvas_size[1]);
+        res.line_to(0.0,  *canvas_size[1]);
+        Ok(res)
+    }
+
     #[inline] fn in_hitbox(&self, point: [R64; 2]) -> bool {
         self.layer == *point[1] as i32
             && (self.offset .. self.offset + self.sound.len()).contains(&point[0])
@@ -750,23 +813,13 @@ impl Graphable for PatternBlock {
         Some(AppEvent::Select(self_id))
     }
 
-    #[inline] fn on_drop_in(value: Self::Draggable, loc: impl FnOnce() -> [R64; 2]) -> Option<Self::Event> {
-        let loc = loc();
-        Some(AppEvent::Add(value, loc[1].into(), loc[0]))
+    #[inline] fn on_meta_click(loc: impl FnOnce() -> Option<[R64; 2]>) -> Option<Self::Event> {
+        loc().map(|[x, y]| AppEvent::Add(y.into(), x))
     }
 
-    #[inline] fn draw_draggable(_draggable: Self::Draggable, canvas_size: [R64; 2], scale: [R64; 2])
-    -> JsResult<Path2d> {
-        let res = Path2d::new().add_loc(loc!())?;
-        let step = [canvas_size[0] / scale[0], canvas_size[1] / scale[1]];
-        let [[x1, x2], [y1, y2]] = step.map(|x| [x / -2i8, x / 2i8]);
-        res.move_to(*x1, *y1);
-        res.line_to(*x2, *y1);
-        res.move_to(0.0, *y1);
-        res.line_to(0.0, *y2);
-        res.move_to(*x1, *y2);
-        res.line_to(*x2, *y2);
-        Ok(res)
+    #[inline] fn meta_held_hint(loc: Option<[R64; 2]>) -> Option<[Cow<'static, str>; 2]> {
+        Some(["Editor plane: adding new block".into(), loc.map_or_default(|[x, y]|
+            format!("Click to add a block at {x:.3}, layer {y:.0}").into())])
     }
 }
 
@@ -781,24 +834,23 @@ pub struct Sequencer {
     pattern: GraphEditor<PatternBlock>,
     pending: Vec<(usize, Secs)>,
     state: SequencerState,
-    audio_ctx: AudioContext,
     plug: DynamicsCompressorNode,
     gain: GainNode
 }
 
 impl Sequencer {
-    #[inline] pub fn new(audio_ctx: AudioContext, visualiser: Rc<AnalyserNode>) -> JsResult<Self> {
-        let plug = DynamicsCompressorNode::new(&audio_ctx).add_loc(loc!())?;
+    #[inline] pub fn new(audio_ctx: &AudioContext, visualiser: Rc<AnalyserNode>) -> JsResult<Self> {
+        let plug = DynamicsCompressorNode::new(audio_ctx).add_loc(loc!())?;
         plug.ratio().set_value(20.0);
         plug.release().set_value(1.0);
-        let gain = GainNode::new(&audio_ctx).add_loc(loc!())?;
+        let gain = GainNode::new(audio_ctx).add_loc(loc!())?;
         gain.gain().set_value(0.2);
 
         plug.connect_with_audio_node(&visualiser).add_loc(loc!())?
             .connect_with_audio_node(&gain).add_loc(loc!())?
             .connect_with_audio_node(&audio_ctx.destination()).add_loc(loc!())?;
 
-        Ok(Self{audio_ctx, plug, gain,
+        Ok(Self{plug, gain,
             pattern: GraphEditor::new(vec![]), pending: vec![], state: SequencerState::None})
     }
 
@@ -820,9 +872,8 @@ impl Sequencer {
 
     pub fn handle_event(&mut self, event: &AppEvent, ctx: &AppContext) -> JsResult<Option<AppEvent>> {
         Ok(match event {
-            &AppEvent::Add(ty, layer, offset) => self.pattern.add_point(PatternBlock{
-                sound: Sound::new(ty, &self.audio_ctx).add_loc(loc!())?,
-                layer, offset})
+            &AppEvent::Add(layer, offset) => self.pattern
+                .add_point(PatternBlock{sound: Sound::default(), layer, offset})
                 .pipe(|_| None),
 
             AppEvent::Select(mut id) => {
@@ -836,7 +887,7 @@ impl Sequencer {
 
             AppEvent::TogglePlay => if let SequencerState::None = self.state {
                 for mut block in self.pattern.iter_mut() {
-                    block.inner().reset(&self.audio_ctx).add_loc(loc!())?;
+                    block.inner().reset(&ctx.audio_ctx).add_loc(loc!())?;
                 }
                 SequencerState::Start
             } else {
@@ -873,11 +924,6 @@ impl Sequencer {
             AppEvent::LeavePlane => self.pattern.handle_hover(None, ctx)
                 .add_loc(loc!())?,
 
-            AppEvent::SetBlockAdd(d) => {
-                self.pattern.set_draggable(*d);
-                None
-            }
-
             AppEvent::MasterGain(value) => self.gain.gain()
                 .set_value(**value).pipe(|_| None),
 
@@ -909,14 +955,14 @@ impl Sequencer {
 
                     SequencerState::Stop => {
                         let mut err = Ok(());
-                        self.pending.drain_filter(|(id, when)| unsafe {
+                        self.pending.extract_if(|(id, when)| unsafe {
                             let mut block = self.pattern.get_unchecked_mut(*id);
                             sound_ctx.play_since += block.offset.to_secs(ctx.bps);
                             *when = block.inner().stop(&sound_ctx).add_loc(loc!())
                                 .unwrap_or_else(|x| {err = Err(x); R64::INFINITY});
                             sound_ctx.play_since = ctx.play_since;
                             when.is_infinite()
-                        });
+                        }).for_each(|_|());
                         err?;
                         self.state = SequencerState::None;
                     }

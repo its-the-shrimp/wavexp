@@ -6,7 +6,7 @@
 #![feature(const_trait_impl)]
 #![feature(const_mut_refs)]
 #![feature(array_windows)]
-#![feature(drain_filter)]
+#![feature(extract_if)]
 #![feature(associated_type_defaults)]
 #![feature(const_range_bounds)]
 #![allow(clippy::unit_arg)]
@@ -18,6 +18,11 @@ mod utils;
 mod input;
 mod sound;
 mod global;
+
+pub use js_sys;
+pub use wasm_bindgen;
+pub use yew;
+pub use web_sys;
 
 fn main() {
     yew::Renderer::<global::App>::new().render();
