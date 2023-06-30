@@ -373,13 +373,17 @@ impl<'a, T: Graphable> GraphPointView<'a, T> {
     }
 }
 
+impl<'a, T: Graphable> GraphPointView<'a, T> {
+    #[inline] pub unsafe fn unlock(self) -> &'a mut T {self.0}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum Focus {
     #[default] None,
     HoverPlane,
     HoverPoint(usize),
     MovePlane(Point),
-    MovePoint(usize),
+    MovePoint(usize, Point),
     HoverPlaneWShift(Point),
     ZoomPlane{init_offset: Point, pivot: Point, init_scale_x: R64, init_scale_y: R64},
     HoverPlaneWMeta(Point, bool, Path2d)
@@ -426,6 +430,12 @@ impl<T: Graphable> GraphEditor<T> {
 
     #[inline] pub fn data(&self) -> &[T] {&self.data}
 
+    #[inline] pub fn len(&self) -> usize {self.data.len()}
+
+    #[inline] pub unsafe fn get_unchecked(&self, index: usize) -> &T {
+        self.data.get_unchecked(index)
+    }
+
     #[inline] pub unsafe fn get_unchecked_mut(&mut self, index: usize)
     -> GraphPointView<'_, T> {
         GraphPointView(self.data.get_unchecked_mut(index))
@@ -450,15 +460,6 @@ impl<T: Graphable> GraphEditor<T> {
     #[inline] pub fn fix_point(&mut self, index: Option<usize>) -> JsResult<()> {
         if let Some(index) = index {js_assert!(index < self.data.len())?}
         Ok(self.fixed = index)
-    }
-
-    /// modify the point at `index` freely in a closure through a mutable reference
-    /// unlike `get_mut`, this method allows moving the point
-    #[inline] pub fn modify_point(&mut self, index: usize, f: impl FnOnce(&mut T)) -> JsResult<()> {
-        let point = self.data.get_mut(index).to_js_result(loc!())?;
-        f(point);
-        unsafe{self.data.reorder_unchecked_by_key(index, |x| x.loc()[0])};
-        Ok(())
     }
 
     #[inline] pub fn fixed_id(&self) -> Option<usize> {
@@ -499,9 +500,8 @@ impl<T: Graphable> GraphEditor<T> {
         Ok(self.redraw = true)
     }
 
-    /// the returned IDs are (back, front)
-    #[inline] fn id_by_pos(&self, x: R64, y: R64) -> Option<usize> {
-        self.data.iter().position(|point| point.in_hitbox([x, y]))
+    #[inline] fn point_by_pos(&self, x: R64, y: R64) -> Option<(usize, &T)> {
+        self.data.iter().enumerate().find(|(_, p)| p.in_hitbox([x, y]))
     }
 
     #[inline] fn set_focus(&mut self, focus: Focus) {
@@ -539,13 +539,15 @@ impl<T: Graphable> GraphEditor<T> {
                 (true, true, _) =>
                     Some(zoom_plane_focus()),
                 (true, false, _) =>
-                    self.id_by_pos(x, y)
+                    self.point_by_pos(x, y)
+                        .map(|(id, p)| (id, p.loc()))
                         .map_or_else(|| Focus::MovePlane(event.point - self.offset),
-                            Focus::MovePoint).into(),
+                            |(id, [x, y])| Focus::MovePoint(id, event.point - Point{x: (x * step_x).into(), y: (y * step_y).into()}))
+                        .into(),
                 (false, true, _) =>
                     Some(Focus::HoverPlaneWShift(event.point)),
                 (false, false, _) =>
-                    self.id_by_pos(x, y).map(Focus::HoverPoint)
+                    self.point_by_pos(x, y).map(|(id, _)| Focus::HoverPoint(id))
             }.map(|x| self.set_focus(x)).pipe(|_| None),
 
             Focus::HoverPoint(id) => match (event.left, event.shift, event.meta) {
@@ -553,7 +555,9 @@ impl<T: Graphable> GraphEditor<T> {
                     Some(Focus::HoverPlaneWMeta(event.point, x,
                         T::draw_meta_held([w.into(), h.into()], [self.scale_x, self.scale_y]).add_loc(loc!())?)),
                 (true, true, _) => Some(zoom_plane_focus()),
-                (true, false, _) => Some(Focus::MovePoint(id)),
+                (true, false, _) =>
+                    Some(Focus::MovePoint(id,
+                        event.point - unsafe{self.data.get_unchecked(id)}.loc().pipe(|[x, y]| Point::from([x * step_x, y * step_y])))),
                 (false, true, _) => Some(Focus::HoverPlaneWShift(event.point)),
                 (false, false, _) =>
                     unsafe{self.data.get_unchecked(id)}.in_hitbox([x, y])
@@ -577,15 +581,15 @@ impl<T: Graphable> GraphEditor<T> {
                 T::on_select(None)
             }.tee(|_| self.redraw = true),
 
-            Focus::MovePoint(id) => if event.left {
+            Focus::MovePoint(id, offset) => if event.left {
                 let n_points = self.data.len();
                 let point = unsafe{self.data.get_unchecked_mut(id)};
                 let res = point.set_loc(n_points, id,
-                    || T::X_BOUND.fit(R64::from(event.point.x) / step_x).floor_to(ctx.snap_step),
-                    || T::Y_BOUND.fit(R64::from(event.point.y) / step_y).floor_to(T::Y_SNAP));
+                    || T::X_BOUND.fit(R64::from(event.point.x - offset.x) / step_x).floor_to(ctx.snap_step),
+                    || T::Y_BOUND.fit(R64::from(event.point.y - offset.y) / step_y).floor_to(T::Y_SNAP));
                 let new_id = unsafe{self.data.reorder_unchecked_by_key(id, |x| x.loc()[0])};
                 if new_id != id {
-                    self.focus = Focus::MovePoint(new_id);
+                    self.focus = Focus::MovePoint(new_id, offset);
                     if let Some(ref mut x) = self.fixed.filter(|x| *x == id) {
                         *x = new_id;
                     } else if let Some(ref mut x) = self.fixed.filter(|x| new_id < id && *x < id && *x >= new_id) {
@@ -604,9 +608,10 @@ impl<T: Graphable> GraphEditor<T> {
                 (true, true) => 
                     self.focus = zoom_plane_focus(),
                 (true, false) =>
-                    self.focus = self.id_by_pos(x, y)
+                    self.focus = self.point_by_pos(x, y)
+                        .map(|(id, p)| (id, p.loc()))
                         .map_or_else(|| Focus::MovePlane(event.point - self.offset),
-                            Focus::MovePoint),
+                            |(id, [x, y])| Focus::MovePoint(id, event.point - Point{x: (x * step_x).into(), y: (y * step_y).into()})),
                 (false, true) => *point = event.point,
                 (false, false) => self.focus = Focus::HoverPlane,
             }.pipe(|_| {self.redraw = true; None}),
@@ -640,9 +645,10 @@ impl<T: Graphable> GraphEditor<T> {
                     None
                 }
                 (true, false, false) => {
-                    self.focus = self.id_by_pos(x, y)
+                    self.focus = self.point_by_pos(x, y)
+                        .map(|(id, p)| (id, p.loc()))
                         .map_or_else(|| Focus::MovePlane(event.point - self.offset),
-                            Focus::MovePoint);
+                            |(id, [x, y])| Focus::MovePoint(id, event.point - Point{x: (x * step_x).into(), y: (y * step_y).into()}));
                     None
                 }
                 (true, false, true) => {
@@ -735,7 +741,7 @@ impl<T: Graphable> GraphEditor<T> {
 
                 Focus::MovePlane(_) => Some([T::EDITOR_NAME.into(), "Dragging".into()]),
 
-                Focus::MovePoint(id) => {
+                Focus::MovePoint(id, _) => {
                     let point = unsafe{self.data.get_unchecked(*id)};
                     Some([format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc().into())).into(),
                         "Dragging".into()])

@@ -6,7 +6,6 @@
 #![feature(const_trait_impl)]
 #![feature(const_mut_refs)]
 #![feature(array_windows)]
-#![feature(extract_if)]
 #![feature(associated_type_defaults)]
 #![feature(const_range_bounds)]
 #![allow(clippy::unit_arg)]

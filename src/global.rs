@@ -19,7 +19,7 @@ use yew::{
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, PatternBlock, SoundContext, FromBeats},
     visual::{HintHandler, SoundVisualiser, Graphable},
-    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, BoolExt},
+    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult},
     input::{Button, Slider, Switch},
     loc, r64, js_try};
 
@@ -42,6 +42,8 @@ pub enum AppEvent {
     TogglePlay,
     /// epllog version of `TogglePlay`
     AfterTogglePlay,
+    /// emitted when the audio has actually started playing
+    AudioStarted(Secs),
     /// emitted when the user selects a sound block to edit in the side editor
     Select(Option<usize>),
     /// epliog version of `Select`
@@ -102,6 +104,7 @@ impl AppEvent {
             | Self::AfterSetTab(..)
             | Self::AfterSelect(..)
             | Self::AfterTogglePlay
+            | Self::AudioStarted(..)
             | Self::AfterRemove
             | Self::AfterSetBlockType(..)
             | Self::SetHint(..)
@@ -155,8 +158,10 @@ impl AppContext {
         match event {
             AppEvent::Bpm(bpm) =>
                 self.bps = *bpm / 60u8,
+            AppEvent::AudioStarted(at) =>
+                self.play_since = *at,
             AppEvent::TogglePlay =>
-                self.play_since = self.play_since.is_finite().choose(Secs::NEG_INFINITY, self.now),
+                self.play_since = R64::NEG_INFINITY,
             AppEvent::Frame(now) =>
                 self.now = *now / 1000u16,
             AppEvent::SnapStep(value) =>

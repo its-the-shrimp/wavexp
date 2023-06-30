@@ -230,6 +230,7 @@ pub trait OptionExt<T> {
     fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
     fn choose<U>(&self, on_some: U, on_none: U) -> U;
     fn drop(self) -> Option<()>;
+    fn get_or_try_insert<E>(&mut self, f: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E>;
 }
 
 pub trait JsResultUtils<T>: Sized {
@@ -287,6 +288,13 @@ impl<T> OptionExt<T> for Option<T> {
     #[allow(clippy::manual_map)]
     #[inline] fn drop(self) -> Option<()> {
         match self {Some(_) => Some(()), None => None}
+    }
+
+    #[inline] fn get_or_try_insert<E>(&mut self, f: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E> {
+        if self.is_none() {
+            *self = Some(f()?);
+        }
+        Ok(unsafe{self.as_mut().unwrap_unchecked()})
     }
 }
 
@@ -800,6 +808,12 @@ impl From<Point> for [i32; 2] {
     }
 }
 
+impl From<[R64; 2]> for Point {
+    #[inline] fn from(value: [R64; 2]) -> Self {
+        Point{x: value[0].into(), y: value[1].into()}
+    }
+}
+
 impl Add for Point {
     type Output = Self;
     #[inline] fn add(self, rhs: Self) -> Self::Output {
@@ -870,6 +884,10 @@ impl Point {
 
     #[inline]
     pub fn shift_y(self, off: i32) -> Self {Self{x: self.x, y: self.y + off}}
+
+    #[inline] pub fn scale(self, coeffs: [R64; 2]) -> Self {
+        Self{x: (coeffs[0] * self.x).into(), y: (coeffs[1] * self.y).into()}
+    }
 
     #[inline] pub fn map<T>(self, mut f: impl FnMut(i32) -> T) -> [T; 2] {
         [f(self.x), f(self.y)]

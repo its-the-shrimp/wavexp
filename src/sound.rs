@@ -1,12 +1,11 @@
 use std::{
-    ops::{Add, Sub, Neg, Range, Deref, DerefMut},
+    ops::{Add, Sub, Neg, Range},
     fmt::{self, Display, Formatter, Debug},
     f64::consts::PI,
-    mem::{transmute, replace},
+    mem::transmute,
     cmp::Ordering,
     rc::Rc, borrow::Cow};
 use js_sys::Math::random;
-use wasm_bindgen::JsCast;
 use web_sys::{
     AudioNode,
     AudioContext,
@@ -14,14 +13,14 @@ use web_sys::{
     AudioBufferSourceNode,
     AudioBuffer,
     GainNode,
-    Path2d, MouseEvent, Element, DynamicsCompressorNode, AnalyserNode, HtmlElement, DragEvent};
+    Path2d, MouseEvent, Element, DynamicsCompressorNode, AnalyserNode, HtmlElement};
 use yew::{html, Html, TargetCast, Callback, NodeRef};
 use crate::{
     utils::{
         JsResult,
         JsResultUtils,
         R64, R32,
-        SaturatingInto, LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt},
+        SaturatingInto, LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt, js_error},
     input::{Slider, Button},
     visual::{GraphEditor, Graphable},
     global::{AppContext, AppEvent},
@@ -141,63 +140,6 @@ impl Note {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct StateFulGraphEditor<T: Graphable> {
-    editor: GraphEditor<T>,
-    state: usize
-}
-
-impl<T: Graphable> Deref for StateFulGraphEditor<T> {
-    type Target = GraphEditor<T>;
-    #[inline] fn deref(&self) -> &Self::Target {
-        &self.editor
-    }
-}
-
-impl<T: Graphable> DerefMut for StateFulGraphEditor<T> {
-    #[inline] fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.editor
-    }
-}
-
-impl<T: Graphable> From<GraphEditor<T>> for StateFulGraphEditor<T> {
-    #[inline] fn from(editor: GraphEditor<T>) -> Self {
-        Self{editor, state: 0}
-    }
-}
-
-impl<T: Graphable> StateFulGraphEditor<T> {
-    #[inline] pub fn state(&self) -> usize {self.state}
-
-    /// resets the iteration state
-    #[inline] pub fn reset(&mut self) {self.state = 0}
-
-    /// returns the next element that hasn't been polled yet, if such exists, without advancing the iteration state
-    #[inline] fn peek(&self) -> Option<&T> {self.data().get(self.state)}
-
-    /// arguments to `f` are all the points before `at` that haven't been polled yet, and the next
-    /// point after `at`, which isn't polled with this call.
-    /// if there's no next point, `f` won't be called and `None` will be returned
-    #[inline] pub fn poll<R>(&mut self, at: R64, f: impl FnOnce(&[T], &T) -> R) -> Option<R> {
-        let Self{editor, state} = self;
-        let prevs = editor.data().get(*state..)?.split(|x| x.loc()[0] > at).next()?;
-        *state += prevs.len();
-        Some(f(prevs, editor.data().get(*state)?))
-    }
-
-
-    /// arguments to `f` are: the penultimate point, the ultimate point and `at` relative to the
-    /// penultimate point, which means it can be negative
-    /// if there are less than 2 points, `f` won't be called and `None` will be returned
-    #[inline] pub fn finalise<R>(&mut self, at: R64, f: impl FnOnce(&T, &T, R64) -> R) -> Option<R> {
-        let Self{editor, state} = self;
-        let [.., penultimate, ultimate] = editor.data() else {return None};
-        let len = editor.data().len();
-        if *state < len - 2 {*state = len - 2}
-        Some(f(penultimate, ultimate, at - penultimate.loc()[0]))
-    }
-}
-
 pub struct TabInfo {
     pub name: &'static str
 }
@@ -231,7 +173,7 @@ impl Graphable for PitchPoint {
     const OFFSET_Y_BOUND: Range<R64> = r64![-2.0] .. r64![-2.0];
     const Y_SNAP: R64 = r64![1.0];
     type Inner = ();
-    type Event = (R64, Option<Note>);
+    type Event = (R64, Note);
 
     #[inline] fn inner(&self) -> &Self::Inner {&()}
     #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {
@@ -245,13 +187,10 @@ impl Graphable for PitchPoint {
     #[inline] fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R64, y: impl FnOnce() -> R64)
     -> Option<Self::Event> {
         self.value = Note::from_index(y().into()).recip();
-        if self_id == n_points - 2 {
-            let old = replace(&mut self.offset, x());
-            (old != self.offset).then_some((self.offset, None))
-        } else if self_id != 0 {
+        if ![0, n_points - 2].contains(&self_id) {
             self.offset = x();
-            None
-        } else {None}
+        }
+        None
     }
 
     fn draw(&self, next: Option<&Self>, mapper: impl Fn([f64; 2]) -> [f64; 2]) -> JsResult<Path2d> {
@@ -276,7 +215,7 @@ impl Graphable for PitchPoint {
     }
 
     #[inline] fn on_meta_click(loc: impl FnOnce() -> Option<[R64; 2]>) -> Option<Self::Event> {
-        loc().map(|[x, y]| (x, Note::from_index(y.into()).recip().into()))
+        loc().map(|[x, y]| (x, Note::from_index(y.into()).recip()))
     }
 
     #[inline] fn in_hitbox(&self, point: [R64; 2]) -> bool {
@@ -309,7 +248,7 @@ impl Graphable for VolumePoint {
     const OFFSET_Y_BOUND: Range<R64> = r64![-1.0] .. r64![-1.0];
     const Y_SNAP: R64 = r64![0.0];
     type Inner = ();
-    type Event = (R64, Option<R32>);
+    type Event = (R64, R32);
 
     #[inline] fn inner(&self) -> &Self::Inner {&()}
     #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {
@@ -323,17 +262,14 @@ impl Graphable for VolumePoint {
     #[inline] fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R64, y: impl FnOnce() -> R64)
     -> Option<Self::Event> {
         self.value = (y() / -10i8 + 1u8).into();
-        if self_id == n_points - 2 {
-            let old = replace(&mut self.offset, x());
-            (old != self.offset).then_some((self.offset, None))
-        } else if self_id != 0 {
+        if ![0, n_points - 2].contains(&self_id) {
             self.offset = x();
-            None
-        } else {None}
+        }
+        None
     }
 
     #[inline] fn on_meta_click(loc: impl FnOnce() -> Option<[R64; 2]>) -> Option<Self::Event> {
-        loc().map(|[x, y]| (x, Some(R32::from(y) / -10i8 + 1u8)))
+        loc().map(|[x, y]| (x, R32::from(y) / -10i8 + 1u8))
     }
 
     fn draw(&self, next: Option<&Self>, mapper: impl Fn([f64; 2]) -> [f64; 2]) -> JsResult<Path2d> {
@@ -378,9 +314,9 @@ impl Graphable for VolumePoint {
 pub enum Sound {
     #[default] None,
     Note{gen: OscillatorNode, gain: GainNode,
-        pitch: StateFulGraphEditor<PitchPoint>, volume: StateFulGraphEditor<VolumePoint>},
+        pitch: GraphEditor<PitchPoint>, volume: GraphEditor<VolumePoint>},
     Noise{gen: AudioBufferSourceNode, src: AudioBuffer,
-        gain: GainNode, len: Beats, started: bool}
+        gain: GainNode, len: Beats}
 }
 
 impl Sound {
@@ -402,11 +338,11 @@ impl Sound {
                     pitch: GraphEditor::new(vec![
                         PitchPoint{offset: r64![0.0], value: Note::MAX},
                         PitchPoint{offset: r64![1.0], value: Note::MAX},
-                        PitchPoint{offset: r64![1.5], value: Note::MIN}]).into(),
+                        PitchPoint{offset: r64![1.5], value: Note::MIN}]),
                     volume: GraphEditor::new(vec![
                         VolumePoint{offset: r64![0.0], value: r32![1.0]},
                         VolumePoint{offset: r64![1.0], value: r32![1.0]},
-                        VolumePoint{offset: r64![1.5], value: r32![0.0]}]).into()}
+                        VolumePoint{offset: r64![1.5], value: r32![0.0]}])}
             }
 
             SoundType::Noise => {
@@ -419,7 +355,7 @@ impl Sound {
                 let gain = ctx.create_gain().add_loc(loc!())?;
                 gain.gain().set_value(0.2);
                 Self::Noise{gen: ctx.create_buffer_source().add_loc(loc!())?,
-                    src, gain, len: r64![1.0], started: false}
+                    src, gain, len: r64![1.0]}
             }
         })
     }
@@ -432,118 +368,82 @@ impl Sound {
         }
     }
 
-    pub fn reset(&mut self, ctx: &AudioContext) -> JsResult<()> {
+    /// called before starting to play the sounds to reset their state and allow them to schedule
+    /// their starting events
+    pub fn reset(&mut self, ctx: &AppContext, self_id: usize, self_offset: Beats, mut scheduler: impl FnMut(SoundEvent))
+    -> JsResult<()> {
         Ok(match self {
             Sound::None => (),
 
             Sound::Note{gen, gain, pitch, volume, ..} => {
-                pitch.reset();
-                volume.reset();
                 gen.frequency().cancel_scheduled_values(0.0).add_loc(loc!())?
-                    .set_value(*pitch.peek().to_js_result(loc!())?.value.freq());
+                    .set_value(*unsafe{pitch.get_unchecked(0)}.value.freq());
+                scheduler(SoundEvent::Pitch{id: self_id, when: self_offset, state: 0});
+
                 gain.gain().cancel_scheduled_values(0.0).add_loc(loc!())?
-                    .set_value(*volume.peek().to_js_result(loc!())?.value);
+                    .set_value(*unsafe{volume.get_unchecked(0)}.value);
+                scheduler(SoundEvent::Volume{id: self_id, when: self_offset, state: 0});
             }
 
-            Sound::Noise{gen, src, started, gain, ..} => {
-                *started = false;
+            Sound::Noise{gen, src, gain, ..} => {
                 gen.disconnect().add_loc(loc!())?;
-                *gen = ctx.create_buffer_source().add_loc(loc!())?;
+                *gen = ctx.audio_ctx.create_buffer_source().add_loc(loc!())?;
                 gen.set_loop(true);
                 gen.set_buffer(Some(src));
                 gen.start().add_loc(loc!())?;
                 gen.connect_with_audio_node(gain).add_loc(loc!())?;
+                scheduler(SoundEvent::Start{id: self_id, when: self_offset})
             }
         })
     }
 
-    pub fn poll(&mut self, plug: &AudioNode, ctx: &SoundContext) -> JsResult<Secs> {
+    pub fn poll(&mut self, plug: &AudioNode, ctx: &SoundContext, src: SoundEvent, mut scheduler: impl FnMut(SoundEvent)) -> JsResult<()> {
         Ok(match self {
-            Sound::None => Secs::INFINITY,
+            Sound::None => (),
 
-            Sound::Note{gen, gain, pitch, volume} => {
-                if pitch.state() == 0 {
+            Sound::Note{gen, gain, pitch, volume} => match src {
+                SoundEvent::Pitch{id, when, mut state} => {
+                    if state == 0 {pitch.force_redraw()}
+                    state += 1;
+                    if let Some(PitchPoint{offset, value}) = pitch.data().get(state) {
+                        let when = when + offset;
+                        gen.frequency().linear_ramp_to_value_at_time(*value.freq(),
+                            *when.to_secs(ctx.bps) + *ctx.play_since).add_loc(loc!())?;
+                        scheduler(SoundEvent::Pitch{id, when, state})
+                    }
+                }
+
+                SoundEvent::Volume{id, when, mut state} => {
+                    if state == 0 {
+                        volume.force_redraw();
+                        gain.connect_with_audio_node(plug).add_loc(loc!())?;
+                    }
+                    state += 1;
+                    if let Some(VolumePoint{offset, value}) = volume.data().get(state) {
+                        let when = when + offset;
+                        gain.gain().linear_ramp_to_value_at_time(**value,
+                            *when.to_secs(ctx.bps) + *ctx.play_since).add_loc(loc!())?;
+                        scheduler(SoundEvent::Volume{id, when, state})
+                    }
+                }
+
+                SoundEvent::Stop{..} => gain.disconnect().add_loc(loc!())?,
+
+                src => js_error(format!("invalid event: {src:?}"), loc!())?,
+            }
+
+            Sound::Noise{gen, gain, len, ..} => match src {
+                SoundEvent::Start{id, ..} => {
                     gain.connect_with_audio_node(plug).add_loc(loc!())?;
-                    pitch.force_redraw();
-                    volume.force_redraw();
+                    scheduler(SoundEvent::Stop{id, when: *len});
                 }
-                let off = (ctx.now - ctx.play_since).secs_to_beats(ctx.bps);
 
-                let pitch_next = pitch.poll(off, |prevs, next| {
-                    let [.., cur] = prevs else {return Ok(Secs::INFINITY)};
-                    let res = ctx.now + *(next.offset - cur.offset).to_secs(ctx.bps);
-                    gen.frequency()
-                        .linear_ramp_to_value_at_time(*next.value.freq(), *res)
-                        .add_loc(loc!()).map(|_| res)
-                }).transpose()?;
-                let vol_next = volume.poll(off, |prevs, next| {
-                    let [.., cur] = prevs else {return Ok(Secs::INFINITY)};
-                    let res = ctx.now + *(next.offset - cur.offset).to_secs(ctx.bps);
-                    gain.gain()
-                        .linear_ramp_to_value_at_time(*next.value, *res)
-                        .add_loc(loc!()).map(|_| res)
-                }).transpose()?;
-
-                match (pitch_next, vol_next) {
-                    (None, None) => {
-                        gain.disconnect().add_loc(loc!())?;
-                        Secs::INFINITY
-                    }
-                    (Some(pitch), Some(volume)) => volume.min(pitch),
-                    (_, Some(val)) | (Some(val), _) => val
-                }
-            }
-
-            Sound::Noise{gain, len, started, ..} => if *started {
-                gain.disconnect().add_loc(loc!())?;
-                Secs::INFINITY
-            } else {
-                *started = true;
-                gain.connect_with_audio_node(plug).add_loc(loc!())?;
-                len.to_secs(ctx.bps) + ctx.now
-            }
-        })
-    }
-
-    /// given guarantee: always stop the sound properly regardless of whether an error is returned
-    /// expected guarantee: called in the same manner as `poll` would be called
-    pub fn stop(&mut self, ctx: &SoundContext) -> JsResult<Secs> {
-        Ok(match self {
-            Sound::None => Secs::INFINITY,
-
-            Sound::Note{gen, gain, pitch, volume} => {
-                let off = (ctx.now - ctx.play_since).secs_to_beats(ctx.bps);
-                let pitch = pitch.finalise(off, |start, end, off| {
-                    let res = ctx.now + (end.offset - start.offset).to_secs(ctx.bps);
-                    if *off <= 0.0 {
-                        gen.frequency().cancel_scheduled_values(0.0).add_loc(loc!())?
-                            .linear_ramp_to_value_at_time(*end.value.freq(), *res)
-                            .add_loc(loc!())?;
-                    }
-                    Ok(res)
-                }).transpose().add_loc(loc!())?;
-                let volume = volume.finalise(off, |start, end, off| {
-                    let res = ctx.now + (end.offset - start.offset).to_secs(ctx.bps);
-                    if *off <= 0.0 {
-                        gain.gain().cancel_scheduled_values(0.0).add_loc(loc!())?
-                            .linear_ramp_to_value_at_time(*end.value, *res)
-                            .add_loc(loc!())?;
-                    }
-                    Ok(res)
-                }).transpose().add_loc(loc!())?;
-
-                if let Some((x, y)) = pitch.zip(volume) {
-                    x.max(y)
-                } else {
+                SoundEvent::Stop{..} => {
                     gain.disconnect().add_loc(loc!())?;
-                    Secs::INFINITY
+                    gen.disconnect().add_loc(loc!())?;
                 }
-            }
 
-            Sound::Noise{gen, gain, ..} => {
-                gen.disconnect().add_loc(loc!())?;
-                gain.disconnect().add_loc(loc!())?;
-                Beats::INFINITY
+                src => js_error(format!("invalid event: {src:?}"), loc!())?,
             }
         })
     }
@@ -563,7 +463,7 @@ impl Sound {
             Sound::None =>
                 &[TabInfo{name: "Choose Sound Type"}],
             Sound::Note{..} =>
-                &[TabInfo{name: "Volume"}, TabInfo{name: "Pitch"}],
+                &[TabInfo{name: "General"}, TabInfo{name: "Volume"}, TabInfo{name: "Pitch"}],
             Sound::Noise{..} =>
                 &[TabInfo{name: "General"}, TabInfo{name: "Volume"}]
         }
@@ -581,7 +481,14 @@ impl Sound {
             </div>},
 
             Sound::Note{pitch, volume, ..} => match tab_id {
-                0 /* Volume */ => html!{
+                0 /* General */ => html!{<div id="inputs">
+                    <Slider key="note-dur"
+                    setter={setter.reform(AppEvent::Duration)}
+                    max={r64![100.0]}
+                    name="Note Duration" postfix="Beats"
+                    initial={self.len()}/>
+                </div>},
+                1 /* Volume */ => html!{
                     <canvas ref={volume.canvas().clone()} class="blue-border"
                     onpointerdown={setter.reform(AppEvent::FocusTab)}
                     onpointerup={setter.reform(|e| AppEvent::HoverTab(MouseEvent::from(e)))}
@@ -589,7 +496,7 @@ impl Sound {
                     onpointerout={setter.reform(|_| AppEvent::LeaveTab)}
                     ondblclick={setter.reform(AppEvent::DoubleClickTab)}/>
                 },
-                1 /* Pitch */ => html!{
+                2 /* Pitch */ => html!{
                     <canvas ref={pitch.canvas().clone()} class="blue-border"
                     onpointerdown={setter.reform(AppEvent::FocusTab)}
                     onpointerup={setter.reform(|e| AppEvent::HoverTab(MouseEvent::from(e)))}
@@ -629,65 +536,71 @@ impl Sound {
                 AppEvent::FocusTab(e) => {
                     e.target_dyn_into::<Element>().to_js_result(loc!())?
                         .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    if ctx.selected_tab == 0 {
+                    if ctx.selected_tab == 1 {
                         volume.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx)
                             .add_loc(loc!())?;
-                    } else if ctx.selected_tab == 1 {
+                    } else if ctx.selected_tab == 2 {
                         pitch.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx)
                             .add_loc(loc!())?;
                     }
                     None
                 }
 
-                AppEvent::HoverTab(e) if ctx.selected_tab == 0 =>
-                    match volume.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())? {
-                        Some((offset, Some(value))) =>
-                            volume.add_point(VolumePoint{offset, value}).pipe(|_| None),
-
-                        Some((offset, None)) => {
-                            let id = pitch.data().len() - 2;
-                            pitch.modify_point(id, |x| x.offset = offset).add_loc(loc!())?;
-                            Some(AppEvent::RedrawEditorPlane)
-                        }
-                        None => None
-                    }
-
                 AppEvent::HoverTab(e) if ctx.selected_tab == 1 =>
-                    match pitch.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())? {
-                        Some((offset, Some(value))) =>
-                            pitch.add_point(PitchPoint{offset, value}).pipe(|_| None),
-
-                        Some((offset, None)) => {
-                            let id = volume.data().len() - 2;
-                            volume.modify_point(id, |x| x.offset = offset).add_loc(loc!())?;
-                            Some(AppEvent::RedrawEditorPlane)
-                        }
+                    match volume.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())? {
+                        Some((offset, value)) =>
+                            volume.add_point(VolumePoint{offset, value}).pipe(|_| None),
                         None => None
                     }
 
-                AppEvent::LeaveTab if ctx.selected_tab == 0 => volume
+                AppEvent::HoverTab(e) if ctx.selected_tab == 2 =>
+                    match pitch.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())? {
+                        Some((offset, value)) =>
+                            pitch.add_point(PitchPoint{offset, value}).pipe(|_| None),
+                        None => None
+                    }
+
+                AppEvent::LeaveTab if ctx.selected_tab == 1 => volume
                     .handle_hover(None, ctx).add_loc(loc!())?
                     .pipe(|_| None),
 
-                AppEvent::LeaveTab if ctx.selected_tab == 1 => pitch
+                AppEvent::LeaveTab if ctx.selected_tab == 2 => pitch
                     .handle_hover(None, ctx).add_loc(loc!())?
                     .pipe(|_| None),
 
-                AppEvent::AfterSetTab(0) |AppEvent::AfterSelect(_) |AppEvent::AfterSetBlockType(..) => volume
+                AppEvent::AfterSetTab(1) => volume
                     .init(|c| Ok([c.client_width() as u32, c.client_height() as u32]))
                     .add_loc(loc!())?.pipe(|_| None),
 
-                AppEvent::AfterSetTab(1) => pitch
+                AppEvent::AfterSetTab(2) => pitch
                     .init(|c| Ok([c.client_width() as u32, c.client_height() as u32]))
                     .add_loc(loc!())?.pipe(|_| None),
 
-                AppEvent::Frame(_) if ctx.selected_tab == 0 => volume
+                AppEvent::Frame(_) if ctx.selected_tab == 1 => volume
                     .redraw(ctx).add_loc(loc!())?
                     .map(|[m, a]| AppEvent::SetHint(m, a)),
 
-                AppEvent::Frame(_) if ctx.selected_tab == 1 => pitch
+                AppEvent::Frame(_) if ctx.selected_tab == 2 => pitch
                     .redraw(ctx).add_loc(loc!())?
                     .map(|[m, a]| AppEvent::SetHint(m, a)),
+
+                AppEvent::Duration(len) => unsafe {
+                    let last_id = pitch.len() - 1;
+                    let old_len = pitch.get_unchecked(last_id - 1).offset;
+                    for point in pitch.iter_mut().take(last_id) {
+                        point.unlock().offset *= len / old_len;
+                    }
+                    pitch.get_unchecked_mut(last_id).unlock().offset += len - old_len;
+
+                    let last_id = volume.len() - 1;
+                    let old_len = volume.get_unchecked(last_id - 1).offset;
+                    for point in volume.iter_mut().take(last_id) {
+                        point.unlock().offset *= len / old_len;
+                    }
+                    volume.get_unchecked_mut(last_id).unlock().offset += len - old_len;
+
+                    Some(AppEvent::RedrawEditorPlane)
+                }
 
                 _ => None
             }
@@ -823,19 +736,54 @@ impl Graphable for PatternBlock {
     }
 }
 
-pub enum SequencerState {
-    Start,
-    Play{next: usize},
-    Stop,
-    None
+/// all the `when` fields are offsets from the start in beats
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoundEvent {
+    Pitch {id: usize, when: Beats, state: usize},
+    Volume{id: usize, when: Beats, state: usize},
+    Start {id: usize, when: Beats},
+    Stop  {id: usize, when: Beats}
+}
+
+impl PartialOrd for SoundEvent {
+    #[inline] fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.when().partial_cmp(&other.when())
+    }
+}
+
+impl Ord for SoundEvent {
+    #[inline] fn cmp(&self, other: &Self) -> Ordering {
+        self.when().cmp(&other.when())
+    }
+}
+
+impl SoundEvent {
+    #[inline] fn target(&self) -> usize {
+        match self {
+            SoundEvent::Start{id, ..}
+            | SoundEvent::Stop{id, ..}
+            | SoundEvent::Pitch{id, ..}
+            | SoundEvent::Volume{id, ..} => *id
+        }
+    }
+
+    #[inline] fn when(&self) -> Secs {
+        match self {
+            SoundEvent::Start{when, ..}
+            | SoundEvent::Stop{when, ..}
+            | SoundEvent::Pitch{when, ..} 
+            | SoundEvent::Volume{when, ..} => *when,
+        }
+    }
 }
 
 pub struct Sequencer {
     pattern: GraphEditor<PatternBlock>,
-    pending: Vec<(usize, Secs)>,
-    state: SequencerState,
+    pending: Vec<SoundEvent>,
     plug: DynamicsCompressorNode,
-    gain: GainNode
+    gain: GainNode,
+    playing: bool,
+    used_to_play: bool
 }
 
 impl Sequencer {
@@ -850,8 +798,8 @@ impl Sequencer {
             .connect_with_audio_node(&gain).add_loc(loc!())?
             .connect_with_audio_node(&audio_ctx.destination()).add_loc(loc!())?;
 
-        Ok(Self{plug, gain,
-            pattern: GraphEditor::new(vec![]), pending: vec![], state: SequencerState::None})
+        Ok(Self{plug, gain, pattern: GraphEditor::new(vec![]), pending: vec![],
+            playing: false, used_to_play: false})
     }
 
     #[inline] pub fn gain(&self) -> R32 {
@@ -885,14 +833,24 @@ impl Sequencer {
             AppEvent::Remove => self.pattern
                 .del_fixed().to_js_result(loc!())?.pipe(|_| None),
 
-            AppEvent::TogglePlay => if let SequencerState::None = self.state {
-                for mut block in self.pattern.iter_mut() {
-                    block.inner().reset(&ctx.audio_ctx).add_loc(loc!())?;
-                }
-                SequencerState::Start
+            AppEvent::TogglePlay => if self.playing {
+                self.pending.clear();
+                self.plug.disconnect().add_loc(loc!())?;
+                self.plug = ctx.audio_ctx.create_dynamics_compressor().add_loc(loc!())?;
+                self.plug.ratio().set_value(20.0);
+                self.plug.release().set_value(1.0);
+                self.plug.connect_with_audio_node(&self.gain).add_loc(loc!())?;
+                self.playing = false;
+                self.used_to_play = false;
             } else {
-                SequencerState::Stop
-            }.pipe(|x| {self.state = x; None}),
+                self.pending.clear();
+                for (id, mut block) in self.pattern.iter_mut().enumerate() {
+                    let offset = block.offset;
+                    block.inner().reset(ctx, id, offset,
+                        |x| _ = self.pending.push_sorted(x)).add_loc(loc!())?;
+                }
+                self.playing = true;
+            }.pipe(|_| None),
 
             AppEvent::Resize => self.pattern.init(|canvas| {
                 let doc = document();
@@ -913,13 +871,9 @@ impl Sequencer {
                     .add_loc(loc!())?
             }
 
-            AppEvent::HoverPlane(e) => {
-                if let Some(e) = e.dyn_ref::<DragEvent>() {
-                    e.prevent_default();
-                }
+            AppEvent::HoverPlane(e) =>
                 self.pattern.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx)
-                    .add_loc(loc!())?
-            }
+                    .add_loc(loc!())?,
 
             AppEvent::LeavePlane => self.pattern.handle_hover(None, ctx)
                 .add_loc(loc!())?,
@@ -928,60 +882,36 @@ impl Sequencer {
                 .set_value(**value).pipe(|_| None),
 
             AppEvent::Frame(_) => {
-                let mut sound_ctx = **ctx;
-                match self.state {
-                    SequencerState::Start => {
-                        let mut next = 0;
-                        for mut block in self.pattern.iter_mut().take_while(|x| *x.offset == 0.0) {
-                            let when = block.inner().poll(&self.plug, &sound_ctx).add_loc(loc!())?;
-                            self.pending.push_sorted_by_key((next, when), |x| x.1);
-                            next += 1;
-                        }
-                        self.state = SequencerState::Play{next};
+                let to_emit = if self.playing {
+                    let (to_emit, now) = if self.used_to_play {
+                        (None, (ctx.now - ctx.play_since).secs_to_beats(ctx.bps))
+                    } else {
+                        self.used_to_play = true;
                         self.pattern.force_redraw();
-                    }
+                        (Some(AppEvent::AudioStarted(ctx.now)), r64![0.0])
+                    };
+                    let n_due = self.pending.iter().position(|x| x.when() > now).unwrap_or(self.pending.len());
+                    for event in self.pending.drain(..n_due).collect::<Vec<_>>() {
+                        let id = event.target();
+                        let mut block = unsafe{self.pattern.get_unchecked_mut(id)};
 
-                    SequencerState::Play{ref mut next} => {
-                        let offset = (ctx.now - ctx.play_since).secs_to_beats(ctx.bps);
-                        sound_ctx.play_since = ctx.now;
-                        for mut block in self.pattern.iter_mut().skip(*next).take_while(|x| x.offset <= offset) {
-                            let when = block.inner().poll(&self.plug, &sound_ctx).add_loc(loc!())?;
-                            if when.is_infinite() {continue}
-                            self.pending.push_sorted_by_key((*next, when), |x| x.1);
-                            *next += 1;
+                        let mut stop = !matches!(event, SoundEvent::Stop{..});
+                        block.inner().poll(&self.plug, ctx, event, |new| {
+                            self.pending.push_sorted(new);
+                            stop = false;
+                        }).add_loc(loc!())?;
+
+                        if stop {
+                            block.inner() .poll(&self.plug, ctx, SoundEvent::Stop{id, when: now}, |_| ())
+                                .add_loc(loc!())?;
                         }
-                        sound_ctx.play_since = ctx.play_since;
                     }
+                    to_emit
+                } else {None};
 
-                    SequencerState::Stop => {
-                        let mut err = Ok(());
-                        self.pending.extract_if(|(id, when)| unsafe {
-                            let mut block = self.pattern.get_unchecked_mut(*id);
-                            sound_ctx.play_since += block.offset.to_secs(ctx.bps);
-                            *when = block.inner().stop(&sound_ctx).add_loc(loc!())
-                                .unwrap_or_else(|x| {err = Err(x); R64::INFINITY});
-                            sound_ctx.play_since = ctx.play_since;
-                            when.is_infinite()
-                        }).for_each(|_|());
-                        err?;
-                        self.state = SequencerState::None;
-                    }
-
-                    SequencerState::None => ()
-                };
-
-                let n_due = self.pending.iter().position(|x| x.1 > ctx.now).unwrap_or(self.pending.len());
-                let due: Vec<usize> = self.pending.drain(..n_due).map(|x| x.0).collect::<Vec<_>>();
-                for id in due {
-                    let mut block = unsafe{self.pattern.get_unchecked_mut(id)};
-                    sound_ctx.play_since += block.offset.to_secs(ctx.bps);
-                    let when = block.inner().poll(&self.plug, &sound_ctx).add_loc(loc!())?;
-                    sound_ctx.play_since = ctx.play_since;
-                    if when.is_infinite() {continue}
-                    self.pending.push_sorted_by_key((id, when), |x| x.1);
+                if let x @Some(_) = to_emit {x} else {
+                    self.pattern.redraw(ctx).add_loc(loc!())?.map(|[m, a]| AppEvent::SetHint(m, a))
                 }
-
-                self.pattern.redraw(ctx).add_loc(loc!())?.map(|[m, a]| AppEvent::SetHint(m, a))
             }
 
             _ => None
