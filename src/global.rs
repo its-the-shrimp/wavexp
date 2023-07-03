@@ -1,7 +1,6 @@
 use std::{
     rc::Rc,
-    borrow::Cow,
-    ops::{Deref, DerefMut}};
+    borrow::Cow};
 use js_sys::Function;
 use wasm_bindgen::{
     closure::Closure,
@@ -17,7 +16,7 @@ use yew::{
     Html,
     html};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, PatternBlock, SoundContext, FromBeats},
+    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, PatternBlock, FromBeats},
     visual::{HintHandler, SoundVisualiser, Graphable},
     utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult},
     input::{Button, Slider, Switch},
@@ -38,12 +37,16 @@ pub enum AppEvent {
     AfterSetTab(usize),
     /// emitted when the viewport of the app changes its dimensions
     Resize,
-    /// emitted when the user clicks the `Play` button
-    TogglePlay,
-    /// epllog version of `TogglePlay`
-    AfterTogglePlay,
+    /// emitted when the user starts playing by clicking the `Play` button
+    StartPlay,
+    /// emitted when the user stops playing by clicking the `Play` button
+    StopPlay,
+    /// epilog version of `StopPlay`
+    AfterStopPlay,
     /// emitted when the audio has actually started playing
     AudioStarted(Secs),
+    /// epllog version of `AudioStarted`
+    AfterAudioStarted(Secs),
     /// emitted when the user selects a sound block to edit in the side editor
     Select(Option<usize>),
     /// epliog version of `Select`
@@ -94,17 +97,19 @@ impl AppEvent {
     /// if page layout re-render is not needed, `None` is returned
     #[inline] pub fn epilog(&self) -> Option<Self> {
         match self {
-            Self::SetTab(id)         => Some(Self::AfterSetTab(*id)),
-            | Self::Select(id)       => Some(Self::AfterSelect(*id)),
-            | Self::TogglePlay       => Some(Self::AfterTogglePlay),
-            | Self::SetBlockType(ty) => Some(Self::AfterSetBlockType(*ty)),
-            | Self::Remove           => Some(Self::AfterRemove),
+            Self::SetTab(id)       => Some(Self::AfterSetTab(*id)),
+            Self::Select(id)       => Some(Self::AfterSelect(*id)),
+            Self::AudioStarted(at) => Some(Self::AfterAudioStarted(*at)),
+            Self::StopPlay         => Some(Self::AfterStopPlay),
+            Self::SetBlockType(ty) => Some(Self::AfterSetBlockType(*ty)),
+            Self::Remove           => Some(Self::AfterRemove),
 
             Self::Frame(..)
             | Self::AfterSetTab(..)
             | Self::AfterSelect(..)
-            | Self::AfterTogglePlay
-            | Self::AudioStarted(..)
+            | Self::AfterAudioStarted(..)
+            | Self::AfterStopPlay
+            | Self::StartPlay
             | Self::AfterRemove
             | Self::AfterSetBlockType(..)
             | Self::SetHint(..)
@@ -131,26 +136,20 @@ impl AppEvent {
 /// carries all the app-wide settings that are passed to all the event receivers
 #[derive(Debug, Clone)]
 pub struct AppContext {
-    inner: SoundContext,
+    pub bps: Beats,
+    pub play_since: Secs,
+    pub now: Secs,
+    pub audio_ctx: Rc<AudioContext>,
     pub snap_step: R64,
-    pub selected_tab: usize,
-    pub audio_ctx: AudioContext
+    pub selected_tab: usize
 }
 
 impl AppContext {
     #[inline] fn new() -> JsResult<Self> {
-        Ok(Self{inner: Default::default(), snap_step: r64![1.0], selected_tab: 0,
-            audio_ctx: AudioContext::new().add_loc(loc!())?})
+        Ok(Self{bps: r64![2.0], play_since: Secs::NEG_INFINITY, now: r64![0.0],
+            audio_ctx: Rc::new(AudioContext::new().add_loc(loc!())?),
+            snap_step: r64![1.0], selected_tab: 0})
     }
-}
-
-impl Deref for AppContext {
-    type Target = SoundContext;
-    #[inline] fn deref(&self) -> &Self::Target {&self.inner}
-}
-
-impl DerefMut for AppContext {
-    #[inline] fn deref_mut(&mut self) -> &mut Self::Target {&mut self.inner}
 }
 
 impl AppContext {
@@ -160,7 +159,7 @@ impl AppContext {
                 self.bps = *bpm / 60u8,
             AppEvent::AudioStarted(at) =>
                 self.play_since = *at,
-            AppEvent::TogglePlay =>
+            AppEvent::StopPlay =>
                 self.play_since = R64::NEG_INFINITY,
             AppEvent::Frame(now) =>
                 self.now = *now / 1000u16,
@@ -294,17 +293,22 @@ impl Component for App {
                         _ => 0
                     }}/>
                 </div>
-                <Button name="Play"
-                setter={setter.reform(|_| AppEvent::TogglePlay)}>
-                    <svg viewBox="3 0 100 103" height="100%">
-                        if self.ctx.play_since.is_finite() {
+                if self.ctx.play_since.is_finite() {
+                    <Button name="Stop"
+                    setter={setter.reform(|_| AppEvent::StopPlay)}>
+                        <svg viewBox="3 0 100 103" height="100%">
                             <polygon points="25,25 35,25 35,75 25,75"/>
                             <polygon points="65,25 75,25 75,75 65,75"/>
-                        } else {
+                        </svg>
+                    </Button>
+                } else {
+                    <Button name="Play"
+                    setter={setter.reform(|_| AppEvent::StartPlay)}>
+                        <svg viewBox="3 0 100 103" height="100%">
                             <polygon points="25,25 75,50 25,75"/>
-                        }
-                    </svg>
-                </Button>
+                        </svg>
+                    </Button>
+                }
                 <canvas id="sound-visualiser" ref={self.sound_visualiser.canvas().clone()} class="blue-border"
                 data-main-hint="Sound visualiser"/>
             </div>

@@ -60,7 +60,6 @@ pub trait BoolExt {
     fn then_negate<T: Neg<Output=T>>(self, val: T) -> T;
     fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
     fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T>;
-    fn toggle(&mut self) -> Self;
 }
 
 impl BoolExt for bool {
@@ -86,12 +85,6 @@ impl BoolExt for bool {
 
     #[inline] fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T> {
         if self {f()} else {None}
-    }
-
-    #[inline] fn toggle(&mut self) -> Self {
-        let res = *self;
-        *self = !*self;
-        res
     }
 }
 
@@ -1232,7 +1225,12 @@ macro_rules! real_impl {
 
         impl From<$other_real> for $real {
             #[inline]
-            fn from(value: $other_real) -> Self {Self(value.0 as $float)}
+            fn from(x: $other_real) -> Self {Self(x.0 as $float)}
+        }
+
+        impl yew::html::IntoPropValue<$other_real> for $real {
+            #[inline]
+            fn into_prop_value(self) -> $other_real {self.into()}
         }
 
         impl Display for $real {

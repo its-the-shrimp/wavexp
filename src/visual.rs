@@ -373,10 +373,6 @@ impl<'a, T: Graphable> GraphPointView<'a, T> {
     }
 }
 
-impl<'a, T: Graphable> GraphPointView<'a, T> {
-    #[inline] pub unsafe fn unlock(self) -> &'a mut T {self.0}
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum Focus {
     #[default] None,
@@ -428,9 +424,11 @@ impl<T: Graphable> GraphEditor<T> {
 
     #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
 
-    #[inline] pub fn data(&self) -> &[T] {&self.data}
+    // #[inline] pub fn len(&self) -> usize {self.data.len()}
 
-    #[inline] pub fn len(&self) -> usize {self.data.len()}
+    #[inline] pub fn get(&self, index: usize) -> Option<&T> {
+        self.data.get(index)
+    }
 
     #[inline] pub unsafe fn get_unchecked(&self, index: usize) -> &T {
         self.data.get_unchecked(index)
@@ -439,6 +437,14 @@ impl<T: Graphable> GraphEditor<T> {
     #[inline] pub unsafe fn get_unchecked_mut(&mut self, index: usize)
     -> GraphPointView<'_, T> {
         GraphPointView(self.data.get_unchecked_mut(index))
+    }
+
+    #[inline] pub unsafe fn first_unchecked(&self) -> &T {
+        &*self.data.as_ptr()
+    }
+
+    #[inline] pub unsafe fn last_unchecked(&self) -> &T {
+        unsafe{self.data.last().unwrap_unchecked()}
     }
 
     #[inline] pub fn iter_mut(&mut self) -> impl Iterator<Item=GraphPointView<'_, T>> {
