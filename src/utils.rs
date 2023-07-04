@@ -1,17 +1,28 @@
 use std::{
     ptr,
-    mem::{swap, take},
+    mem::take,
     fmt::{self, Debug, Formatter, Display},
     ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Rem, RemAssign, Range},
-    iter::successors,
+    iter::{successors, Sum},
     error::Error,
     collections::TryReserveError,
     cmp::Ordering,
-    any::type_name,
-    num::FpCategory};
-use js_sys::{Object as JsObject, Error as JsError};
-use wasm_bindgen::{JsCast, JsValue, throw_val};
-use web_sys::{Document as HtmlDocument, Window as HtmlWindow, CanvasRenderingContext2d, HtmlCanvasElement, Element, console::warn_1, HtmlElement};
+    any::type_name};
+use js_sys::{
+    Object as JsObject,
+    Error as JsError};
+use wasm_bindgen::{
+    JsCast,
+    JsValue,
+    throw_val};
+use web_sys::{
+    Document as HtmlDocument,
+    Window as HtmlWindow,
+    CanvasRenderingContext2d,
+    HtmlCanvasElement,
+    Element,
+    console::warn_1,
+    HtmlElement};
 
 pub trait Check: Sized {
 	#[inline] fn check(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
@@ -86,6 +97,65 @@ impl BoolExt for bool {
     #[inline] fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T> {
         if self {f()} else {None}
     }
+}
+
+pub trait ArrayExt<T, const N: usize>: Sized {
+    fn add<'a, O>(self, other: &'a [O; N])      -> Self   where T: AddAssign<&'a O>;
+    fn sub<'a, O>(self, other: &'a [O; N])      -> Self   where T: SubAssign<&'a O>;
+    fn mul<'a, O>(self, other: &'a [O; N])      -> Self   where T: MulAssign<&'a O>;
+    fn div<'a, O>(self, other: &'a [O; N])      -> Self   where T: DivAssign<&'a O>;
+    fn floor_to<'a, O>(self, other: &'a [O; N]) -> Self   where T: Copy + FloorTo<&'a O>;
+    fn sum<R>(self)                             -> R      where R: Sum<T>;
+    fn array_check_in<R, O>(self, ranges: &[R]) -> Option<Self> where T: PartialOrd<O>, O: PartialOrd<T>, R: RangeBounds<O>;
+}
+
+impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
+    #[inline] fn add<'a, O>(mut self, other: &'a [O; N]) -> Self where T: AddAssign<&'a O> {
+        for (dst, src) in self.iter_mut().zip(other.iter()) {*dst += src}
+        self
+    }
+
+    #[inline] fn sub<'a, O>(mut self, other: &'a [O; N]) -> Self where T: SubAssign<&'a O> {
+        for (dst, src) in self.iter_mut().zip(other.iter()) {*dst -= src}
+        self
+    }
+
+    #[inline] fn mul<'a, O>(mut self, other: &'a [O; N]) -> Self where T: MulAssign<&'a O> {
+        for (dst, src) in self.iter_mut().zip(other.iter()) {*dst *= src}
+        self
+    }
+
+    #[inline] fn div<'a, O>(mut self, other: &'a [O; N]) -> Self where T: DivAssign<&'a O> {
+        for (d, s) in self.iter_mut().zip(other.iter()) {*d /= s}
+        self
+    }
+
+    #[inline] fn floor_to<'a, O>(mut self, other: &'a [O; N]) -> Self where T: Copy + FloorTo<&'a O> {
+        for (d, s) in self.iter_mut().zip(other) {*d = d.floor_to(s)}
+        self
+    }
+
+    #[inline] fn sum<R>(self) -> R where R: Sum<T> {self.into_iter().sum()}
+
+    #[inline] fn array_check_in<R, O>(self, ranges: &[R]) -> Option<Self> where T: PartialOrd<O>, O: PartialOrd<T>, R: RangeBounds<O> {
+        self.iter().zip(ranges).all(|(i, r)| r.contains(i)).then_some(self)
+    }
+}
+
+pub trait ArrayFrom<T, const N: usize>: Sized {
+    fn array_from(x: T) -> [Self; N];
+}
+
+impl<S, D, const N: usize> ArrayFrom<[S; N], N> for D where D: From<S> {
+    #[inline] fn array_from(x: [S; N]) -> [Self; N] {x.map(D::from)}
+}
+
+pub trait IntoArray<T, const N: usize> {
+    fn into_array(self) -> [T; N];
+}
+
+impl<T, U, const N: usize> IntoArray<U, N> for T where U: ArrayFrom<T, N> {
+    #[inline] fn into_array(self) -> [U; N] {U::array_from(self)}
 }
 
 // this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
@@ -723,6 +793,7 @@ pub trait RangeExt<T> {
     fn extend<R>(self, value: R) -> Self where T: PartialOrd<R> + From<R>;
     /// turns `x .. y` into `f(x) .. f(y)`
     fn map<R>(self, f: impl FnMut(T) -> R) -> Range<R>;
+    fn to_pair(self) -> [T; 2];
 }
 
 impl<T> RangeExt<T> for Range<T> {
@@ -757,6 +828,8 @@ impl<T> RangeExt<T> for Range<T> {
     #[inline] fn map<R>(self, mut f: impl FnMut(T) -> R) -> Range<R> {
         f(self.start) .. f(self.end)
     }
+
+    #[inline] fn to_pair(self) -> [T; 2] {[self.start, self.end]}
 }
 
 #[test]
@@ -783,28 +856,17 @@ impl<O: Copy, T: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Self> + Copy> 
     }
 }
 
-/// function just like `Ord::clamp`, except that instead of panicking when `min > max`,
-/// it swaps `min` and `max`
-pub fn total_clamp<T: Ord>(x: T, mut min: T, mut max: T) -> T {
-    if min > max {swap(&mut min, &mut max)}
-    if x < min {min}
-    else if x > max {max}
-    else {x}
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {pub x: i32, pub y: i32}
 
-impl From<Point> for [i32; 2] {
-    #[inline] fn from(value: Point) -> Self {
-        [value.x, value.y]
+impl From<[R64; 2]> for Point {
+    #[inline] fn from(value: [R64; 2]) -> Self {
+        Self{x: value[0].into(), y: value[1].into()}
     }
 }
 
-impl From<[R64; 2]> for Point {
-    #[inline] fn from(value: [R64; 2]) -> Self {
-        Point{x: value[0].into(), y: value[1].into()}
-    }
+impl<D> ArrayFrom<Point, 2> for D where D: From<i32> {
+    #[inline] fn array_from(x: Point) -> [Self; 2] {[x.x.into(), x.y.into()]}
 }
 
 impl Add for Point {
@@ -849,21 +911,6 @@ impl LooseEq for Point {
 
 impl Point {
     pub const ZERO: Self = Self{x:0, y:0};
-    #[inline] pub fn avg(self, p2: Self) -> Self {
-        Self{x: ((self.x as i64 + p2.x as i64) / 2) as i32,
-            y: ((self.y as i64 + p2.y as i64) / 2) as i32}
-    }
-
-    #[inline] pub fn clamp_x(mut self, min: i32, max: i32) -> Self {
-        self.x = total_clamp(self.x, min, max);
-        self
-    }
-
-    #[inline] pub fn clamp_y(mut self, min: i32, max: i32) -> Self {
-        self.y = total_clamp(self.y, min, max);
-        self
-    }
-
     #[inline] pub fn normalise(mut self, old_space: Rect, new_space: Rect) -> Self {
         self.y = (((self.y - old_space.bottom()) as f32 / old_space.height() as f32)
             * new_space.height() as f32) as i32 + new_space.bottom();
@@ -872,152 +919,27 @@ impl Point {
         self
     }
 
-    #[inline]
-    pub fn shift_x(self, off: i32) -> Self {Self{x: self.x + off, y: self.y}}
-
-    #[inline]
-    pub fn shift_y(self, off: i32) -> Self {Self{x: self.x, y: self.y + off}}
-
-    #[inline] pub fn scale(self, coeffs: [R64; 2]) -> Self {
-        Self{x: (coeffs[0] * self.x).into(), y: (coeffs[1] * self.y).into()}
-    }
-
     #[inline] pub fn map<T>(self, mut f: impl FnMut(i32) -> T) -> [T; 2] {
         [f(self.x), f(self.y)]
     }
 }
 
-pub trait HitZone: Sized + Debug {
-    fn contains(&self, point: Point) -> bool;
-    fn     left(&self) -> i32;
-    fn      top(&self) -> i32;
-    fn    right(&self) -> i32;
-    fn   bottom(&self) -> i32;
-    fn   center_point(&self) -> Point;
-    fn    shift(self, offset: Point)  -> Self;
-    fn     draw(&self, ctx: &CanvasRenderingContext2d);
-
-    #[inline] fn   width(&self) -> i32 {self.right() - self.left()}
-    #[inline] fn  height(&self) -> i32 {self.bottom() - self.top()}
-    #[inline] fn shift_x(self, x: i32) -> Self {self.shift(Point{x, y:0})}
-    #[inline] fn shift_y(self, y: i32) -> Self {self.shift(Point{x:0, y})}
-}
-
-/// methods' naming convention:
-/// *square* - accepts `side` as both `width` & `height`,
-///     else accepts the bottom-right corner
-/// *zero* - the top-left corner is zero,
-///     else accepts the top-left corner as `src`
-/// *center* - accepts the center point, the dimensions are accepted halved
 #[derive(Debug, Clone, Copy)]
 pub struct Rect(Point, Point);
 
-impl HitZone for Rect {
-    #[inline] fn contains(&self, point: Point) -> bool {
-        self.0.x <= point.x && point.x <= self.1.x
-        && self.0.y <= point.y && point.y <= self.1.y
-    }
-
-    #[inline] fn   left(&self) -> i32 {self.0.x}
-    #[inline] fn    top(&self) -> i32 {self.0.y}
-    #[inline] fn  right(&self) -> i32 {self.1.x}
-    #[inline] fn bottom(&self) -> i32 {self.1.y}
-    #[inline] fn center_point(&self) -> Point {self.0.avg(self.1)}
-
-    #[inline] fn shift(self, offset: Point) -> Self {
-        Self(self.0 + offset, self.1 + offset)
-    }
-
-    #[inline] fn draw(&self, ctx: &CanvasRenderingContext2d) {
-        ctx.rect(self.left().into(), self.top().into(), self.width().into(), self.height().into())
-    }
-}
-
-impl From<Point> for Rect {
-    /// same as `Rect::zero`
-    #[inline] fn from(value: Point) -> Self {
-        Rect::zero(value)
-    }
-}
-
 impl Rect {
-    #[inline] pub fn new(top_left: Point, bottom_right: Point) -> Self {
-        Self(top_left, bottom_right)
-    }
-
-    #[inline] pub fn zero(bottom_right: Point) -> Self {
-        Self(Point::ZERO, bottom_right)
-    }
-
-    #[inline] pub fn center(center: Point, half_sides: Point) -> Self {
-        Self(center - half_sides, center + half_sides)
-    }
-
-    #[inline] pub fn zero_center(center: Point) -> Self {
-        Self(Point::ZERO, center + center)
-    }
-
-    #[inline] pub fn square(src: Point, side: i32) -> Self {
-        Self(src, src + Point{x: side, y: side})
-    }
-
-    #[inline] pub fn square_center(center: Point, half_side: i32) -> Self {
-        let half_sides = Point{x: half_side, y: half_side};
-        Self(center - half_sides, center + half_sides)
-    }
-
-    #[inline] pub fn square_zero(side: i32) -> Self {
-        Self(Point::ZERO, Point{x: side, y: side})
-    }
-
-    #[inline] pub fn square_zero_center(half_side: i32) -> Self {
-        let side = half_side * 2;
-        Self(Point::ZERO, Point{x: side, y: side})
-    }
-
-    #[inline] pub fn to_rhombus(self) -> Rhombus {
-        Rhombus::new(self.center_point(), self.width() / 2, self.height() / 2)
-    }
+    #[inline] fn    left(&self) -> i32 {self.0.x}
+    #[inline] fn  bottom(&self) -> i32 {self.1.y}
+    #[inline] fn   width(&self) -> i32 {self.1.x - self.0.x}
+    #[inline] fn  height(&self) -> i32 {self.1.y - self.0.y}
 }
 
-#[derive(Debug)]
-pub struct Rhombus {
-    center: Point,
-    half_w: i32, half_h: i32
+pub trait FloorTo<S> {
+    fn floor_to(self, step: S) -> Self;
 }
 
-impl HitZone for Rhombus {
-    fn contains(&self, point: Point) -> bool {
-        let offset = self.center - point;
-        offset.x.abs() as f64 / self.half_w as f64 + offset.y.abs() as f64 / self.half_h as f64 <= 1.0
-    }
-
-    #[inline] fn   left(&self) -> i32   {self.center.x - self.half_w}
-    #[inline] fn    top(&self) -> i32   {self.center.y - self.half_h}
-    #[inline] fn  right(&self) -> i32   {self.center.x + self.half_w}
-    #[inline] fn bottom(&self) -> i32   {self.center.y + self.half_h}
-    #[inline] fn  width(&self) -> i32   {self.half_w * 2}
-    #[inline] fn height(&self) -> i32   {self.half_h * 2}
-    #[inline] fn center_point(&self) -> Point {self.center}
-
-    #[inline] fn shift(mut self, offset: Point) -> Self {
-        self.center += offset;
-        self
-    }
-
-    fn draw(&self, ctx: &CanvasRenderingContext2d) {
-        ctx.move_to(self.center.x.into(), self.top().into());
-        ctx.line_to(self.right().into(), self.center.y.into());
-        ctx.line_to(self.center.x.into(), self.bottom().into());
-        ctx.line_to(self.left().into(), self.center.y.into());
-        ctx.close_path();
-    }
-}
-
-impl Rhombus {
-    #[inline] pub fn new(center: Point, half_w: i32, half_h: i32) -> Self {
-        Self{center, half_w, half_h}
-    }
+impl<T, S> FloorTo<S> for T where T: Copy + SubAssign + Sub<T, Output=T> + Rem<S, Output=T> {
+    #[inline] fn floor_to(self, step: S) -> Self {self - self % step}
 }
 
 #[derive(Debug)]
@@ -1245,6 +1167,18 @@ macro_rules! real_impl {
             fn neg(self) -> Self::Output {Self(-self.0)}
         }
 
+        impl Sum for $real {
+            #[inline] fn sum<I>(iter: I) -> Self where I: Iterator<Item=$real> {
+                iter.fold(Self(0.0), |s, n| s + n)
+            }
+        }
+
+        impl<'a> Sum<&'a $real> for $real {
+            #[inline] fn sum<I>(iter: I) -> Self where I: Iterator<Item=&'a $real> {
+                iter.fold(Self(0.0), |s, n| s + n)
+            }
+        }
+
         real_from_ints_impl!($real{$float}:
             u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
         real_int_operator_impl!($real{$float}, u8:
@@ -1348,14 +1282,6 @@ macro_rules! real_impl {
             #[inline]
             pub fn round(self) -> Self {Self(self.0.round())}
 
-            #[inline] pub fn floor_to(self, step: Self) -> Self {
-                match step.classify() {
-                    FpCategory::Zero => self,
-                    FpCategory::Infinite => step,
-                    _ => (self / step).floor() * step
-                }
-            }
-
             #[inline]
             pub fn is_finite(&self) -> bool {self.0.is_finite()}
 
@@ -1387,67 +1313,3 @@ fn real_round_to() {
     assert!(r64![1.3].floor_to(r64![0.2]).loose_eq(r64![1.2], 0.005));
     assert!(r64![-1.3].floor_to(r64![0.2]).loose_eq(r64![-1.4], 0.005));
 }
-
-pub trait SaturatingFrom<T> {
-    fn saturating_from(x: T) -> Self;
-}
-
-pub trait SaturatingInto<T: SaturatingFrom<Self>>: Sized {
-    #[inline(always)]
-    fn saturating_into(self) -> T {T::saturating_from(self)}
-}
-
-impl<S, D: SaturatingFrom<S>> SaturatingInto<D> for S {}
-
-macro_rules! sat_from_u_impl {
-    ($src:ty => $($dst:ty)|+) => {
-        $(
-            impl SaturatingFrom<$src> for $dst {
-                #[inline] fn saturating_from(x: $src) -> $dst {
-                    x.min(<$dst>::MAX as $src) as $dst
-                }
-            }
-        )+
-    };
-}
-
-sat_from_u_impl!(u64   => i64|usize|isize|u32|i32|u16|i16|u8|i8);
-sat_from_u_impl!(usize => i64|isize|u32|i32|u16|i16|u8|i8);
-sat_from_u_impl!(u32   => isize|i32|u16|i16|u8|i8);
-sat_from_u_impl!(u16   => i16|u8|i8);
-sat_from_u_impl!(u8    => i8);
-
-macro_rules! sat_from_s_impl {
-    ($src:ty => $($dst:ty)|+) => {
-        $(
-            impl SaturatingFrom<$src> for $dst {
-                #[inline] fn saturating_from(x: $src) -> $dst {
-                    const DST_SMALLER: bool = (<$dst>::MAX as u64) < <$src>::MAX as u64;
-                    if DST_SMALLER {x.clamp(<$dst>::MIN as $src, <$dst>::MAX as $src) as $dst}
-                    else {x.max(<$dst>::MIN as $src) as $dst}
-                }
-            }
-        )+
-    };
-}
-
-sat_from_s_impl!(i64   => u64|usize|isize|u32|i32|u16|i16|u8|i8);
-sat_from_s_impl!(isize => u64|usize|u32|i32|u16|i16|u8|i8);
-sat_from_s_impl!(i32   => usize|i32|u16|i16|u8|i8);
-sat_from_s_impl!(i16   => u16|u8|i8);
-sat_from_s_impl!(i8    => u8);
-
-macro_rules! sat_from_real_impl {
-    ($src:ty => $($dst:ty)|+) => {
-        $(
-            impl SaturatingFrom<$src> for $dst {
-                #[inline] fn saturating_from(x: $src) -> $dst {
-                    *x.clamp(<$dst>::MIN.into(), <$dst>::MAX.into()) as $dst
-                }
-            }
-        )+
-    };
-}
-
-sat_from_real_impl!(R32 => u64|i64|usize|isize|u32|i32|u16|i16|u8|i8);
-sat_from_real_impl!(R64 => u64|i64|usize|isize|u32|i32|u16|i16|u8|i8);

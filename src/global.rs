@@ -59,8 +59,10 @@ pub enum AppEvent {
     AfterRemove,
     /// emitted when a `Noise` sound block's duration has been changed
     Duration(R64),
-    /// emitted when a `Noise` sound block's volume ha been changed
+    /// emitted when a `Noise` sound block's volume has been changed
     Volume(R32),
+    /// emitted when a `Note` sound block's notes' release time has been changed
+    Release(Beats),
     /// emitted when the global BPM has been changed
     Bpm(R64),
     /// emitted when the global volume has been changed
@@ -116,6 +118,7 @@ impl AppEvent {
             | Self::FetchHint(..)
             | Self::RedrawEditorPlane
             | Self::Duration(..)
+            | Self::Release(..)
             | Self::Resize 
             | Self::Add(..) 
             | Self::Volume(..) 
@@ -243,7 +246,7 @@ impl Component for App {
                             {for block.sound.tabs().iter().enumerate()
                                 .map(|(tab_id, tab)| render_tab_info(tab, tab_id, tab_aux_hint.clone()))}
                         </div>
-                        {block.sound.params(self.ctx.selected_tab, setter.clone())}
+                        {block.sound.params(&self.ctx, setter.clone())}
                         <div id="general-ctrl" class="dark-bg">
                             <Button name="Back to project-wide settings"
                             setter={setter.reform(|_| AppEvent::Select(None))}>

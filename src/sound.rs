@@ -1,5 +1,5 @@
 use std::{
-    ops::{Add, Sub, Neg, Range},
+    ops::{Add, Sub, Range},
     fmt::{self, Display, Formatter, Debug},
     f64::consts::PI,
     mem::{transmute, replace},
@@ -20,7 +20,7 @@ use crate::{
         JsResult,
         JsResultUtils,
         R64, R32,
-        SaturatingInto, LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt, js_error, Take},
+        LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt, js_error, Take, RangeExt},
     input::{Slider, Button},
     visual::{GraphEditor, Graphable},
     global::{AppContext, AppEvent},
@@ -61,20 +61,21 @@ impl Display for Note {
 impl Add<isize> for Note {
     type Output = Note;
     #[inline] fn add(self, rhs: isize) -> Self::Output {
-        Self(self.0.saturating_add_signed(rhs.saturating_into()))
+        Self((0 .. Self::N_NOTES as isize).fit((self.0 as isize).saturating_add(rhs)) as u8)
     }
 }
 
 impl Sub<isize> for Note {
     type Output = Note;
     #[inline] fn sub(self, rhs: isize) -> Self::Output {
-        Self(self.0.saturating_add_signed(rhs.neg().saturating_into()))
+        Self((0 .. Self::N_NOTES as isize).fit((self.0 as isize).saturating_sub(rhs)) as u8)
     }
 }
 
 impl Note {
     pub const MAX: Note = Note(35);
     // pub const MIN: Note = Note(0);
+    pub const N_NOTES: usize = Self::FREQS.len();
     pub const FREQS: [R32; 36] = [
         r32![65.410] /*C2*/, r32![69.300] /*C#2*/,
         r32![73.420] /*D2*/, r32![77.780] /*D#2*/,
@@ -307,7 +308,7 @@ impl Graphable for VolumePoint {
 #[derive(Default, Debug, Clone)]
 pub enum Sound {
     #[default] None,
-    Note{volume: R32, pattern: GraphEditor<PitchPoint>},
+    Note{volume: R32, pattern: GraphEditor<PitchPoint>, release: Beats},
     Noise{gen: AudioBufferSourceNode, src: AudioBuffer,
         gain: GainNode, len: Beats}
 }
@@ -321,7 +322,7 @@ impl Sound {
     #[inline] pub fn new(sound_type: SoundType, ctx: &AudioContext) -> JsResult<Self> {
         Ok(match sound_type {
             SoundType::Note =>
-                Self::Note{volume: r32![1.0], pattern: GraphEditor::new(vec![])},
+                Self::Note{volume: r32![1.0], pattern: GraphEditor::new(vec![]), release: r64![0.2]},
 
             SoundType::Noise => {
                 let len = ctx.sample_rate();
@@ -373,28 +374,28 @@ impl Sound {
         Ok(match self {
             Sound::None => (),
 
-            Sound::Note{volume, pattern} => match src {
+            Sound::Note{volume, pattern, release} => match src {
                 SoundEvent::BlockStart{id, when, mut state} => {
                     let cur = unsafe{pattern.get_unchecked(state)};
                     let block_core = ctx.audio_ctx.create_oscillator().add_loc(loc!())?;
                     block_core.frequency().set_value(*cur.value.freq());
                     block_core.start().add_loc(loc!())?;
                     let block = ctx.audio_ctx.create_gain().add_loc(loc!())?;
-                    block.gain().set_value(**volume);
+                    {
+                        let at = ctx.now + cur.len.to_secs(ctx.bps);
+                        let gain = block.gain();
+                        gain.set_value_at_time(**volume, 0.0).add_loc(loc!())?;
+                        gain.set_value_at_time(**volume, *at).add_loc(loc!())?;
+                        gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at + *release.to_secs(ctx.bps)).add_loc(loc!())?;
+                    }
                     block_core.connect_with_audio_node(&block).add_loc(loc!())?
                         .connect_with_audio_node(plug).add_loc(loc!())?;
-                    scheduler(SoundEvent::BlockOut{id, when: when + cur.len, block});
+                    scheduler(SoundEvent::BlockEnd{id, when: when + cur.len + *release + r64![0.1].secs_to_beats(ctx.bps), block});
 
                     state += 1;
                     if let Some(next) = pattern.get(state) {
                         scheduler(SoundEvent::BlockStart{id, when: when + next.offset - cur.offset, state})
                     }
-                }
-
-                SoundEvent::BlockOut{id, when, block} => {
-                    block.gain().linear_ramp_to_value_at_time(0.0,
-                        *when.to_secs(ctx.bps) + *ctx.play_since + 0.2).add_loc(loc!())?;
-                    scheduler(SoundEvent::BlockEnd{id, when: when + r64![0.4].secs_to_beats(ctx.bps), block})
                 }
 
                 SoundEvent::BlockEnd{block, ..} => block.disconnect().add_loc(loc!())?,
@@ -438,7 +439,7 @@ impl Sound {
         }
     }
 
-    pub fn params(&self, tab_id: usize, setter: Callback<AppEvent>) -> Html {
+    pub fn params(&self, ctx: &AppContext, setter: Callback<AppEvent>) -> Html {
         match self {
             Sound::None => html!{<div id="block-add-menu">
                 {for Sound::TYPES.iter().map(|x| html!{
@@ -449,12 +450,18 @@ impl Sound {
                 })}
             </div>},
 
-            Sound::Note{volume, pattern} => match tab_id {
+            Sound::Note{volume, pattern, release} => match ctx.selected_tab {
                 0 /* General */ => html!{<div id="inputs">
                     <Slider key="note-vol"
                     setter={setter.reform(|x| AppEvent::Volume(R32::from(x)))}
-                    name="Note Volume" postfix="Beats"
+                    name="Note Volume"
                     initial={*volume}/>
+                    <Slider key="note-rel"
+                    setter={setter.reform(AppEvent::Release)}
+                    name="Note Release Time" postfix="Beats"
+                    min={r64![0.1].secs_to_beats(ctx.bps)}
+                    max={r64![3.0]}
+                    initial={*release}/>
                 </div>},
                 1 /* Pattern */ => html!{
                     <canvas ref={pattern.canvas().clone()} class="blue-border"
@@ -467,7 +474,7 @@ impl Sound {
                 tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
             }
 
-            Sound::Noise{len, gain, ..} => match tab_id {
+            Sound::Noise{len, gain, ..} => match ctx.selected_tab {
                 0 /* General */ => html!{<div id="inputs">
                     <Slider key="noise-dur"
                     setter={setter.reform(AppEvent::Duration)}
@@ -493,7 +500,7 @@ impl Sound {
                 Some(AppEvent::RedrawEditorPlane)
             } else {None}
 
-            Sound::Note{volume, pattern} => match event {
+            Sound::Note{volume, pattern, release} => match event {
                 AppEvent::FocusTab(e) => {
                     e.target_dyn_into::<Element>().to_js_result(loc!())?
                         .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
@@ -525,6 +532,11 @@ impl Sound {
 
                 AppEvent::Volume(value) => {
                     *volume = *value;
+                    None
+                }
+
+                AppEvent::Release(value) => {
+                    *release = *value;
                     None
                 }
 
@@ -656,7 +668,6 @@ impl Graphable for PatternBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SoundEvent {
     BlockStart{id: usize, when: Beats, state: usize},
-    BlockOut{id: usize, when: Beats, block: GainNode},
     BlockEnd{id: usize, when: Beats, block: GainNode},
     Start {id: usize, when: Beats},
     Stop  {id: usize, when: Beats}
@@ -680,8 +691,7 @@ impl SoundEvent {
             SoundEvent::Start{id, ..}
             | SoundEvent::Stop{id, ..}
             | SoundEvent::BlockStart{id, ..}
-            | SoundEvent::BlockOut{id, ..}
-            | SoundEvent::BlockEnd{id, ..}=> *id
+            | SoundEvent::BlockEnd{id, ..} => *id
         }
     }
 
@@ -690,8 +700,7 @@ impl SoundEvent {
             SoundEvent::Start{when, ..}
             | SoundEvent::Stop{when, ..}
             | SoundEvent::BlockStart{when, ..} 
-            | SoundEvent::BlockOut{when, ..}
-            | SoundEvent::BlockEnd{when, ..}=> *when,
+            | SoundEvent::BlockEnd{when, ..} => *when,
         }
     }
 }

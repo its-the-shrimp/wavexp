@@ -19,11 +19,11 @@ use crate::{
     utils::{Check, SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, OptionExt,
         HtmlElementExt, 
-        Pipe, Tee, BoolExt, RangeExt, VecExt, R64},
+        Pipe, Tee, BoolExt, RangeExt, VecExt, R64, FloorTo, ArrayExt, ArrayFrom, IntoArray},
     sound::FromBeats,
     global::{AppEvent, AppContext},
     loc,
-    r64, js_assert, eval_once, js_array,
+    r64, js_assert, eval_once, js_array, js_log,
 };
 
 pub struct EveryNth<'a, T> {
@@ -381,7 +381,7 @@ enum Focus {
     MovePlane(Point),
     MovePoint(usize, Point),
     HoverPlaneWShift(Point),
-    ZoomPlane{init_offset: Point, pivot: Point, init_scale_x: R64, init_scale_y: R64},
+    ZoomPlane{init_offset: Point, pivot: Point, init_scale: [R64; 2]},
     HoverPlaneWMeta(Point, bool, Path2d)
 }
 
@@ -398,8 +398,7 @@ impl Focus {
 pub struct GraphEditor<T: Graphable> {
     canvas: NodeRef,
     offset: Point,
-    scale_x: R64,
-    scale_y: R64,
+    scale: [R64; 2],
     focus: Focus,
     last_focus: Discriminant<Focus>,
     redraw: bool,
@@ -417,8 +416,7 @@ impl<T: Graphable> GraphEditor<T> {
     #[inline] pub fn new(data: Vec<T>) -> Self {
         Self{canvas: NodeRef::default(), offset: Point::ZERO,
             focus: Focus::None, last_focus: discriminant(&Focus::HoverPlane),
-            scale_x: T::SCALE_X_BOUND.start * r64![0.75] + T::SCALE_X_BOUND.end * r64![0.25],
-            scale_y: T::SCALE_Y_BOUND.start * r64![0.75] + T::SCALE_Y_BOUND.end * r64![0.25],
+            scale: [T::SCALE_X_BOUND.to_pair().mul(&[0.75, 0.25]).sum(), T::SCALE_Y_BOUND.to_pair().mul(&[0.75, 0.25]).sum()],
             redraw: false, data, fixed: None}
     }
 
@@ -495,10 +493,10 @@ impl<T: Graphable> GraphEditor<T> {
         canvas.set_width(w);
         canvas.set_height(h);
         if self.offset.x <= 0 {
-            self.offset.x = (T::OFFSET_X_BOUND.start * R64::from(w) / self.scale_x).into();
+            self.offset.x = (T::OFFSET_X_BOUND.start * R64::from(w) / self.scale[0]).into();
         }
         if self.offset.y <= 0 {
-            self.offset.y = (T::OFFSET_Y_BOUND.start * R64::from(h) / self.scale_y).into();
+            self.offset.y = (T::OFFSET_Y_BOUND.start * R64::from(h) / self.scale[1]).into();
         }
         let ctx = canvas.get_2d_context(loc!())?;
         ctx.set_font(Self::FONT);
@@ -506,8 +504,8 @@ impl<T: Graphable> GraphEditor<T> {
         Ok(self.redraw = true)
     }
 
-    #[inline] fn point_by_pos(&self, x: R64, y: R64) -> Option<(usize, &T)> {
-        self.data.iter().enumerate().find(|(_, p)| p.in_hitbox([x, y]))
+    #[inline] fn point_by_pos(&self, loc: [R64; 2]) -> Option<(usize, &T)> {
+        self.data.iter().enumerate().find(|(_, p)| p.in_hitbox(loc))
     }
 
     #[inline] fn set_focus(&mut self, focus: Focus) {
@@ -523,16 +521,19 @@ impl<T: Graphable> GraphEditor<T> {
         };
 
         event.point += self.offset;
-        let [w, h]   = self.canvas.cast::<HtmlCanvasElement>()
+        let size   = self.canvas.cast::<HtmlCanvasElement>()
             .to_js_result(loc!())?.size();
-        let step_x   = R64::from(w) / self.scale_x;
-        let step_y   = R64::from(h) / self.scale_y;
-        let x        = R64::from(event.point.x) / step_x;
-        let y        = R64::from(event.point.y) / step_y;
+        let snap_step = [ctx.snap_step, T::Y_SNAP];
+        let step     = R64::array_from(size).div(&self.scale);
+        let loc      = R64::array_from(event.point).div(&step);
 
         let zoom_plane_focus = || Focus::ZoomPlane{
             init_offset: self.offset, pivot: event.point,
-            init_scale_x: self.scale_x, init_scale_y: self.scale_y};
+            init_scale: self.scale};
+
+        let move_point_focus = |id, p: &T| Focus::MovePoint(id,
+            R64::array_from(event.point).sub(&p.loc().mul(&step))
+                .floor_to(&snap_step.mul(&step)).into());
 
         Ok(match self.focus {
             Focus::None => self.set_focus(Focus::HoverPlane)
@@ -541,43 +542,39 @@ impl<T: Graphable> GraphEditor<T> {
             Focus::HoverPlane => match (event.left, event.shift, event.meta) {
                 (x, _, true) =>
                     Some(Focus::HoverPlaneWMeta(event.point, x,
-                        T::draw_meta_held([w.into(), h.into()], [self.scale_x, self.scale_y]).add_loc(loc!())?)),
+                        T::draw_meta_held(size.into_array(), self.scale).add_loc(loc!())?)),
                 (true, true, _) =>
                     Some(zoom_plane_focus()),
                 (true, false, _) =>
-                    self.point_by_pos(x, y)
-                        .map(|(id, p)| (id, p.loc()))
+                    Some(self.point_by_pos(loc)
                         .map_or_else(|| Focus::MovePlane(event.point - self.offset),
-                            |(id, [x, y])| Focus::MovePoint(id, event.point - Point{x: (x * step_x).into(), y: (y * step_y).into()}))
-                        .into(),
+                            |(id, p)| move_point_focus(id, p))),
                 (false, true, _) =>
                     Some(Focus::HoverPlaneWShift(event.point)),
                 (false, false, _) =>
-                    self.point_by_pos(x, y).map(|(id, _)| Focus::HoverPoint(id))
+                    self.point_by_pos(loc).map(|(id, _)| Focus::HoverPoint(id))
             }.map(|x| self.set_focus(x)).pipe(|_| None),
 
             Focus::HoverPoint(id) => match (event.left, event.shift, event.meta) {
                 (x, _, true) =>
                     Some(Focus::HoverPlaneWMeta(event.point, x,
-                        T::draw_meta_held([w.into(), h.into()], [self.scale_x, self.scale_y]).add_loc(loc!())?)),
+                        T::draw_meta_held(size.into_array(), self.scale).add_loc(loc!())?)),
                 (true, true, _) => Some(zoom_plane_focus()),
-                (true, false, _) =>
-                    Some(Focus::MovePoint(id,
-                        event.point - unsafe{self.data.get_unchecked(id)}.loc().pipe(|[x, y]| Point::from([x * step_x, y * step_y])))),
+                (true, false, _) => Some(move_point_focus(id, unsafe{self.get_unchecked(id)})),
                 (false, true, _) => Some(Focus::HoverPlaneWShift(event.point)),
                 (false, false, _) =>
-                    unsafe{self.data.get_unchecked(id)}.in_hitbox([x, y])
+                    unsafe{self.data.get_unchecked(id)}.in_hitbox(loc)
                         .not().then_some(Focus::HoverPlane),
             }.map(|x| self.set_focus(x)).pipe(|_| None),
 
             Focus::MovePlane(ref mut last) => if event.left {
                 event.point -= self.offset;
                 if !T::OFFSET_X_BOUND.is_empty() {
-                    self.offset.x = T::OFFSET_X_BOUND.map(|x| x * step_x)
+                    self.offset.x = T::OFFSET_X_BOUND.map(|x| x * step[0])
                         .extend(self.offset.x).fit(self.offset.x + last.x - event.point.x);
                 }
                 if !T::OFFSET_Y_BOUND.is_empty() {
-                    self.offset.y = T::OFFSET_Y_BOUND.map(|x| x * step_y)
+                    self.offset.y = T::OFFSET_Y_BOUND.map(|y| y * step[1])
                         .extend(self.offset.y).fit(self.offset.y + last.y - event.point.y);
                 }
                 *last = event.point;
@@ -588,11 +585,12 @@ impl<T: Graphable> GraphEditor<T> {
             }.tee(|_| self.redraw = true),
 
             Focus::MovePoint(id, offset) => if event.left {
+                js_log!("{:?}", R64::array_from(offset).div(&step));
                 let n_points = self.data.len();
                 let point = unsafe{self.data.get_unchecked_mut(id)};
                 let res = point.set_loc(n_points, id,
-                    || T::X_BOUND.fit(R64::from(event.point.x - offset.x) / step_x).floor_to(ctx.snap_step),
-                    || T::Y_BOUND.fit(R64::from(event.point.y - offset.y) / step_y).floor_to(T::Y_SNAP));
+                    || T::X_BOUND.fit(R64::from(event.point.x - offset.x) / step[0]).floor_to(ctx.snap_step),
+                    || T::Y_BOUND.fit(R64::from(event.point.y - offset.y) / step[1]).floor_to(T::Y_SNAP));
                 let new_id = unsafe{self.data.reorder_unchecked_by_key(id, |x| x.loc()[0])};
                 if new_id != id {
                     self.focus = Focus::MovePoint(new_id, offset);
@@ -614,24 +612,23 @@ impl<T: Graphable> GraphEditor<T> {
                 (true, true) => 
                     self.focus = zoom_plane_focus(),
                 (true, false) =>
-                    self.focus = self.point_by_pos(x, y)
-                        .map(|(id, p)| (id, p.loc()))
+                    self.focus = self.point_by_pos(loc)
                         .map_or_else(|| Focus::MovePlane(event.point - self.offset),
-                            |(id, [x, y])| Focus::MovePoint(id, event.point - Point{x: (x * step_x).into(), y: (y * step_y).into()})),
+                            |(id, p)| move_point_focus(id, p)),
                 (false, true) => *point = event.point,
                 (false, false) => self.focus = Focus::HoverPlane,
             }.pipe(|_| {self.redraw = true; None}),
 
-            Focus::ZoomPlane{init_offset, init_scale_x, init_scale_y, pivot} => match (event.left, event.shift) {
+            Focus::ZoomPlane{init_offset, init_scale, pivot} => match (event.left, event.shift) {
                 (true, _) => {
                     event.point -= self.offset - init_offset;
                     if !T::SCALE_X_BOUND.is_empty() {
-                        self.scale_x = T::SCALE_X_BOUND.fit(r64![50.0] / h * (event.point.x - pivot.x) + init_scale_x);
-                        self.offset.x = ((init_scale_x - self.scale_x) * pivot.x / self.scale_x + init_offset.x).into();
+                        self.scale[0] = T::SCALE_X_BOUND.fit(r64![50.0] / size[1] * (event.point.x - pivot.x) + init_scale[0]);
+                        self.offset.x = ((init_scale[0] - self.scale[0]) * pivot.x / self.scale[0] + init_offset.x).into();
                     }
                     if !T::SCALE_Y_BOUND.is_empty() {
-                        self.scale_y = T::SCALE_Y_BOUND.fit(r64![50.0] / w * (event.point.y - pivot.y) + init_scale_y);
-                        self.offset.y = ((init_scale_y - self.scale_y) * pivot.y / self.scale_y + init_offset.y).into();
+                        self.scale[1] = T::SCALE_Y_BOUND.fit(r64![50.0] / size[0] * (event.point.y - pivot.y) + init_scale[1]);
+                        self.offset.y = ((init_scale[1] - self.scale[1]) * pivot.y / self.scale[1] + init_offset.y).into();
                     }
                 }
 
@@ -646,15 +643,13 @@ impl<T: Graphable> GraphEditor<T> {
                     None
                 }
                 (false, false, true) | (true, true, _) => {
-                    *point = Point{x: R64::from(event.point.x).floor_to(ctx.snap_step * step_x).into(),
-                        y: R64::from(event.point.y).floor_to(T::Y_SNAP * step_y).into()};
+                    *point = R64::array_from(event.point).floor_to(&snap_step.mul(&step)).into();
                     None
                 }
                 (true, false, false) => {
-                    self.focus = self.point_by_pos(x, y)
-                        .map(|(id, p)| (id, p.loc()))
+                    self.focus = self.point_by_pos(loc)
                         .map_or_else(|| Focus::MovePlane(event.point - self.offset),
-                            |(id, [x, y])| Focus::MovePoint(id, event.point - Point{x: (x * step_x).into(), y: (y * step_y).into()}));
+                            |(id, p)| move_point_focus(id, p));
                     None
                 }
                 (true, false, true) => {
@@ -663,11 +658,10 @@ impl<T: Graphable> GraphEditor<T> {
                     None
                 }
                 (false, true, meta) => {
-                    let res = meta.and_then(|| T::on_meta_click(|| {
-                        let x = (R64::from(event.point.x) / step_x).check_in(T::X_BOUND).ok()?;
-                        let y = (R64::from(event.point.y) / step_y).check_in(T::Y_BOUND).ok()?;
-                        Some([x.floor_to(ctx.snap_step), y.floor_to(T::Y_SNAP)])
-                    }));
+                    let res = meta.and_then(|| T::on_meta_click(||
+                        Some(R64::array_from(event.point).div(&step)
+                            .array_check_in(&[T::X_BOUND, T::Y_BOUND])?
+                            .floor_to(&snap_step))));
                     self.set_focus(Focus::HoverPlane);
                     res
                 }
@@ -685,8 +679,7 @@ impl<T: Graphable> GraphEditor<T> {
         ctx.set_fill_style(&Self::BG_STYLE.into());
         ctx.fill_rect(0.0, 0.0, *w, *h);
 
-        let step_x = w / self.scale_x;
-        let step_y = h / self.scale_y;
+        let [step_x, step_y] = [w, h].div(&self.scale);
         let offset_x = R64::from(-self.offset.x)
             % (self.offset.x > (T::X_BOUND.start * step_x).into())
                 .choose(step_x, R64::INFINITY);
