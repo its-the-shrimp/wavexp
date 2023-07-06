@@ -1,8 +1,7 @@
 use std::{
     ops::{Add, Sub, Range},
     fmt::{self, Display, Formatter, Debug},
-    f64::consts::PI,
-    mem::{transmute, replace},
+    mem::replace,
     cmp::Ordering,
     rc::Rc,
     borrow::Cow};
@@ -20,12 +19,13 @@ use crate::{
         JsResult,
         JsResultUtils,
         R64, R32,
-        LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt, js_error, Take, RangeExt},
+        LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt, js_error, Take, RangeExt, SliceRef},
     input::{Slider, Button},
     visual::{GraphEditor, Graphable},
     global::{AppContext, AppEvent},
     loc,
-    r32, r64, js_log
+    r32,
+    r64
 };
 
 pub type MSecs = R64;
@@ -161,21 +161,28 @@ impl SoundType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PitchPoint {
+pub struct NoteBlock {
     pub offset: Beats,
     pub value: Note,
     pub len: Beats
 }
 
-impl Graphable for PitchPoint {
-    const EDITOR_NAME: &'static str = "Pitch Editor";
+pub enum NoteBlockEvent {
+    Add(R64, Note),
+    Remove(usize),
+    SetLen(usize, R64),
+    Redraw
+}
+
+impl Graphable for NoteBlock {
+    const EDITOR_NAME: &'static str = "Note Editor";
     // TODO: make this generic over the number of defined notes
     const Y_BOUND: Range<R64> = r64![0.0] .. r64![36.0];
     const SCALE_Y_BOUND: Range<R64> = r64![40.0] .. r64![40.0];
     const OFFSET_Y_BOUND: Range<R64> = r64![-2.0] .. r64![-2.0];
     const Y_SNAP: R64 = r64![1.0];
     type Inner = Beats;
-    type Event = (f64, Note);
+    type Event = NoteBlockEvent;
 
     #[inline] fn inner(&self) -> &Self::Inner {&self.len}
     #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.len}
@@ -188,15 +195,15 @@ impl Graphable for PitchPoint {
     -> Option<Self::Event> {
         self.value = Note::from_index(y().into()).recip();
         let old = replace(&mut self.offset, x());
-        (old != self.offset).then_some((f64::NAN, Note::default()))
+        (old != self.offset).then_some(NoteBlockEvent::Redraw)
     }
 
-    fn draw(&self, _next: Option<&Self>, mapper: impl Fn([f64; 2]) -> [f64; 2]) -> JsResult<Path2d> {
+    fn draw(&self, _next: Option<&Self>, mapper: impl Fn([R64; 2]) -> [R64; 2]) -> JsResult<Path2d> {
         let res = Path2d::new().add_loc(loc!())?;
-        let y = self.value.recip().index() as f64;
-        let src = mapper([*self.offset, y]);
-        let dst = mapper([*self.offset + *self.len, y + 1.0]);
-        res.rect(src[0], src[1], dst[0] - src[0], dst[1] - src[1]);
+        let y: R64 = self.value.recip().index().into();
+        let src = mapper([self.offset, y]);
+        let dst = mapper([self.offset + self.len, y + 1u8]);
+        res.rect(*src[0], *src[1], *dst[0] - *src[0], *dst[1] - *src[1]);
         Ok(res)
     }
 
@@ -209,8 +216,20 @@ impl Graphable for PitchPoint {
         Ok(res)
     }
 
-    #[inline] fn on_meta_click(loc: impl FnOnce() -> Option<[R64; 2]>) -> Option<Self::Event> {
-        loc().map(|[x, y]| (*x, Note::from_index(y.into()).recip()))
+    #[inline] fn on_meta_click(loc: impl Fn() -> Option<[R64; 2]>) -> Option<Self::Event> {
+        loc().map(|[x, y]| NoteBlockEvent::Add(x, Note::from_index(y.into()).recip()))
+    }
+
+    #[inline] fn on_meta_click_point<'a, F>(point: F) -> Option<Self::Event>
+    where Self: 'a, F: Fn() -> SliceRef<'a, Self> {
+        let p = point();
+        (*p.len == 0.0).then_some(NoteBlockEvent::Remove(p.index()))
+    }
+
+    #[inline] fn on_meta_drag_point<'a, F1, F2>(point: F1, loc: F2) -> Option<Self::Event>
+    where Self: 'a, F1: Fn() -> SliceRef<'a, Self>, F2: Fn() -> Option<[R64; 2]> {
+        let p = point();
+        loc().filter(|[x, _]| *x >= p.offset).map(|[x, _]| NoteBlockEvent::SetLen(p.index(), x - p.offset))
     }
 
     #[inline] fn in_hitbox(&self, point: [R64; 2]) -> bool {
@@ -224,91 +243,24 @@ impl Graphable for PitchPoint {
         } else {"--.---, --".to_owned()}
     }
 
-    #[inline] fn meta_held_hint(loc: Option<[R64; 2]>) -> Option<[Cow<'static, str>; 2]> {
-        Some(["Pitch Editor: adding new point".into(), loc.map_or_default(|[x, y]|
-            format!("Click to add a point at {x:.3}, {}", Note::from_index(y.into()).recip()).into())])
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VolumePoint {
-    offset: R64,
-    value: R32
-}
-
-impl Graphable for VolumePoint {
-    const EDITOR_NAME: &'static str = "Volume Editor";
-    const Y_BOUND: Range<R64> = r64![0.0] .. r64![10.0];
-    const SCALE_Y_BOUND: Range<R64> = r64![12.0] .. r64![12.0];
-    const OFFSET_Y_BOUND: Range<R64> = r64![-1.0] .. r64![-1.0];
-    const Y_SNAP: R64 = r64![0.0];
-    type Inner = ();
-    type Event = (R64, R32);
-
-    #[inline] fn inner(&self) -> &Self::Inner {&()}
-    #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {
-        unsafe{transmute(self)}
+    #[inline] fn meta_held_hint(loc: Option<[R64; 2]>, _: bool) -> Option<[Cow<'static, str>; 2]> {
+        Some(["Note Editor: adding new note".into(), loc.map_or_default(|loc|
+            format!("Click to add a point @ {}", Self::fmt_loc(Some(loc))).into())])
     }
 
-    #[inline] fn loc(&self) -> [R64; 2] {
-        [self.offset, (self.value * -10i8 + 10u8).into()]
-    }
-
-    #[inline] fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R64, y: impl FnOnce() -> R64)
-    -> Option<Self::Event> {
-        self.value = (y() / -10i8 + 1u8).into();
-        if ![0, n_points - 1].contains(&self_id) {
-            self.offset = x();
-        }
-        None
-    }
-
-    #[inline] fn on_meta_click(loc: impl FnOnce() -> Option<[R64; 2]>) -> Option<Self::Event> {
-        loc().map(|[x, y]| (x, R32::from(y) / -10i8 + 1u8))
-    }
-
-    fn draw(&self, next: Option<&Self>, mapper: impl Fn([f64; 2]) -> [f64; 2]) -> JsResult<Path2d> {
-        let res = Path2d::new().add_loc(loc!())?;
-        let src = mapper([*self.offset, *self.value as f64 * -10.0 + 10.0]);
-        res.ellipse(src[0], src[1], 5.0, 5.0, 0.0, 0.0, PI * 2.0).add_loc(loc!())?;
-        if let Some(next) = next {
-            let dst = mapper([*next.offset, *next.value as f64 * -10.0 + 10.0]);
-            res.move_to(src[0], src[1]);
-            res.line_to(dst[0], dst[1]);
-        }
-        Ok(res)
-    }
-
-    fn draw_meta_held(canvas_size: [R64; 2], _: [R64; 2]) -> JsResult<Path2d> {
-        let res = Path2d::new().add_loc(loc!())?;
-        res.move_to(-*canvas_size[0], 0.0);
-        res.line_to( *canvas_size[0], 0.0);
-        res.move_to(0.0, -*canvas_size[1]);
-        res.line_to(0.0,  *canvas_size[1]);
-        Ok(res)
-    }
-
-    #[inline] fn in_hitbox(&self, point: [R64; 2]) -> bool {
-        (*self.value * -10.0 + 10.0).loose_eq(*point[1] as f32, 0.25)
-            && self.offset.loose_eq(point[0], 0.25)
-    }
-
-    #[inline] fn fmt_loc(loc: Option<[R64; 2]>) -> String {
-        if let Some([x, y]) = loc {
-            format!("{x:.3}, {:.3}%", *y * -10.0 + 100.0)
-        } else {"--.--- --%".to_owned()}
-    }
-
-    #[inline] fn meta_held_hint(loc: Option<[R64; 2]>) -> Option<[Cow<'static, str>; 2]> {
-        Some(["Volume Editor: adding new point".into(), loc.map_or_default(|[x, y]|
-            format!("Click to add a point at {x:.3}, {:.3}%", *y * -10.0 + 100.0).into())])
+    #[inline] fn meta_held_over_point_hint<'a, F>(point: F, left: bool) -> Option<[Cow<'static, str>; 2]>
+    where Self: 'a, F: Fn() -> SliceRef<'a, Self> {
+        let p = point();
+        Some(["Note Editor: changing note length".into(),
+            if left {format!("Length: {:.3}", p.len)}
+            else {format!("Hold LMB to change length of note @ {}", Self::fmt_loc(Some(p.loc())))}.into()])
     }
 }
 
 #[derive(Default, Debug, Clone)]
 pub enum Sound {
     #[default] None,
-    Note{volume: R32, pattern: GraphEditor<PitchPoint>, release: Beats},
+    Note{volume: R32, pattern: GraphEditor<NoteBlock>, release: Beats},
     Noise{gen: AudioBufferSourceNode, src: AudioBuffer,
         gain: GainNode, len: Beats}
 }
@@ -509,14 +461,27 @@ impl Sound {
                     None
                 }
 
-                AppEvent::HoverTab(e) =>
-                    match pattern.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())? {
-                        Some((offset, value)) => if let Ok(offset) = offset.try_into() {
-                            pattern.add_point(PitchPoint{offset, value, len: r64![1.0]});
-                        }.pipe(|_| Some(AppEvent::RedrawEditorPlane)),
-
-                        None => None
+                AppEvent::HoverTab(e) => match pattern.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())? {
+                    Some(NoteBlockEvent::Add(offset, value)) => {
+                        pattern.add_point(NoteBlock{offset, value, len: r64![1.0]});
+                        Some(AppEvent::RedrawEditorPlane)
                     }
+
+                    Some(NoteBlockEvent::Remove(id)) => {
+                        pattern.del_point(id).add_loc(loc!())?;
+                        Some(AppEvent::RedrawEditorPlane)
+                    }
+
+                    Some(NoteBlockEvent::SetLen(id, len)) => {
+                        *unsafe{pattern.get_unchecked_mut(id)}.inner() = len;
+                        pattern.force_redraw();
+                        Some(AppEvent::RedrawEditorPlane)
+                    }
+
+                    Some(NoteBlockEvent::Redraw) => Some(AppEvent::RedrawEditorPlane),
+
+                    None => None
+                }
 
                 AppEvent::LeaveTab => pattern
                     .handle_hover(None, ctx).add_loc(loc!())?
@@ -564,33 +529,33 @@ impl Sound {
 }
 
 #[derive(Debug)]
-pub struct PatternBlock {
+pub struct SoundBlock {
     pub sound: Sound,
     pub layer: i32,
     pub offset: Beats
 }
 
-impl PartialEq for PatternBlock {
+impl PartialEq for SoundBlock {
     #[inline] fn eq(&self, other: &Self) -> bool {
         self.offset.eq(&other.offset)
     }
 }
 
-impl Eq for PatternBlock {}
+impl Eq for SoundBlock {}
 
-impl PartialOrd for PatternBlock {
+impl PartialOrd for SoundBlock {
     #[inline] fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.offset.partial_cmp(&other.offset)
     }
 }
 
-impl Ord for PatternBlock {
+impl Ord for SoundBlock {
     #[inline] fn cmp(&self, other: &Self) -> Ordering {
         self.offset.cmp(&other.offset)
     }
 }
 
-impl Graphable for PatternBlock {
+impl Graphable for SoundBlock {
     const EDITOR_NAME: &'static str = "Editor plane";
     const Y_BOUND: Range<R64> = r64![0.0] .. R64::INFINITY;
     const SCALE_Y_BOUND: Range<R64> = r64![5.0] .. r64![30.0];
@@ -622,11 +587,11 @@ impl Graphable for PatternBlock {
         self.sound.name().to_owned()
     }
 
-    fn draw(&self, _: Option<&Self>, mapper: impl Fn([f64; 2]) -> [f64; 2]) -> JsResult<Path2d> {
+    fn draw(&self, _: Option<&Self>, mapper: impl Fn([R64; 2]) -> [R64; 2]) -> JsResult<Path2d> {
         let res = Path2d::new().add_loc(loc!())?;
-        let src = mapper([*self.offset, self.layer as f64]);
-        let dst = mapper([*self.offset + *self.sound.len(), (self.layer + 1) as f64]);
-        res.rect(src[0], src[1], dst[0] - src[0], dst[1] - src[1]);
+        let src = mapper([self.offset, self.layer.into()]);
+        let dst = mapper([self.offset + self.sound.len(), (self.layer + 1).into()]);
+        res.rect(*src[0], *src[1], *dst[0] - *src[0], *dst[1] - *src[1]);
         Ok(res)
     }
 
@@ -646,7 +611,7 @@ impl Graphable for PatternBlock {
 
     #[inline] fn fmt_loc(loc: Option<[R64; 2]>) -> String {
         if let Some([x, y]) = loc {
-            format!("{x:.3}, layer {}", *y as i32)
+            format!("{x:.3}, layer {y:.0}")
         } else {"--.---, layer --".to_owned()}
     }
 
@@ -654,13 +619,24 @@ impl Graphable for PatternBlock {
         Some(AppEvent::Select(self_id))
     }
 
-    #[inline] fn on_meta_click(loc: impl FnOnce() -> Option<[R64; 2]>) -> Option<Self::Event> {
+    #[inline] fn on_meta_click_point<'a, F>(point: F) -> Option<Self::Event>
+    where Self: 'a, F: Fn() -> SliceRef<'a, Self> {
+        Some(AppEvent::Select(Some(point().index())))
+    }
+
+    #[inline] fn on_meta_click(loc: impl Fn() -> Option<[R64; 2]>) -> Option<Self::Event> {
         loc().map(|[x, y]| AppEvent::Add(y.into(), x))
     }
 
-    #[inline] fn meta_held_hint(loc: Option<[R64; 2]>) -> Option<[Cow<'static, str>; 2]> {
+    #[inline] fn meta_held_hint(loc: Option<[R64; 2]>, _: bool) -> Option<[Cow<'static, str>; 2]> {
         Some(["Editor plane: adding new block".into(), loc.map_or_default(|[x, y]|
             format!("Click to add a block at {x:.3}, layer {y:.0}").into())])
+    }
+
+    #[inline] fn meta_held_over_point_hint<'a, F>(point: F, _: bool) -> Option<[Cow<'static, str>; 2]>
+    where Self: 'a, F: Fn() -> SliceRef<'a, Self> {
+        Some(["Editor plane: selecting block".into(),
+            format!{"Click to select point @ {}", Self::fmt_loc(Some(point().loc()))}.into()])
     }
 }
 
@@ -706,7 +682,7 @@ impl SoundEvent {
 }
 
 pub struct Sequencer {
-    pattern: GraphEditor<PatternBlock>,
+    pattern: GraphEditor<SoundBlock>,
     pending: Vec<SoundEvent>,
     plug: DynamicsCompressorNode,
     gain: GainNode,
@@ -738,18 +714,18 @@ impl Sequencer {
         self.pattern.canvas()
     }
 
-    #[inline] pub fn pattern_mut(&mut self) -> &mut GraphEditor<PatternBlock> {
+    #[inline] pub fn pattern_mut(&mut self) -> &mut GraphEditor<SoundBlock> {
         &mut self.pattern
     }
 
-    #[inline] pub fn pattern(&self) -> &GraphEditor<PatternBlock> {
+    #[inline] pub fn pattern(&self) -> &GraphEditor<SoundBlock> {
         &self.pattern
     }
 
     pub fn handle_event(&mut self, event: &AppEvent, ctx: &AppContext) -> JsResult<Option<AppEvent>> {
         Ok(match event {
             &AppEvent::Add(layer, offset) => self.pattern
-                .add_point(PatternBlock{sound: Sound::default(), layer, offset})
+                .add_point(SoundBlock{sound: Sound::default(), layer, offset})
                 .pipe(|_| None),
 
             AppEvent::Select(mut id) => {
@@ -832,7 +808,6 @@ impl Sequencer {
 
                         while !due_now.is_empty() {
                             for event in due_now.take() {
-                                js_log!("{event:?}");
                                 block.inner().poll(&self.plug, &ctx, event, |new| if new.when() > now {
                                     self.pending.push_sorted(new);
                                 } else {

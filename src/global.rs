@@ -16,11 +16,13 @@ use yew::{
     Html,
     html};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, PatternBlock, FromBeats},
+    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats},
     visual::{HintHandler, SoundVisualiser, Graphable},
     utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult},
     input::{Button, Slider, Switch},
-    loc, r64, js_try};
+    loc,
+    r64,
+    js_try};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, PartialEq, Clone)]
@@ -234,7 +236,7 @@ impl Component for App {
         html! {<>
             <div id="main-panel">
                 <div id="ctrl-panel" class="dark-bg"
-                data-main-hint="Settings" data-aux-hint={block.map_or_else(|| "General".to_owned(), PatternBlock::desc)}>
+                data-main-hint="Settings" data-aux-hint={block.map_or_else(|| "General".to_owned(), SoundBlock::desc)}>
                     <div id="hint" class="light-bg"
                     data-main-hint="Hint bar" data-aux-hint="for useful messages about the app's controls">
                         <span id="main-hint" ref={self.hint_handler.main_bar().clone()}/>

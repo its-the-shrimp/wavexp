@@ -174,6 +174,26 @@ impl<T> WasmCell<T> {
     pub const fn new(val: T) -> Self {Self(val)}
 }
 
+pub struct SliceRef<'a, T: ?Sized> {
+    inner: &'a T,
+    index: usize
+}
+
+impl<'a, T> Deref for SliceRef<'a, T> {
+    type Target = T;
+    #[inline] fn deref(&self) -> &Self::Target {self.inner}
+}
+
+impl<'a, T> SliceRef<'a, T> {
+    #[inline] pub fn new(slice: &'a [T], index: usize) -> Option<Self> {
+        slice.get(index).map(|inner| Self{inner, index}) 
+    }
+
+    #[inline] pub unsafe fn raw(inner: &'a T, index: usize) -> Self {Self{inner, index}}
+
+    #[inline] pub fn index(&self) -> usize {self.index}
+}
+
 #[allow(non_camel_case_types)]
 #[allow(dead_code)]
 pub mod js_types {
@@ -524,6 +544,7 @@ pub trait SliceExt<T> {
     //  where F: FnMut(&T, &T) -> Ordering
     // fn set_sorted_by_key<K, F>(&mut self, index: usize, value: T, f: F) -> Result<usize, SetSortedError>
     //  where F: FnMut(&T) -> K, K: Ord
+    fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>>;
 }
 
 impl<T> SliceExt<T> for [T] {
@@ -618,6 +639,10 @@ impl<T> SliceExt<T> for [T] {
             *dst = value;
             if should_reorder {self.reorder_unchecked(index)} else {index}
         })
+    }
+
+    #[inline] fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>> {
+        SliceRef::new(self, index)
     }
 }
 
