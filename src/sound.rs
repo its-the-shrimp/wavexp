@@ -1,7 +1,6 @@
 use std::{
-    ops::{Add, Sub, Range},
+    ops::{Add, Sub, Range, AddAssign},
     fmt::{self, Display, Formatter, Debug},
-    mem::replace,
     cmp::Ordering,
     rc::Rc,
     borrow::Cow};
@@ -19,8 +18,8 @@ use crate::{
         JsResult,
         JsResultUtils,
         R64, R32,
-        LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt, js_error, Take, RangeExt, SliceRef},
-    input::{Slider, Button},
+        LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt, js_error, Take, RangeExt, SliceRef, BoolExt, Check},
+    input::{Slider, Button, Buttons},
     visual::{GraphEditor, Graphable},
     global::{AppContext, AppEvent},
     loc,
@@ -61,7 +60,13 @@ impl Display for Note {
 impl Add<isize> for Note {
     type Output = Note;
     #[inline] fn add(self, rhs: isize) -> Self::Output {
-        Self((0 .. Self::N_NOTES as isize).fit((self.0 as isize).saturating_add(rhs)) as u8)
+        Self((self.0 as usize).saturating_add_signed(rhs).max(Self::N_NOTES) as u8)
+    }
+}
+
+impl AddAssign<isize> for Note {
+    #[inline] fn add_assign(&mut self, rhs: isize) {
+        self.0 = (self.0 as usize).saturating_add_signed(rhs).max(Self::N_NOTES) as u8;
     }
 }
 
@@ -167,10 +172,21 @@ pub struct NoteBlock {
     pub len: Beats
 }
 
+impl PartialOrd for NoteBlock {
+    #[inline] fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.offset.partial_cmp(&other.offset)
+    }
+}
+
+impl Ord for NoteBlock {
+    #[inline] fn cmp(&self, other: &Self) -> Ordering {
+        self.offset.cmp(&other.offset)
+    }
+}
+
 pub enum NoteBlockEvent {
     Add(R64, Note),
-    Remove(usize),
-    SetLen(usize, R64),
+    Remove(Box<[usize]>),
     Redraw
 }
 
@@ -191,45 +207,36 @@ impl Graphable for NoteBlock {
         [self.offset, self.value.recip().index().into()]
     }
 
-    #[inline] fn set_loc(&mut self, _n_points: usize, _self_id: usize, x: impl FnOnce() -> R64, y: impl FnOnce() -> R64)
-    -> Option<Self::Event> {
-        self.value = Note::from_index(y().into()).recip();
-        let old = replace(&mut self.offset, x());
-        (old != self.offset).then_some(NoteBlockEvent::Redraw)
+    #[inline] fn move_point(&mut self, delta: [R64; 2], meta: bool) {
+        *meta.choose(&mut self.len, &mut self.offset) += delta[0];
+        self.value += delta[1].into();
+    }
+
+    #[inline] fn on_move(ids: &[usize], n_points: usize, _: [R64; 2], _: bool) -> Option<Self::Event> {
+        ids.contains(&(n_points - 1)).then_some(NoteBlockEvent::Redraw)
+    }
+
+    #[inline] fn on_click<'a, F, I1, I2>(loc: F, old_sel: I1, new_sel: I2, meta: bool) -> Option<Self::Event>
+    where Self: 'a,
+        F: Fn() -> [R64; 2],
+        I1: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
+        I2: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator
+    {
+        if new_sel.len() == 0 && old_sel.len() == 0 && meta {
+            let [x, y] = loc();
+            return Some(NoteBlockEvent::Add(x, Note::from_index(y.into()).recip()))
+        }
+        old_sel.filter_map(|x| (x.len == 0).then_some(x.index())).collect::<Box<_>>()
+            .check(|x| x.len() > 0).ok().map(NoteBlockEvent::Remove)
     }
 
     fn draw(&self, _next: Option<&Self>, mapper: impl Fn([R64; 2]) -> [R64; 2]) -> JsResult<Path2d> {
         let res = Path2d::new().add_loc(loc!())?;
         let y: R64 = self.value.recip().index().into();
         let src = mapper([self.offset, y]);
-        let dst = mapper([self.offset + self.len, y + 1u8]);
+        let dst = mapper([self.offset + self.len.max(R64::ZERO), y + 1u8]);
         res.rect(*src[0], *src[1], *dst[0] - *src[0], *dst[1] - *src[1]);
         Ok(res)
-    }
-
-    fn draw_meta_held(canvas_size: [R64; 2], _: [R64; 2]) -> JsResult<Path2d> {
-        let res = Path2d::new().add_loc(loc!())?;
-        res.move_to(-*canvas_size[0], 0.0);
-        res.line_to( *canvas_size[0], 0.0);
-        res.move_to(0.0, -*canvas_size[1]);
-        res.line_to(0.0,  *canvas_size[1]);
-        Ok(res)
-    }
-
-    #[inline] fn on_meta_click(loc: impl Fn() -> Option<[R64; 2]>) -> Option<Self::Event> {
-        loc().map(|[x, y]| NoteBlockEvent::Add(x, Note::from_index(y.into()).recip()))
-    }
-
-    #[inline] fn on_meta_click_point<'a, F>(point: F) -> Option<Self::Event>
-    where Self: 'a, F: Fn() -> SliceRef<'a, Self> {
-        let p = point();
-        (*p.len == 0.0).then_some(NoteBlockEvent::Remove(p.index()))
-    }
-
-    #[inline] fn on_meta_drag_point<'a, F1, F2>(point: F1, loc: F2) -> Option<Self::Event>
-    where Self: 'a, F1: Fn() -> SliceRef<'a, Self>, F2: Fn() -> Option<[R64; 2]> {
-        let p = point();
-        loc().filter(|[x, _]| *x >= p.offset).map(|[x, _]| NoteBlockEvent::SetLen(p.index(), x - p.offset))
     }
 
     #[inline] fn in_hitbox(&self, point: [R64; 2]) -> bool {
@@ -237,30 +244,58 @@ impl Graphable for NoteBlock {
             && (self.offset .. self.offset + self.len).contains(&point[0])
     }
 
-    #[inline] fn fmt_loc(loc: Option<[R64; 2]>) -> String {
-        if let Some([x, y]) = loc {
-            format!("{x:.3}, {}", Note::from_index(y.into()).recip())
-        } else {"--.---, --".to_owned()}
+    #[inline] fn fmt_loc(loc: [R64; 2]) -> String {
+        format!("{:.3}, {}", loc[0], Note::from_index(loc[1].into()).recip())
     }
 
-    #[inline] fn meta_held_hint(loc: Option<[R64; 2]>, _: bool) -> Option<[Cow<'static, str>; 2]> {
-        Some(["Note Editor: adding new note".into(), loc.map_or_default(|loc|
-            format!("Click to add a point @ {}", Self::fmt_loc(Some(loc))).into())])
+    #[inline] fn plane_hover_hint(_: impl Fn() -> [R64; 2], buttons: Buttons) -> Option<[Cow<'static, str>; 2]> {
+        Some(match buttons {
+            Buttons{left: false, meta: false, ..} =>
+                [Self::EDITOR_NAME.into(), "Hold & drag to move around (press Meta for actions)".into()],
+            Buttons{left: false, meta: true, ..} =>
+                [Self::EDITOR_NAME.into(), "Click to add note, hold & drag to select".into()],
+            Buttons{left: true, meta: false, ..} =>
+                [Cow::from(Self::EDITOR_NAME) + ": Moving", "Release to stop".into()],
+            Buttons{left: true, meta: true, ..} =>
+                [Cow::from(Self::EDITOR_NAME) + ": Selecting", "Release to select".into()]
+        })
     }
 
-    #[inline] fn meta_held_over_point_hint<'a, F>(point: F, left: bool) -> Option<[Cow<'static, str>; 2]>
-    where Self: 'a, F: Fn() -> SliceRef<'a, Self> {
-        let p = point();
-        Some(["Note Editor: changing note length".into(),
-            if left {format!("Length: {:.3}", p.len)}
-            else {format!("Hold LMB to change length of note @ {}", Self::fmt_loc(Some(p.loc())))}.into()])
+    #[inline] fn point_hover_hint<'a>(point: SliceRef<'a, Self>, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
+    where Self: 'a {
+        Some(match buttons {
+            Buttons{left: false, meta: false, ..} =>
+                [format!("Note @ {}", Self::fmt_loc(point.loc())).into(), "LMB to move, LMB + Meta to stretch".into()],
+            Buttons{left: false, meta: true, ..} =>
+                [format!("Note @ {}", Self::fmt_loc(point.loc())).into(), "Hold LMB to stretch it".into()],
+            Buttons{left: true, meta: false, ..} =>
+                [format!("Note @ {}: moving", Self::fmt_loc(point.loc())).into(), "Release to stop".into()],
+            Buttons{left: true, meta: true, ..} =>
+                [format!("Note @ {}: stretching", Self::fmt_loc(point.loc())).into(), "Release to stop".into()]
+        })
+    }
+
+    #[inline] fn selection_hover_hint<'a, I>(mut points: I, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
+    where Self: 'a, I: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator {
+        if let Some(p) = points.next().filter(|_| points.len() == 0) {return Self::point_hover_hint(p, buttons)}
+        Some(match buttons {
+            Buttons{left: false, meta: false, ..} =>
+                ["Multiple notes".into(), "LMB to move, LMB + Meta to stretch".into()],
+            Buttons{left: false, meta: true, ..} =>
+                ["Multiple notes".into(), "Hold LMB to stretch it".into()],
+            Buttons{left: true, meta: false, ..} =>
+                ["Multiple notes: moving".into(), "Release to stop".into()],
+            Buttons{left: true, meta: true, ..} =>
+                ["Multiple notes: stretching".into(), "Release to stop".into()]
+        })
     }
 }
 
 #[derive(Default, Debug, Clone)]
 pub enum Sound {
     #[default] None,
-    Note{volume: R32, pattern: GraphEditor<NoteBlock>, release: Beats},
+    Note{volume: R32, pattern: GraphEditor<NoteBlock>,
+        attack: Beats, decay: Beats, sustain: R32, release: Beats},
     Noise{gen: AudioBufferSourceNode, src: AudioBuffer,
         gain: GainNode, len: Beats}
 }
@@ -274,7 +309,8 @@ impl Sound {
     #[inline] pub fn new(sound_type: SoundType, ctx: &AudioContext) -> JsResult<Self> {
         Ok(match sound_type {
             SoundType::Note =>
-                Self::Note{volume: r32![1.0], pattern: GraphEditor::new(vec![]), release: r64![0.2]},
+                Self::Note{volume: r32![1.0], pattern: GraphEditor::new(vec![]),
+                    attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2]},
 
             SoundType::Noise => {
                 let len = ctx.sample_rate();
@@ -295,7 +331,7 @@ impl Sound {
         match self {
             Sound::None => "Undefined",
             Sound::Note{..} => "Note",
-            Sound::Noise{..} => "Noise"
+            Sound::Noise{..} => "White Noise"
         }
     }
 
@@ -326,7 +362,7 @@ impl Sound {
         Ok(match self {
             Sound::None => (),
 
-            Sound::Note{volume, pattern, release} => match src {
+            Sound::Note{volume, pattern, attack, decay, mut sustain, release} => match src {
                 SoundEvent::BlockStart{id, when, mut state} => {
                     let cur = unsafe{pattern.get_unchecked(state)};
                     let block_core = ctx.audio_ctx.create_oscillator().add_loc(loc!())?;
@@ -334,11 +370,17 @@ impl Sound {
                     block_core.start().add_loc(loc!())?;
                     let block = ctx.audio_ctx.create_gain().add_loc(loc!())?;
                     {
-                        let at = ctx.now + cur.len.to_secs(ctx.bps);
                         let gain = block.gain();
-                        gain.set_value_at_time(**volume, 0.0).add_loc(loc!())?;
-                        gain.set_value_at_time(**volume, *at).add_loc(loc!())?;
-                        gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at + *release.to_secs(ctx.bps)).add_loc(loc!())?;
+                        gain.set_value(f32::MIN_POSITIVE);
+                        let mut at = ctx.now + attack.to_secs(ctx.bps);
+                        gain.linear_ramp_to_value_at_time(**volume, *at).add_loc(loc!())?;
+                        at += decay.to_secs(ctx.bps);
+                        sustain *= *volume;
+                        gain.linear_ramp_to_value_at_time(*sustain, *at).add_loc(loc!())?;
+                        at = ctx.now + cur.len.to_secs(ctx.bps);
+                        gain.set_value_at_time(*sustain, *at).add_loc(loc!())?;
+                        at += release.to_secs(ctx.bps);
+                        gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
                     }
                     block_core.connect_with_audio_node(&block).add_loc(loc!())?
                         .connect_with_audio_node(plug).add_loc(loc!())?;
@@ -355,16 +397,13 @@ impl Sound {
                 src => js_error(format!("invalid event: {src:?}"), loc!())?,
             }
 
-            Sound::Noise{gen, gain, len, ..} => match src {
-                SoundEvent::Start{id, ..} => {
+            Sound::Noise{gain, len, ..} => match src {
+                SoundEvent::Start{id, when} => {
                     gain.connect_with_audio_node(plug).add_loc(loc!())?;
-                    scheduler(SoundEvent::Stop{id, when: *len});
+                    scheduler(SoundEvent::Stop{id, when: when + *len});
                 }
 
-                SoundEvent::Stop{..} => {
-                    gain.disconnect().add_loc(loc!())?;
-                    gen.disconnect().add_loc(loc!())?;
-                }
+                SoundEvent::Stop{..} => gain.disconnect().add_loc(loc!())?,
 
                 src => js_error(format!("invalid event: {src:?}"), loc!())?,
             }
@@ -402,18 +441,32 @@ impl Sound {
                 })}
             </div>},
 
-            Sound::Note{volume, pattern, release} => match ctx.selected_tab {
+            Sound::Note{volume, pattern, attack, decay, sustain, release} => match ctx.selected_tab {
                 0 /* General */ => html!{<div id="inputs">
-                    <Slider key="note-vol"
-                    setter={setter.reform(|x| AppEvent::Volume(R32::from(x)))}
-                    name="Note Volume"
-                    initial={*volume}/>
+                    <Slider key="note-att"
+                    setter={setter.reform(AppEvent::Attack)}
+                    name="Note Attack Time" postfix="Beats"
+                    max={r64![3.0]}
+                    initial={*attack}/>
+                    <Slider key="note-dec"
+                    setter={setter.reform(AppEvent::Decay)}
+                    name="Note Decay Time" postfix="Beats"
+                    max={r64![3.0]}
+                    initial={*decay}/>
+                    <Slider key="note-sus"
+                    setter={setter.reform(|x| AppEvent::Sustain(R32::from(x)))}
+                    name="Note Sustain Level"
+                    initial={*sustain}/>
                     <Slider key="note-rel"
                     setter={setter.reform(AppEvent::Release)}
                     name="Note Release Time" postfix="Beats"
                     min={r64![0.1].secs_to_beats(ctx.bps)}
                     max={r64![3.0]}
                     initial={*release}/>
+                    <Slider key="note-vol"
+                    setter={setter.reform(|x| AppEvent::Volume(R32::from(x)))}
+                    name="Note Volume"
+                    initial={*volume}/>
                 </div>},
                 1 /* Pattern */ => html!{
                     <canvas ref={pattern.canvas().clone()} class="blue-border"
@@ -452,7 +505,7 @@ impl Sound {
                 Some(AppEvent::RedrawEditorPlane)
             } else {None}
 
-            Sound::Note{volume, pattern, release} => match event {
+            Sound::Note{volume, pattern, attack, decay, sustain, release} => match event {
                 AppEvent::FocusTab(e) => {
                     e.target_dyn_into::<Element>().to_js_result(loc!())?
                         .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
@@ -467,14 +520,8 @@ impl Sound {
                         Some(AppEvent::RedrawEditorPlane)
                     }
 
-                    Some(NoteBlockEvent::Remove(id)) => {
-                        pattern.del_point(id).add_loc(loc!())?;
-                        Some(AppEvent::RedrawEditorPlane)
-                    }
-
-                    Some(NoteBlockEvent::SetLen(id, len)) => {
-                        *unsafe{pattern.get_unchecked_mut(id)}.inner() = len;
-                        pattern.force_redraw();
+                    Some(NoteBlockEvent::Remove(ids)) => {
+                        pattern.remove_points(&ids).add_loc(loc!())?;
                         Some(AppEvent::RedrawEditorPlane)
                     }
 
@@ -495,15 +542,11 @@ impl Sound {
                     .redraw(ctx).add_loc(loc!())?
                     .map(|[m, a]| AppEvent::SetHint(m, a)),
 
-                AppEvent::Volume(value) => {
-                    *volume = *value;
-                    None
-                }
-
-                AppEvent::Release(value) => {
-                    *release = *value;
-                    None
-                }
+                AppEvent::Volume(value)  =>  {*volume = *value; None}
+                AppEvent::Attack(value)  =>  {*attack = *value; None}
+                AppEvent::Decay(value)   =>   {*decay = *value; None}
+                AppEvent::Sustain(value) => {*sustain = *value; None}
+                AppEvent::Release(value) => {*release = *value; None}
 
                 AppEvent::AudioStarted(_) => pattern.force_redraw()
                     .pipe(|_| None),
@@ -564,27 +607,18 @@ impl Graphable for SoundBlock {
     type Inner = Sound;
     type Event = AppEvent;
 
-    #[inline] fn inner(&self) -> &Self::Inner {
-        &self.sound
+    #[inline] fn inner(&self) -> &Self::Inner {&self.sound}
+    #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.sound}
+
+    #[inline] fn loc(&self) -> [R64; 2] {[self.offset, self.layer.into()]}
+
+    #[inline] fn move_point(&mut self, delta: [R64; 2], _: bool) {
+        self.offset += delta[0];
+        self.layer += i32::from(delta[1]);
     }
 
-    #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {
-        &mut self.sound
-    }
-
-    #[inline] fn loc(&self) -> [R64; 2] {
-        [self.offset, self.layer.into()]
-    }
-
-    #[inline] fn set_loc(&mut self, _: usize, _: usize, x: impl FnOnce() -> R64, y: impl FnOnce() -> R64)
-    -> Option<Self::Event> {
-        self.offset = x();
-        self.layer = y().into();
-        None
-    }
-
-    #[inline] fn desc(&self) -> String {
-        self.sound.name().to_owned()
+    #[inline] fn desc(&self) -> Cow<'static, str> {
+        self.sound.name().into()
     }
 
     fn draw(&self, _: Option<&Self>, mapper: impl Fn([R64; 2]) -> [R64; 2]) -> JsResult<Path2d> {
@@ -595,48 +629,71 @@ impl Graphable for SoundBlock {
         Ok(res)
     }
 
-    fn draw_meta_held(canvas_size: [R64; 2], _: [R64; 2]) -> JsResult<Path2d> {
-        let res = Path2d::new().add_loc(loc!())?;
-        res.move_to(-*canvas_size[0], 0.0);
-        res.line_to( *canvas_size[0], 0.0);
-        res.move_to(0.0, -*canvas_size[1]);
-        res.line_to(0.0,  *canvas_size[1]);
-        Ok(res)
-    }
-
     #[inline] fn in_hitbox(&self, point: [R64; 2]) -> bool {
         self.layer == *point[1] as i32
-            && (self.offset .. self.offset + self.sound.len()).contains(&point[0])
+            && (self.offset .. self.offset + self.sound.len().max(r64![0.1]))
+                .contains(&point[0])
     }
 
-    #[inline] fn fmt_loc(loc: Option<[R64; 2]>) -> String {
-        if let Some([x, y]) = loc {
-            format!("{x:.3}, layer {y:.0}")
-        } else {"--.---, layer --".to_owned()}
+    #[inline] fn fmt_loc(loc: [R64; 2]) -> String {
+        format!("{:.3}, layer {:.0}", loc[0], loc[1])
     }
 
-    #[inline] fn on_select(self_id: Option<usize>) -> Option<Self::Event> {
-        Some(AppEvent::Select(self_id))
+    #[inline] fn on_click<'a, F, I1, I2>(loc: F, old_sel: I1, new_sel: I2, meta: bool) -> Option<Self::Event>
+    where Self: 'a,
+        F: Fn() -> [R64; 2],
+        I1: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
+        I2: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator
+    {
+        let len = new_sel.len();
+        if len == 0 && old_sel.len() == 0 && meta {
+            let [x, y] = loc();
+            Some(AppEvent::Add(y.into(), x))
+        } else if len > 0 {
+            Some(AppEvent::Select(Some(0)))
+        } else {None}
     }
 
-    #[inline] fn on_meta_click_point<'a, F>(point: F) -> Option<Self::Event>
-    where Self: 'a, F: Fn() -> SliceRef<'a, Self> {
-        Some(AppEvent::Select(Some(point().index())))
+    #[inline] fn plane_hover_hint(_: impl Fn() -> [R64; 2], buttons: Buttons) -> Option<[Cow<'static, str>; 2]> {
+        Some(match buttons {
+            Buttons{left: false, meta: false, ..} =>
+                [Self::EDITOR_NAME.into(), "Hold & drag to move (press Meta for actions)".into()],
+            Buttons{left: false, meta: true, ..} =>
+                [Self::EDITOR_NAME.into(), "Click to add block, hold & drag to select".into()],
+            Buttons{left: true, meta: false, ..} =>
+                [Cow::from(Self::EDITOR_NAME) + ": Moving", "Release to stop".into()],
+            Buttons{left: true, meta: true, ..} =>
+                [Cow::from(Self::EDITOR_NAME) + ": Selecting", "Release to select".into()]
+        })
     }
 
-    #[inline] fn on_meta_click(loc: impl Fn() -> Option<[R64; 2]>) -> Option<Self::Event> {
-        loc().map(|[x, y]| AppEvent::Add(y.into(), x))
+    #[inline] fn point_hover_hint<'a>(point: SliceRef<'a, Self>, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
+    where Self: 'a {
+        Some(match buttons {
+            Buttons{left: false, meta: false, ..} =>
+                [format!("Block @ {}", Self::fmt_loc(point.loc())).into(), "Hold & drag to move (press Meta for other actions)".into()],
+            Buttons{left: false, meta: true, ..} =>
+                [format!("Block @ {}", Self::fmt_loc(point.loc())).into(), "Hold & drag to stretch".into()],
+            Buttons{left: true, meta: false, ..} =>
+                [format!("Block @ {}: moving", Self::fmt_loc(point.loc())).into(), "Release to stop".into()],
+            Buttons{left: true, meta: true, ..} =>
+                [format!("Block @ {}: stretching", Self::fmt_loc(point.loc())).into(), "Release to stop".into()]
+        })
     }
 
-    #[inline] fn meta_held_hint(loc: Option<[R64; 2]>, _: bool) -> Option<[Cow<'static, str>; 2]> {
-        Some(["Editor plane: adding new block".into(), loc.map_or_default(|[x, y]|
-            format!("Click to add a block at {x:.3}, layer {y:.0}").into())])
-    }
-
-    #[inline] fn meta_held_over_point_hint<'a, F>(point: F, _: bool) -> Option<[Cow<'static, str>; 2]>
-    where Self: 'a, F: Fn() -> SliceRef<'a, Self> {
-        Some(["Editor plane: selecting block".into(),
-            format!{"Click to select point @ {}", Self::fmt_loc(Some(point().loc()))}.into()])
+    #[inline] fn selection_hover_hint<'a, I>(mut points: I, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
+    where Self: 'a, I: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator {
+        if let Some(p) = points.next().filter(|_| points.len() == 0) {return Self::point_hover_hint(p, buttons)}
+        Some(match buttons {
+            Buttons{left: false, meta: false, ..} =>
+                ["Multiple blocks".into(), "Click to de-select, hold & drag to move (press Meta for other actions)".into()],
+            Buttons{left: false, meta: true, ..} =>
+                ["Multiple blocks".into(), "Click to de-select, old & drag to stretch".into()],
+            Buttons{left: true, meta: false, ..} =>
+                ["Multiple blocks: moving".into(), "Release to stop".into()],
+            Buttons{left: true, meta: true, ..} =>
+                ["Multiple blocks: stretching".into(), "Release to stop".into()]
+        })
     }
 }
 
@@ -727,15 +784,6 @@ impl Sequencer {
             &AppEvent::Add(layer, offset) => self.pattern
                 .add_point(SoundBlock{sound: Sound::default(), layer, offset})
                 .pipe(|_| None),
-
-            AppEvent::Select(mut id) => {
-                id = id.filter(|x| Some(*x) != self.pattern.fixed_id());
-                self.pattern.fix_point(id).add_loc(loc!())?;
-                None
-            }
-
-            AppEvent::Remove => self.pattern
-                .del_fixed().to_js_result(loc!())?.pipe(|_| None),
 
             AppEvent::StartPlay => {
                 self.pending.clear();

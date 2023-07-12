@@ -1,8 +1,8 @@
 use std::{
-    iter::{Iterator, successors as succ},
-    slice::from_raw_parts,
-    mem::{Discriminant, discriminant, replace},
-    ops::{Not, Range, Deref},
+    iter::{Iterator, successors as succ, empty, once},
+    slice::{from_raw_parts, from_mut, from_ref},
+    mem::{replace, take},
+    ops::{Range, Deref},
     fmt::Debug,
     rc::Rc,
     borrow::Cow};
@@ -10,20 +10,26 @@ use web_sys::{
     HtmlCanvasElement,
     AnalyserNode,
     ImageData,
-    MouseEvent,
     HtmlElement,
-    Path2d, PointerEvent, AudioContext, SvgElement, Element};
+    Path2d,
+    AudioContext, 
+    SvgElement, 
+    Element};
 use wasm_bindgen::{Clamped, JsValue, JsCast};
 use yew::{TargetCast, NodeRef};
 use crate::{
     utils::{Check, SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, OptionExt,
         HtmlElementExt, 
-        Pipe, Tee, BoolExt, RangeExt, VecExt, R64, FloorTo, ArrayExt, ArrayFrom, IntoArray, SliceRef, ResultToJsResult},
+        Pipe, BoolExt, RangeExt, VecExt, R64, ArrayExt, ArrayFrom, IntoArray, SliceRef, ResultToJsResult, SliceMove},
     sound::FromBeats,
     global::{AppEvent, AppContext},
+    input::{Buttons, CanvasEvent},
     loc,
-    r64, js_assert, eval_once, js_array
+    r64,
+    js_assert,
+    eval_once,
+    js_array
 };
 
 pub struct EveryNth<'a, T> {
@@ -205,37 +211,6 @@ impl SoundVisualiser {
     }
 }
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CanvasEvent {
-    pub point: Point,
-    pub left: bool,
-    pub shift: bool,
-    pub meta: bool
-}
-
-impl TryFrom<&MouseEvent> for CanvasEvent {
-    type Error = JsValue;
-    fn try_from(value: &MouseEvent) -> Result<Self, Self::Error> {
-        let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result(loc!())?;
-        let point = Point{x: value.offset_x(), y: value.offset_y()}
-            .normalise(canvas.client_rect(), canvas.rect());
-        Ok(Self{point, left: value.buttons() & 1 == 1,
-            shift: value.shift_key(), meta: value.meta_key()})
-    }
-}
-
-impl TryFrom<&PointerEvent> for CanvasEvent {
-    type Error = JsValue;
-    fn try_from(value: &PointerEvent) -> Result<Self, Self::Error> {
-        let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result(loc!())?;
-        let point = Point{x: value.offset_x(), y: value.offset_y()}
-            .normalise(canvas.client_rect(), canvas.rect());
-        Ok(Self{point, left: value.buttons() & 1 == 1,
-            shift: value.shift_key(), meta: value.meta_key()})
-    }
-}
-
 #[derive(Debug, PartialEq, Default)]
 pub struct HintHandler {
     main_bar: NodeRef,
@@ -290,7 +265,7 @@ impl HintHandler {
 }
 
 /// data that can be edited with a generic graph editor defined below
-pub trait Graphable {
+pub trait Graphable: Ord {
     /// the name of the plane that will be displayed as a hint when hovered over it
     const EDITOR_NAME: &'static str;
     /// bounds for the points along the X axis
@@ -320,61 +295,59 @@ pub trait Graphable {
     fn inner_mut(&mut self) -> &mut Self::Inner;
     /// location of the point in user coordinates
     fn loc(&self) -> [R64; 2];
-    /// set the location of the point in user coordinates when moved in the UI
-    /// can optionally emit an event
-    fn set_loc(&mut self, n_points: usize, self_id: usize, x: impl FnOnce() -> R64, y: impl FnOnce() -> R64)
-    -> Option<Self::Event>;
+    /// change the location of the point in user coordinates when moved in the UI
+    /// `meta` signifies whether the meta key was held while moving the point
+    fn move_point(&mut self, delta: [R64; 2], meta: bool);
     /// returns `true` if the given user coordinates are inside the hitbox of the point
     fn in_hitbox(&self, point: [R64; 2]) -> bool;
 
-    /// event to emit when the point is selected/de-selected in the UI
+    /// event to emit when points are moved in the UI
+    /// `ids` are the current IDs of the points that were moved
+    /// `meta` indicates whether the meta key was held while moving
     #[allow(unused_variables)] #[inline]
-    fn on_select(self_id: Option<usize>) -> Option<Self::Event> {None}
-    /// event to emit when the user is dragging the plane while holding the meta key
+    fn on_move(ids: &[usize], n_points: usize, delta: [R64; 2], meta: bool) -> Option<Self::Event> {None} 
+    /// event to emit when the left mouse button is clicked, i.e. pressed & released
+    /// `loc` returns a location of the click in user coordinates.
+    /// `new_sel` are the IDs of the points that became focused after the click
     #[allow(unused_variables)] #[inline]
-    fn on_meta_drag(old_loc: impl Fn() -> Option<[R64; 2]>, cur_loc: impl Fn() -> Option<[R64; 2]>) -> Option<Self::Event> {None}
-    /// event to emit when the user is dragging a point while holding the meta key
+    fn on_click<'a, F, I1, I2>(loc: F, old_sel: I1, new_sel: I2, meta: bool) -> Option<Self::Event>
+    where Self: 'a,
+    F: Fn() -> [R64; 2],
+    I1: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
+    I2: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator {
+        None
+    }
+
+    // return type of `desc` and `fmt_loc` should be `impl AsRef<str>`
+    // but feature `return_position_impl_trait_in_trait` is not usable yet
+    /// description of the point that'll be shown in the hint handler when the point's hovered over
     #[allow(unused_variables)] #[inline]
-    fn on_meta_drag_point<'a, F1, F2>(point: F1, loc: F2) -> Option<Self::Event>
-    where Self: 'a, F1: Fn() -> SliceRef<'a, Self>, F2: Fn() -> Option<[R64; 2]> {None}
-    /// event to emit when the meta key is clicked, i.e. pressed and released
-    #[allow(unused_variables)] #[inline]
-    fn on_meta_click(loc: impl Fn() -> Option<[R64; 2]>) -> Option<Self::Event> {None}
-    /// event to emit whne the meta key is clicked, i.e. pressed and released, on a point
-    #[allow(unused_variables)] #[inline]
-    fn on_meta_click_point<'a, F>(point: F) -> Option<Self::Event>
-    where Self: 'a, F: Fn() -> SliceRef<'a, Self> {None}
-    
+    fn desc(&self) -> Cow<'static, str> {Cow::default()}
+    /// format the location of a point in user coordinates
+    /// `loc` is in user coordinates
+    fn fmt_loc(loc: [R64; 2]) -> String;
+    /// The hint to show when the plane is being hovered.
+    /// `loc` is in user coordinates.
+    fn plane_hover_hint(loc: impl Fn() -> [R64; 2], buttons: Buttons) -> Option<[Cow<'static, str>; 2]>;
+    /// The hint to show when a point is being hovered
+    fn point_hover_hint<'a>(point: SliceRef<'a, Self>, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
+    where Self: 'a;
+    /// The hint to show when a selection is being hovered
+    fn selection_hover_hint<'a, I>(points: I, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
+    where Self: 'a, I: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator;
 
     /// visual representation of the point's hitbox
     /// `mapper` maps user coordinates to canvas coordinates, all vertices in the
     /// returned `Path2d` must be the result of the `mapper` function
     fn draw(&self, next: Option<&Self>, mapper: impl Fn([R64; 2]) -> [R64; 2]) -> JsResult<Path2d>;
-    // return type of `desc` and `fmt_loc` should be `impl AsRef<str>`
-    // but feature `return_position_impl_trait_in_trait` is not usable yet
-    /// description of the point that'll be shown in the hint handler when the point's hovered over
+    /// visual representation of the meta key and left mouse button being held, i.e. of a selected
+    /// region
+    /// `origin` and `cur` are in canvas coordinates
     #[allow(unused_variables)] #[inline]
-    fn desc(&self) -> String {String::new()}
-    /// format the location of a point in user coordinates
-    /// `loc`, if present, will always be in bounds, otherwise it'll be `None`
-    fn fmt_loc(loc: Option<[R64; 2]>) -> String;
-
-    /// visual representation of the meta key held down, evaluated every time meta key becomes pressed
-    /// the center of the representation should be 0, it will then be moved accordingly
-    #[allow(unused_variables)] #[inline]
-    fn draw_meta_held(canvas_size: [R64; 2], scale: [R64; 2]) -> JsResult<Path2d> {Path2d::new()}
-    /// the hint to return when the editor is being hovered with the meta key pressed
-    /// `loc` returns the location of the cursor in user coordinates if its inside the editor,
-    /// otherwise it returns `None`
-    /// `left` signifies whether the primary mouse button is held down
-    #[allow(unused_variables)] #[inline]
-    fn meta_held_hint(loc: Option<[R64; 2]>, left: bool) -> Option<[Cow<'static, str>; 2]> {None}
-    /// the hint to return when a point is being hovered with the meta key pressed
-    /// `left` signifies whether the primary mouse button is held down
-    #[allow(unused_variables)] #[inline]
-    fn meta_held_over_point_hint<'a, F>(point: F, left: bool) -> Option<[Cow<'static, str>; 2]>
-    where Self: 'a, F: Fn() -> SliceRef<'a, Self> {None}
-
+    fn draw_meta_drag(canvas_size: [R64; 2], scale: [R64; 2], origin: [R64; 2], cur: [R64; 2]) -> JsResult<Path2d> {
+        Path2d::new().add_loc(loc!()).inspect(|x|
+            x.rect(*cur[0], *cur[1], *origin[0] - *cur[0], *origin[1] - *cur[1]))
+    }
 }
 
 /// a special reference wrapper: access to everything is immutable,
@@ -392,45 +365,24 @@ impl<'a, T: Graphable> GraphPointView<'a, T> {
     }
 }
 
+// coordinate space hints:
+// +user: in user coordinates
+// +canvas: in canvas coordinates without offset
+// +aligned: aligned to snap step
+// +confined: limited to bounds specified by `Graphable::(X/Y)_BOUND`
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum Focus {
     #[default] None,
-    HoverPlane,
-    HoverPoint(usize),
-    MovePlane(Point),
-    MovePoint(usize, Point),
-    HoverPlaneWShift(Point),
-    ZoomPlane{init_offset: Point, pivot: Point, init_scale: [R64; 2]},
-    HoverPlaneWMeta(Point, Path2d),
-    HoverPointWMeta(usize),
-    DragPlaneWMeta(Point, Path2d),
-    DragPointWMeta(usize)
+    Zoom{init_offset: Point, pivot: Point, init_scale: [R64; 2]},
+    Plane{last_loc: Point /* +canvas +aligned */},
+    Point{id: usize, last_loc: [R64; 2] /* +user +aligned +confined */},
+    Selection{ids: Box<[usize]> /* sorted */, last_loc: [R64; 2] /* +user +aligned +confined */, moved: bool}
 }
 
 impl Focus {
-    #[inline] pub fn always_update(&self) -> bool {
-        matches!(self, Self::MovePoint{..}
-            | Self::ZoomPlane{..}
-            | Self::HoverPlaneWShift(..)
-            | Self::HoverPlaneWMeta(..)
-            | Self::DragPlaneWMeta(..))
-    }
-
-    #[inline] pub fn focus_point_id(&self) -> Option<usize> {
-        match self {
-            Focus::None
-            | Focus::HoverPlane
-            | Focus::HoverPoint(..)
-            | Focus::HoverPlaneWShift(..)
-            | Focus::ZoomPlane{..}
-            | Focus::HoverPlaneWMeta(..)
-            | Focus::HoverPointWMeta(_)
-            | Focus::DragPlaneWMeta(..)
-            | Focus::MovePlane(_) => None,
-
-            Focus::MovePoint(id, _)
-            | Focus::DragPointWMeta(id) => Some(*id)
-        }
+    #[inline] pub fn selection(&self) -> &[usize] {
+        if let Focus::Selection{ids, ..} = self {ids} else {&[]}
     }
 }
 
@@ -440,10 +392,9 @@ pub struct GraphEditor<T: Graphable> {
     offset: Point,
     scale: [R64; 2],
     focus: Focus,
-    last_focus: Discriminant<Focus>,
+    last_event: CanvasEvent,
     redraw: bool,
-    data: Vec<T>,
-    fixed: Option<usize>
+    data: Vec<T>
 }
 
 impl<T: Graphable> GraphEditor<T> {
@@ -455,9 +406,9 @@ impl<T: Graphable> GraphEditor<T> {
 
     #[inline] pub fn new(data: Vec<T>) -> Self {
         Self{canvas: NodeRef::default(), offset: Point::ZERO,
-            focus: Focus::None, last_focus: discriminant(&Focus::HoverPlane),
+            focus: Focus::None, last_event: CanvasEvent::default(),
             scale: [T::SCALE_X_BOUND.to_pair().mul(&[0.75, 0.25]).sum(), T::SCALE_Y_BOUND.to_pair().mul(&[0.75, 0.25]).sum()],
-            redraw: false, data, fixed: None}
+            redraw: false, data}
     }
 
     #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
@@ -491,49 +442,45 @@ impl<T: Graphable> GraphEditor<T> {
         self.data.iter_mut().map(GraphPointView)
     }
 
+    #[inline] pub fn selection(&self) -> &[usize] {self.focus.selection()}
+
+    #[inline] pub fn iter_selection(&self) -> impl Iterator<Item=&'_ T> {
+        self.focus.selection().iter().map(|x| unsafe{self.data.get_unchecked(*x)})
+    }
+
     /// returns the index at which the new point will be available
     #[inline] pub fn add_point(&mut self, point: T) -> usize {
         self.redraw = true;
-        let id = self.data.push_sorted_by_key(point, |x| x.loc()[0]);
-        if let Some(ref mut x) = self.fixed.filter(|x| *x >= id) {
-            *x += 1
+        let to = self.data.push_sorted(point);
+        if let Focus::Selection{ids, ..} = &mut self.focus {
+            SliceMove{from: self.data.len(), to}.apply(ids)
         }
-        id
+        to
     }
 
-    #[inline] pub fn del_point(&mut self, index: usize) -> JsResult<()> {
+    #[inline] pub fn remove_points(&mut self, to_remove: &[usize]) -> JsResult<()> {
         self.redraw = true;
-        self.data.try_remove(index).to_js_result(loc!())?;
-        if let Some(ref mut x) = self.fixed.filter(|x| *x > index) {
-            *x -= 1
-        } else if self.fixed == Some(index) {
-            self.fixed = None;
+        js_assert!(to_remove.is_sorted())?;
+        if let Focus::Selection{ids, ..} = &mut self.focus {
+            let mut ids = take(ids).to_vec();
+            let mut ids_iter = ids.iter_mut().rev();
+            for &id in to_remove.iter().rev() {
+                self.data.try_remove(id).to_js_result(loc!())?;
+                let rem = ids_iter.len();
+                while let Some(x) = ids_iter.next().filter(|x| **x > id) {*x -= 1}
+                let skipped = rem - ids_iter.len();
+                if ids_iter.next().copied() == Some(id) {
+                    unsafe{ids_iter.len().pipe(|x| ids.remove_unchecked(x))};
+                }
+                ids_iter = ids.iter_mut().rev();
+                ids_iter.advance_by(skipped).to_js_result(loc!())?;
+            }
+        } else {
+            for &id in to_remove.iter().rev() {
+                self.data.try_remove(id).to_js_result(loc!())?;
+            }
         }
         Ok(())
-    }
-
-    /// the element at `index`, if `Some`, will be returned from subsequent calls to `fixed(_mut)` 
-    #[inline] pub fn fix_point(&mut self, index: Option<usize>) -> JsResult<()> {
-        if let Some(index) = index {js_assert!(index < self.data.len())?}
-        Ok(self.fixed = index)
-    }
-
-    #[inline] pub fn fixed_id(&self) -> Option<usize> {
-        self.fixed
-    }
-
-    #[inline] pub fn del_fixed(&mut self) -> Option<()> {
-        self.redraw = true;
-        self.fixed.take().map(|x|
-            _ = unsafe{self.data.remove_unchecked(x)})
-    }
-
-    #[inline] pub fn fixed(&self) -> Option<&T> {
-        self.fixed.map(|x| unsafe{self.data.get_unchecked(x)})
-    }
-
-    #[inline] pub fn fixed_mut(&mut self) -> Option<GraphPointView<'_, T>> {
-        self.fixed.map(|x| unsafe{self.get_unchecked_mut(x)})
     }
 
     #[inline] pub fn force_redraw(&mut self) {self.redraw = true}
@@ -567,216 +514,206 @@ impl<T: Graphable> GraphEditor<T> {
     }
 
     pub fn handle_hover(&mut self, event: Option<CanvasEvent>, ctx: &AppContext) -> JsResult<Option<T::Event>> {
-        let Some(mut event) = event else {
+        let Some(event) = event else {
             self.focus = Focus::None;
             self.redraw = true;
             return Ok(None)
         };
 
-        event.point += self.offset;
         let size   = self.canvas.cast::<HtmlCanvasElement>()
             .to_js_result(loc!())?.size();
-        let snap_step = [ctx.snap_step, T::Y_SNAP];
-        let step     = R64::array_from(size).div(&self.scale);
-        let loc      = R64::array_from(event.point).div(&step);
-        let bounds = [T::X_BOUND, T::Y_BOUND];
+        let snap_step = &[ctx.snap_step, T::Y_SNAP];
+        let step     = &R64::array_from(size).div(&self.scale);
 
-        let zoom_plane_focus = || Focus::ZoomPlane{
-            init_offset: self.offset, pivot: event.point,
-            init_scale: self.scale};
+        // let canvas_plane = event.point;
+        let offset = |loc| loc + self.offset;
+        let to_user = |loc| R64::array_from(loc + self.offset).div(step);
+        let to_aligned_canvas = |loc| Point::from(R64::array_from(loc).floor_to(&snap_step.mul(step)));
+        let to_aligned_user = |loc| R64::array_from(loc + self.offset).div(step).floor_to(snap_step);
+        let confine = |x| [T::X_BOUND, T::Y_BOUND].fit(x);
 
-        let move_point_focus = |p: SliceRef<'_, T>| Focus::MovePoint(p.index(),
-            R64::array_from(event.point).sub(&p.loc().mul(&step))
-                .floor_to(&snap_step.mul(&step)).into());
+        let zoom_focus = ||
+            Focus::Zoom{init_offset: self.offset, pivot: offset(event.point), init_scale: self.scale};
+        let plane_focus = ||
+            Focus::Plane{last_loc: to_aligned_canvas(event.point)};
+        let point_focus = |id|
+            Focus::Point{id, last_loc: confine(to_aligned_user(event.point))};
+        let selection_focus = |ids|
+            Focus::Selection{ids, last_loc: confine(to_aligned_user(event.point)), moved: false};
 
-        Ok(match self.focus {
-            Focus::None => self.set_focus(Focus::HoverPlane)
-                .pipe(|_| None),
+        let res = Ok(match self.focus {
+            Focus::None => self.set_focus(plane_focus()).pipe(|_| None),
 
-            Focus::HoverPlane => match (event.left, event.shift, event.meta) {
-                (left, _, true) => {
-                    let v = T::draw_meta_held(size.into_array(), self.scale).add_loc(loc!())?;
-                    Some(if left {Focus::DragPlaneWMeta(event.point, v)}
-                        else {Focus::HoverPlaneWMeta(event.point, v)})
+            Focus::Zoom{ref mut init_offset, ref mut init_scale, ref mut pivot} => if event.left {
+                if !self.last_event.left {
+                    *pivot = offset(event.point);
+                    *init_scale = self.scale;
+                    *init_offset = self.offset;
+                }
+                let point = event.point + *init_offset - *pivot;
+                if !T::SCALE_X_BOUND.is_empty() {
+                    self.scale[0] = T::SCALE_X_BOUND.fit(r64![50.0] / size[1] * point.x + init_scale[0]);
+                    self.offset.x = ((init_scale[0] - self.scale[0]) * pivot.x / self.scale[0] + init_offset.x).into();
+                }
+                if !T::SCALE_Y_BOUND.is_empty() {
+                    self.scale[1] = T::SCALE_Y_BOUND.fit(r64![50.0] / size[0] * point.y + init_scale[1]);
+                    self.offset.y = ((init_scale[1] - self.scale[1]) * pivot.y / self.scale[1] + init_offset.y).into();
+                }
+            } else if event.shift {
+                *pivot = event.point;
+            } else {
+                self.focus = plane_focus();
+            }.pipe(|_| {self.redraw = true; None}),
+
+            Focus::Plane{ref mut last_loc} => match *event {
+                Buttons{shift: true, ..} => self.set_focus(zoom_focus()).pipe(|_| None),
+
+                Buttons{left: false, meta, ..} => if self.last_event.left && self.last_event.meta {
+                    let src = to_user(*last_loc);
+                    let dst = to_user(event.point);
+                    let area = [(src[0] .. dst[0]).ordered(), (src[1] .. dst[1]).ordered()];
+                    let sel: Box<_> = self.data.iter().enumerate()
+                        .filter_map(|(id, x)| x.loc().array_check_in(&area).map(|_| id))
+                        .collect();
+                    let res = T::on_click(|| confine(to_aligned_user(event.point)),
+                        empty(),
+                        sel.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)}),
+                        meta);
+                    if !sel.is_empty() {
+                        self.set_focus(selection_focus(sel))
+                    } else if meta {
+                        *last_loc = to_aligned_canvas(event.point);
+                        self.redraw = true;
+                    }
+                    res
+                } else if let Some(p) = self.point_by_pos(to_user(event.point)) {
+                    self.set_focus(point_focus(p.index()));
+                    None
+                } else if meta {
+                    self.set_focus(plane_focus());
+                    None
+                } else {None}
+
+                Buttons{left: true, meta: false, ..} => {
+                    if !T::OFFSET_X_BOUND.is_empty() {
+                        self.offset.x = T::OFFSET_X_BOUND.map(|x| x * step[0])
+                            .extend(self.offset.x).fit(self.offset.x + last_loc.x - event.point.x);
+                    }
+                    if !T::OFFSET_Y_BOUND.is_empty() {
+                        self.offset.y = T::OFFSET_Y_BOUND.map(|y| y * step[1])
+                            .extend(self.offset.y).fit(self.offset.y + last_loc.y - event.point.y);
+                    }
+                    *last_loc = event.point;
+                    self.redraw = true;
+                    None
                 }
 
-                (true, true, _) =>
-                    Some(zoom_plane_focus()),
-
-                (true, false, _) =>
-                    Some(self.point_by_pos(loc)
-                        .map_or_else(|| Focus::MovePlane(event.point - self.offset),
-                            move_point_focus)),
-
-                (false, true, _) =>
-                    Some(Focus::HoverPlaneWShift(event.point)),
-
-                (false, false, _) =>
-                    self.point_by_pos(loc).map(|p| Focus::HoverPoint(p.index()))
-            }.map(|x| self.set_focus(x)).pipe(|_| None),
-
-            Focus::HoverPoint(id) => match (event.left, event.shift, event.meta) {
-                (left, _, true) => Some(if left {Focus::DragPointWMeta(id)}
-                    else {Focus::HoverPointWMeta(id)}),
-
-                (true, true, _) => Some(zoom_plane_focus()),
-
-                (true, false, _) => Some(move_point_focus(unsafe{self.get_unchecked_aware(id)})),
-
-                (false, true, _) => Some(Focus::HoverPlaneWShift(event.point)),
-
-                (false, false, _) =>
-                    unsafe{self.data.get_unchecked(id)}.in_hitbox(loc)
-                        .not().then_some(Focus::HoverPlane),
-            }.map(|x| self.set_focus(x)).pipe(|_| None),
-
-            Focus::MovePlane(ref mut last) => if event.left {
-                event.point -= self.offset;
-                if !T::OFFSET_X_BOUND.is_empty() {
-                    self.offset.x = T::OFFSET_X_BOUND.map(|x| x * step[0])
-                        .extend(self.offset.x).fit(self.offset.x + last.x - event.point.x);
+                Buttons{left: true, meta: true, ..} => {
+                    if !self.last_event.left {
+                        *last_loc = to_aligned_canvas(event.point);
+                    }
+                    self.redraw = true;
+                    None
                 }
-                if !T::OFFSET_Y_BOUND.is_empty() {
-                    self.offset.y = T::OFFSET_Y_BOUND.map(|y| y * step[1])
-                        .extend(self.offset.y).fit(self.offset.y + last.y - event.point.y);
-                }
-                *last = event.point;
+            }
+
+            Focus::Point{ref mut id, ref mut last_loc} => if event.shift {
+                self.set_focus(zoom_focus());
                 None
+            } else if event.left {
+                let delta = if !self.last_event.left {
+                    *last_loc = confine(to_aligned_user(event.point));
+                    Default::default()
+                } else {
+                    let new = confine(to_aligned_user(event.point));
+                    new.sub(&replace(last_loc, new))
+                };
+                unsafe{self.data.get_unchecked_mut(*id)}.move_point(delta, event.meta);
+                unsafe{self.data.reorder_unchecked(*id)}.apply(from_mut(id));
+                T::on_move(from_ref(id), self.data.len(), delta, event.meta)
             } else {
-                self.focus = Focus::HoverPlane;
-                T::on_select(None)
-            }.tee(|_| self.redraw = true),
-
-            Focus::MovePoint(id, offset) => if event.left {
-                let n_points = self.data.len();
-                let point = unsafe{self.data.get_unchecked_mut(id)};
-                let res = point.set_loc(n_points, id,
-                    || T::X_BOUND.fit(R64::from(event.point.x - offset.x) / step[0]).floor_to(ctx.snap_step),
-                    || T::Y_BOUND.fit(R64::from(event.point.y - offset.y) / step[1]).floor_to(T::Y_SNAP));
-                let new_id = unsafe{self.data.reorder_unchecked_by_key(id, |x| x.loc()[0])};
-                if new_id != id {
-                    self.focus = Focus::MovePoint(new_id, offset);
-                    if let Some(ref mut x) = self.fixed.filter(|x| *x == id) {
-                        *x = new_id;
-                    } else if let Some(ref mut x) = self.fixed.filter(|x| new_id < id && *x < id && *x >= new_id) {
-                        *x += 1;
-                    } else if let Some(ref mut x) = self.fixed.filter(|x| new_id > id && *x < new_id && *x >= id) {
-                        *x -= 1;
-                    }
-                }
-                res
-            } else {
-                self.focus = Focus::HoverPoint(id);
-                T::on_select(Some(id))
-            }.tee(|_| self.redraw = true),
-
-            Focus::HoverPlaneWShift(ref mut point) => match (event.left, event.shift) {
-                (true, true) => 
-                    self.focus = zoom_plane_focus(),
-
-                (true, false) =>
-                    self.focus = self.point_by_pos(loc)
-                        .map_or_else(|| Focus::MovePlane(event.point - self.offset),
-                             move_point_focus),
-
-                (false, true) => *point = event.point,
-
-                (false, false) => self.focus = Focus::HoverPlane,
-            }.pipe(|_| {self.redraw = true; None}),
-
-            Focus::ZoomPlane{init_offset, init_scale, pivot} => match (event.left, event.shift) {
-                (true, _) => {
-                    event.point -= self.offset - init_offset;
-                    if !T::SCALE_X_BOUND.is_empty() {
-                        self.scale[0] = T::SCALE_X_BOUND.fit(r64![50.0] / size[1] * (event.point.x - pivot.x) + init_scale[0]);
-                        self.offset.x = ((init_scale[0] - self.scale[0]) * pivot.x / self.scale[0] + init_offset.x).into();
-                    }
-                    if !T::SCALE_Y_BOUND.is_empty() {
-                        self.scale[1] = T::SCALE_Y_BOUND.fit(r64![50.0] / size[0] * (event.point.y - pivot.y) + init_scale[1]);
-                        self.offset.y = ((init_scale[1] - self.scale[1]) * pivot.y / self.scale[1] + init_offset.y).into();
-                    }
-                }
-
-                (false, true) => self.focus = Focus::HoverPlaneWShift(event.point),
-
-                (false, false) => self.focus = Focus::HoverPlane
-            }.pipe(|_| {self.redraw = true; None}),
-
-            Focus::HoverPlaneWMeta(_, ref mut v) => match (event.left, event.meta) {
-                (false, false) => Some(Focus::HoverPlane),
-
-                (false, true) => {
-                    let v = replace(v, JsValue::UNDEFINED.unchecked_into());
-                    Some(self.point_by_pos(loc)
-                        .map_or_else(|| Focus::HoverPlaneWMeta(R64::array_from(event.point).floor_to(&snap_step.mul(&step)).into(), v),
-                            |p| Focus::HoverPointWMeta(p.index())))
-                }
-
-                (true, false) => Some(self.point_by_pos(loc)
-                    .map_or_else(|| Focus::MovePlane(event.point - self.offset), move_point_focus)),
-
-                (true, true) => {
-                    let v = replace(v, JsValue::UNDEFINED.unchecked_into());
-                    Some(self.point_by_pos(loc)
-                        .map_or_else(|| Focus::DragPlaneWMeta(R64::array_from(event.point).floor_to(&snap_step.mul(&step)).into(), v),
-                            |p| Focus::DragPointWMeta(p.index())))
-                }
-            }.map(|f| self.set_focus(f)).pipe(|_| None),
-
-            Focus::HoverPointWMeta(id) => match (event.left, event.meta) {
-                (false, false) => Some(Focus::HoverPoint(id)),
-
-                (false, true) => unsafe{self.get_unchecked(id)}.in_hitbox(loc).not()
-                    .then_try(|| T::draw_meta_held(size.into_array(), self.scale)).add_loc(loc!())?
-                    .map(|v| Focus::HoverPlaneWMeta(event.point, v)),
-
-                (true, false) => Some(move_point_focus(unsafe{self.get_unchecked_aware(id)})),
-
-                (true, true) => Some(Focus::DragPointWMeta(id))
-            }.map(|f| self.set_focus(f)).pipe(|_| None),
-
-            Focus::DragPlaneWMeta(ref mut point, ref mut v) => if event.left {
-                let res = T::on_meta_drag(|| Some(R64::array_from(*point).div(&step).array_check_in(&bounds)?.floor_to(&snap_step)),
-                    || Some(loc.array_check_in(&bounds)?.floor_to(&snap_step)));
-                *point = R64::array_from(event.point).floor_to(&snap_step.mul(&step)).into();
-                res
-            } else {
-                self.focus = if event.meta {
-                    Focus::HoverPlaneWMeta(event.point, replace(v, JsValue::UNDEFINED.unchecked_into()))
-                } else {Focus::HoverPlane};
-                T::on_meta_click(|| Some(loc.array_check_in(&bounds)?.floor_to(&snap_step)))
+                let p = unsafe{self.data.get_unchecked_aware(*id)};
+                let (f, r) = match (self.last_event.left, p.in_hitbox(to_user(event.point))) {
+                    (false, false) =>
+                        (Some(plane_focus()), None),
+                    (false, true) =>
+                        (None, None),
+                    (true, false) => (Some(plane_focus()),
+                        T::on_click(|| confine(to_aligned_user(event.point)),
+                            empty(), empty(), self.last_event.meta)),
+                    (true, true) => (Some(selection_focus([*id].into())),
+                        T::on_click(|| confine(to_aligned_user(event.point)),
+                            empty(), once(p), self.last_event.meta))
+                };
+                if let Some(f) = f {self.set_focus(f)}
+                r
             }
 
-            Focus::DragPointWMeta(id) => if event.left {
-                T::on_meta_drag_point(|| unsafe{self.get_unchecked_aware(id)},
-                    || Some(loc.array_check_in(&bounds)?.floor_to(&snap_step)))
+            Focus::Selection{ref mut ids, ref mut last_loc, ref mut moved} => if event.shift {
+                self.set_focus(zoom_focus());
+                None
+            } else if event.left {
+                let delta = if !self.last_event.left {
+                    *last_loc = confine(to_aligned_user(event.point));
+                    self.redraw = true;
+                    Default::default()
+                } else {
+                    let new = confine(to_aligned_user(event.point));
+                    new.sub(&replace(last_loc, new))
+                };
+                if *delta.sum::<R64>() != 0.0 {
+                    *moved = true;
+                    self.redraw = true;
+                    // TODO: some optimisation
+                    for &id in ids.clone().iter() {
+                        unsafe{self.data.get_unchecked_mut(id)}.move_point(delta, event.meta);
+                        unsafe{self.data.reorder_unchecked(id)}.apply(ids);
+                    }
+                    T::on_move(ids, self.data.len(), delta, event.meta)
+                } else {None}
+            } else if self.last_event.left && !*moved {
+                let e = T::on_click(|| confine(to_aligned_user(event.point)),
+                    ids.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)}),
+                    empty(),
+                    self.last_event.meta);
+                self.set_focus(self.point_by_pos(to_user(event.point))
+                    .map_or_else(plane_focus, |p| point_focus(p.index())));
+                e
             } else {
-                self.focus = if event.meta {Focus::HoverPointWMeta(id)} else {Focus::HoverPoint(id)};
-                T::on_meta_click_point(|| unsafe{self.get_unchecked_aware(id)})
+                *moved = false;
+                None
             }
-        })
+        });
+        self.redraw |= *self.last_event != *event;
+        self.last_event = event;
+        res
     }
 
     pub fn redraw(&mut self, app_ctx: &AppContext) -> JsResult<Option<[Cow<'static, str>; 2]>> {
         if !self.redraw {return Ok(None)}
 
         let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
-        let [w, h] = canvas.size().map(R64::from);
+        let size = canvas.size().map(R64::from);
+        let snap_step = &[app_ctx.snap_step, T::Y_SNAP];
+        let step     = &R64::array_from(size).div(&self.scale);
         let ctx = canvas.get_2d_context(loc!())?;
 
-        ctx.set_fill_style(&Self::BG_STYLE.into());
-        ctx.fill_rect(0.0, 0.0, *w, *h);
+        let to_user = |loc| R64::array_from(loc + self.offset).div(step);
+        let to_aligned_user = |loc| R64::array_from(loc + self.offset).div(step).floor_to(snap_step);
+        let confine = |x| [T::X_BOUND, T::Y_BOUND].fit(x);
 
-        let step = [w, h].div(&self.scale);
+        ctx.set_fill_style(&Self::BG_STYLE.into());
+        ctx.fill_rect(0.0, 0.0, *size[0], *size[1]);
+
+        let step = &size.div(&self.scale);
         let offset_x = R64::from(-self.offset.x)
             % (self.offset.x > (T::X_BOUND.start * step[0]).into())
                 .choose(step[0], R64::INFINITY);
         let offset_y = R64::from(-self.offset.y)
             % (self.offset.y > (T::Y_BOUND.start * step[1]).into())
             .choose(step[1] * 2.0, R64::INFINITY);
-        let max_x = w.min(T::X_BOUND.end * step[0] - self.offset.x);
-        let max_y = h.min(T::Y_BOUND.end * step[1] - self.offset.y);
-        let bounds = &[T::X_BOUND, T::Y_BOUND];
+        let max_x = size[0].min(T::X_BOUND.end * step[0] - self.offset.x);
+        let max_y = size[1].min(T::Y_BOUND.end * step[1] - self.offset.y);
 
         // lighter horizontal bars
         ctx.begin_path();
@@ -795,23 +732,28 @@ impl<T: Graphable> GraphEditor<T> {
         ctx.fill();
 
         let points = Path2d::new().add_loc(loc!())?;
-        let mapper = |loc: [R64; 2]| loc.mul(&step).sub(&R64::array_from(self.offset));
+        let mapper = |loc: [R64; 2]| loc.mul(step).sub(&R64::array_from(self.offset));
         ctx.set_stroke_style(&Self::FG_STYLE.into());
-        if let Some(id) = self.focus.focus_point_id() {
-            let focused = unsafe{self.get_unchecked(id)}.draw(self.get(id + 1), mapper).add_loc(loc!())?;
-            ctx.fill_with_path_2d(&focused);
-            ctx.stroke_with_path(&focused);
+        if let Ok(ids) = self.focus.selection().check(|x| !x.is_empty()) {
+            let non_ids = ids.first().map_or(0..0, |x| 0..*x)
+                .chain(ids.array_windows::<2>().flat_map(|[p, n]| p + 1 .. *n))
+                .chain(ids.last().map_or(0..0, |x| x + 1 .. self.data.len()));
 
-            for [this, next] in self.data.array_windows::<2>().take(id).chain(self.data.array_windows::<2>().skip(id + 1)) {
-                points.add_path(&this.draw(Some(next), mapper).add_loc(loc!())?);
-            }
-            if let Some(last) = self.data.last().filter(|_| id != self.data.len() - 1) {
-                points.add_path(&last.draw(None, mapper).add_loc(loc!())?);
+            for (this, next) in non_ids.map(|i| (unsafe{self.get_unchecked(i)}, self.get(i + 1))) {
+                points.add_path(&this.draw(next, mapper).add_loc(loc!())?)
             }
             ctx.fill_with_path_2d(&points);
             ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
             ctx.stroke_with_path(&points);
             ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
+
+            let points = Path2d::new().add_loc(loc!())?;
+            for (this, next) in ids.iter().map(|i| (unsafe{self.get_unchecked(*i)}, self.get(i + 1))) {
+                points.add_path(&this.draw(next, mapper).add_loc(loc!())?)
+            }
+            ctx.fill_with_path_2d(&points);
+            ctx.stroke_with_path(&points);
+
         } else {
             for [this, next] in self.data.array_windows::<2>() {
                 points.add_path(&this.draw(Some(next), mapper).add_loc(loc!())?);
@@ -826,84 +768,55 @@ impl<T: Graphable> GraphEditor<T> {
         if app_ctx.play_since.is_finite() {
             ctx.set_fill_style(&Self::FG_STYLE.into());
             let play_at = (app_ctx.now - app_ctx.play_since).secs_to_beats(app_ctx.bps);
-            ctx.fill_rect(*play_at * *step[0] - self.offset.x as f64, 0.0, 3.0, *h);
+            ctx.fill_rect(*play_at * *step[0] - self.offset.x as f64, 0.0, 3.0, *size[1]);
         } else {
             self.redraw = false;
         }
 
-        Ok(if discriminant(&self.focus) != self.last_focus || self.focus.always_update() {
-            self.last_focus = discriminant(&self.focus);
-            match &self.focus {
-                Focus::None => None,
+        Ok(match self.focus {
+            Focus::None => None,
 
-                Focus::HoverPlane => Some([T::EDITOR_NAME.into(), "".into()]),
-
-                Focus::HoverPoint(id) => {
-                    let point = unsafe{self.data.get_unchecked(*id)};
-                    Some([format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc().into())).into(),
-                        "Press and hold to drag".into()])
-                }
-
-                Focus::MovePlane(_) => Some([T::EDITOR_NAME.into(), "Dragging".into()]),
-
-                Focus::MovePoint(id, _) => {
-                    let point = unsafe{self.data.get_unchecked(*id)};
-                    Some([format!("{}@{}", &point.desc(), &T::fmt_loc(point.loc().into())).into(),
-                        "Dragging".into()])
-                }
-
-                Focus::HoverPlaneWShift(at) => {
-                    let loc = R64::array_from(*at).div(&step).array_check_in(bounds);
-                    ctx.set_text_align("left");
-                    ctx.set_text_baseline("bottom");
-                    ctx.set_fill_style(&Self::FG_STYLE.into());
-                    ctx.fill_text(&T::fmt_loc(loc), 5.0, *h - 5.0)
-                        .add_loc(loc!())?;
-                    Some([T::EDITOR_NAME.into(), "Press and hold to zoom".into()])
-                }
-
-                Focus::ZoomPlane{pivot, init_offset, ..} => {
-                    let [x, y] = (*pivot - *init_offset).map(|x| x as f64);
-                    ctx.begin_path();
-                    ctx.move_to(x - 10.0, y);
-                    ctx.line_to(x + 10.0, y);
-                    ctx.move_to(x, y - 10.0);
-                    ctx.line_to(x, y + 10.0);
-                    ctx.set_stroke_style(&Self::FG_STYLE.into());
-                    ctx.stroke();
-                    Some([format!("{}: zooming", T::EDITOR_NAME).into(), "Release to stop".into()])
-                }
-
-                Focus::HoverPlaneWMeta(at, visual) => {
-                    let loc = if let Some([x, y]) = R64::array_from(*at).div(&step).array_check_in(bounds) {
-                        let [canvas_x, canvas_y] = (*at - self.offset).map(|x| x as f64);
-                        ctx.translate(canvas_x, canvas_y).add_loc(loc!())?;
-                        ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
-                        ctx.stroke_with_path(visual);
-                        ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
-                        ctx.translate(-canvas_x, -canvas_y).add_loc(loc!())?;
-                        Some([x, y])
-                    } else {None};
-                    T::meta_held_hint(loc, false)
-                }
-
-                Focus::HoverPointWMeta(id) => T::meta_held_over_point_hint(|| unsafe{self.get_unchecked_aware(*id)}, false),
-
-                Focus::DragPlaneWMeta(at, visual) => {
-                    let loc = if let Some([x, y]) = R64::array_from(*at).div(&step).array_check_in(bounds) {
-                        let [canvas_x, canvas_y] = (*at - self.offset).map(|x| x as f64);
-                        ctx.translate(canvas_x, canvas_y).add_loc(loc!())?;
-                        ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
-                        ctx.stroke_with_path(visual);
-                        ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
-                        ctx.translate(-canvas_x, -canvas_y).add_loc(loc!())?;
-                        Some([x, y])
-                    } else {None};
-                    T::meta_held_hint(loc, true)
-                }
-
-                Focus::DragPointWMeta(id) => T::meta_held_over_point_hint(|| unsafe{self.get_unchecked_aware(*id)}, true)
+            Focus::Zoom{pivot, init_offset, ..} => if self.last_event.left {
+                let [x, y] = (pivot - init_offset).map(|x| x as f64);
+                ctx.begin_path();
+                ctx.move_to(x - 10.0, y);
+                ctx.line_to(x + 10.0, y);
+                ctx.move_to(x, y - 10.0);
+                ctx.line_to(x, y + 10.0);
+                ctx.set_stroke_style(&Self::FG_STYLE.into());
+                ctx.stroke();
+                Some([Cow::from(T::EDITOR_NAME) + ": zooming", "Release to stop".into()])
+            } else {
+                ctx.set_text_align("left");
+                ctx.set_text_baseline("bottom");
+                ctx.set_fill_style(&Self::FG_STYLE.into());
+                ctx.fill_text(&T::fmt_loc(confine(to_user(pivot))), 5.0, *size[1] - 5.0)
+                    .add_loc(loc!())?;
+                Some([T::EDITOR_NAME.into(), "Press and hold to zoom".into()])
             }
-        } else {None})
+
+            Focus::Plane{last_loc} => if self.last_event.meta {
+                if self.last_event.left {
+                    let [cur, origin] = [self.last_event.point.into_array(), last_loc.into_array()];
+                    ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
+                    ctx.stroke_rect(cur[0], cur[1], origin[0] - cur[0], origin[1] - cur[1]);
+                    ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
+                } else {
+                    let [x, y] = last_loc.map(|x| x as f64);
+                    ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
+                    ctx.move_to(-*size[0], y);
+                    ctx.line_to( *size[0], y);
+                    ctx.move_to(x, -*size[1]);
+                    ctx.line_to(x,  *size[1]);
+                    ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
+                }
+            }.pipe(|_| T::plane_hover_hint(|| confine(to_aligned_user(self.last_event.point)), *self.last_event)),
+
+            Focus::Point{id, ..} =>
+                T::point_hover_hint(unsafe{self.get_unchecked_aware(id)}, *self.last_event),
+
+            Focus::Selection{ref ids, ..} =>
+                T::selection_hover_hint(ids.iter().map(|x| unsafe{self.get_unchecked_aware(*x)}), *self.last_event)
+        })
     }
 }

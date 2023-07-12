@@ -100,13 +100,22 @@ impl BoolExt for bool {
 }
 
 pub trait ArrayExt<T, const N: usize>: Sized {
-    fn add<'a, O>(self, other: &'a [O; N])      -> Self   where T: AddAssign<&'a O>;
-    fn sub<'a, O>(self, other: &'a [O; N])      -> Self   where T: SubAssign<&'a O>;
-    fn mul<'a, O>(self, other: &'a [O; N])      -> Self   where T: MulAssign<&'a O>;
-    fn div<'a, O>(self, other: &'a [O; N])      -> Self   where T: DivAssign<&'a O>;
-    fn floor_to<'a, O>(self, other: &'a [O; N]) -> Self   where T: Copy + FloorTo<&'a O>;
-    fn sum<R>(self)                             -> R      where R: Sum<T>;
-    fn array_check_in<R, O>(self, ranges: &[R]) -> Option<Self> where T: PartialOrd<O>, O: PartialOrd<T>, R: RangeBounds<O>;
+    fn add<'a, O>(self, other: &'a [O; N]) -> Self
+    where T: AddAssign<&'a O>;
+    fn sub<'a, O>(self, other: &'a [O; N]) -> Self
+    where T: SubAssign<&'a O>;
+    fn mul<'a, O>(self, other: &'a [O; N]) -> Self
+    where T: MulAssign<&'a O>;
+    fn div<'a, O>(self, other: &'a [O; N]) -> Self
+    where T: DivAssign<&'a O>;
+    fn floor_to<'a, O>(self, other: &'a [O; N]) -> Self
+    where T: Copy + FloorTo<&'a O>;
+    fn sum<R>(self) -> R
+    where R: Sum<T>;
+    fn array_check_in<R, O>(self, ranges: &[R; N]) -> Option<Self>
+    where T: PartialOrd<O>, O: PartialOrd<T>, R: RangeBounds<O>;
+    fn fit<R, O>(&self, values: [R; N]) -> [R; N]
+    where T: RangeExt<O>, O: Clone + PartialOrd<R>, R: Clone + From<O>;
 }
 
 impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
@@ -137,8 +146,17 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
 
     #[inline] fn sum<R>(self) -> R where R: Sum<T> {self.into_iter().sum()}
 
-    #[inline] fn array_check_in<R, O>(self, ranges: &[R]) -> Option<Self> where T: PartialOrd<O>, O: PartialOrd<T>, R: RangeBounds<O> {
+    #[inline] fn array_check_in<R, O>(self, ranges: &[R; N]) -> Option<Self>
+    where T: PartialOrd<O>, O: PartialOrd<T>, R: RangeBounds<O> {
         self.iter().zip(ranges).all(|(i, r)| r.contains(i)).then_some(self)
+    }
+
+    #[inline] fn fit<R, O>(&self, mut values: [R; N]) -> [R; N]
+    where T: RangeExt<O>, O: Clone + PartialOrd<R>, R: Clone + From<O> {
+        for (i, r) in values.iter_mut().zip(self) {
+            *i = r.fit(i.clone());
+        }
+        values
     }
 }
 
@@ -504,6 +522,28 @@ impl Display for ReorderError {
 
 impl Error for ReorderError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SliceMove {pub from: usize, pub to: usize}
+
+impl SliceMove {
+    pub fn apply(&self, ids: &mut [usize]) {
+        let (coef, range) = match self.to.cmp(&self.from) {
+            Ordering::Less => (1, self.to .. self.from),
+            Ordering::Equal => return,
+            Ordering::Greater => (-1, self.from .. self.to)
+        };
+
+        for id in ids {
+            if *id == self.from {
+                *id = self.to;
+            } else if range.contains(id) {
+                // not going to wrap anyway
+                *id = id.wrapping_add_signed(coef);
+            }
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct SetSortedError {
     index: usize,
@@ -519,6 +559,33 @@ impl Display for SetSortedError {
 
 impl Error for SetSortedError {}
 
+pub struct AwareIter<'a, T: 'a> {
+    slice: &'a [T],
+    state: usize
+}
+
+impl<'a, T: 'a> Iterator for AwareIter<'a, T> {
+    type Item = SliceRef<'a, T>;
+    #[inline] fn next(&mut self) -> Option<Self::Item> {
+        self.slice.get(self.state).map(|x| unsafe{
+            self.state += 1;
+            SliceRef::raw(x, self.state)
+        })
+    }
+
+    #[inline] fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.slice.len() - self.state).pipe(|x| (x, Some(x)))
+    }
+}
+
+impl<'a, T: 'a> ExactSizeIterator for AwareIter<'a, T> {
+    #[inline] fn len(&self) -> usize {self.slice.len() - self.state}
+}
+
+impl<'a, T: 'a> AwareIter<'a, T> {
+    #[inline] fn new(slice: &'a [T]) -> Self {Self{slice, state: 0}}
+}
+
 pub trait SliceExt<T> {
     fn get_saturating(&self, id: usize) -> &T;
     fn get_saturating_mut(&mut self, id: usize) -> &mut T;
@@ -526,25 +593,27 @@ pub trait SliceExt<T> {
     fn get_wrapping_mut(&mut self, id: usize) -> &mut T;
     fn get_var<'a>(&'a self, ids: &[usize]) -> Result<Vec<&'a T>, GetVarError>;
     fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Result<Vec<&'a mut T>, GetVarError>;
-    unsafe fn reorder_unchecked(&mut self, index: usize) -> usize
+    unsafe fn reorder_unchecked(&mut self, index: usize) -> SliceMove
         where T: Ord;
     // unsafe fn reorder_unchecked_by<F>(&mut self, index: usize, f: F) -> usize
     //  where F: FnMut(&T, &T) -> Ordering
-    unsafe fn reorder_unchecked_by_key<K, F>(&mut self, index: usize, f: F) -> usize
+    unsafe fn reorder_unchecked_by_key<K, F>(&mut self, index: usize, f: F) -> SliceMove
         where F: FnMut(&T) -> K, K: Ord;
-    fn reorder(&mut self, index: usize) -> Result<usize, ReorderError>
+    fn reorder(&mut self, index: usize) -> Result<SliceMove, ReorderError>
         where T: Ord;
     // fn reorder_by<F>(&mut self, index: usize, f: F) -> Result<usize, ReorderError>
     //  where F: FnMut(&T, &T) -> Ordering
     // fn reorder_by_key<K, F>(&mut self, index: usize, f: F) -> Result<usize, ReorderError>
     //  where F: FnMut(&T) -> K, K: Ord
-    fn set_sorted(&mut self, index: usize, value: T) -> Result<usize, SetSortedError>
+    fn set_sorted(&mut self, index: usize, value: T) -> Result<SliceMove, SetSortedError>
         where T: Ord;
     // fn set_sorted_by<F>(&mut self, index: usize, value: T, f: F) -> Result<usize, SetSortedError>
     //  where F: FnMut(&T, &T) -> Ordering
     // fn set_sorted_by_key<K, F>(&mut self, index: usize, value: T, f: F) -> Result<usize, SetSortedError>
     //  where F: FnMut(&T) -> K, K: Ord
     fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>>;
+    unsafe fn get_unchecked_aware(&self, index: usize) -> SliceRef<'_, T>;
+    fn iter_aware(&self) -> AwareIter<'_, T>;
 }
 
 impl<T> SliceExt<T> for [T] {
@@ -589,38 +658,39 @@ impl<T> SliceExt<T> for [T] {
         })
     }
 
-    unsafe fn reorder_unchecked(&mut self, index: usize) -> usize where T: Ord {
+    unsafe fn reorder_unchecked(&mut self, index: usize) -> SliceMove where T: Ord {
         let element = self.get_unchecked(index);
         let (new, should_move) = self.get_unchecked(..index).binary_search(element)
             .map_or_else(|x| (x, x != index), |x| (x, x < index - 1));
         if should_move {
             self.get_unchecked_mut(new..=index).rotate_right(1);
-            return new}
+            return SliceMove{from: index, to: new}
+        }
         let new = self.get_unchecked(index+1..).binary_search(element)
             .unwrap_or_else(|x| x) + index;
         if new > index {
             self.get_unchecked_mut(index..=new).rotate_left(1);
         }
-        new
+        SliceMove{from: index, to: new}
     }
 
-    unsafe fn reorder_unchecked_by_key<K, F>(&mut self, index: usize, mut f: F) -> usize
+    unsafe fn reorder_unchecked_by_key<K, F>(&mut self, index: usize, mut f: F) -> SliceMove
     where F: FnMut(&T) -> K, K: Ord {
         let key = f(self.get_unchecked(index));
         let (new, should_move) = self.get_unchecked(..index).binary_search_by_key(&key, &mut f)
             .map_or_else(|x| (x, x != index), |x| (x, x < index - 1));
         if should_move {
             self.get_unchecked_mut(new..=index).rotate_right(1);
-            return new}
+            return SliceMove{from: index, to: new}}
         let new = self.get_unchecked(index+1..).binary_search_by_key(&key, &mut f)
             .unwrap_or_else(|x| x) + index;
         if new > index {
             self.get_unchecked_mut(index..=new).rotate_left(1);
         }
-        new
+        SliceMove{from: index, to: new}
     }
 
-    #[inline] fn reorder(&mut self, index: usize) -> Result<usize, ReorderError> where T: Ord {
+    #[inline] fn reorder(&mut self, index: usize) -> Result<SliceMove, ReorderError> where T: Ord {
         let len = self.len();
         if index >= len {
             return Err(ReorderError{index, len});
@@ -628,7 +698,7 @@ impl<T> SliceExt<T> for [T] {
         Ok(unsafe{self.reorder_unchecked(index)})
     }
 
-    #[inline] fn set_sorted(&mut self, index: usize, value: T) -> Result<usize, SetSortedError> where T: Ord {
+    #[inline] fn set_sorted(&mut self, index: usize, value: T) -> Result<SliceMove, SetSortedError> where T: Ord {
         let len = self.len();
         if index >= len {
             return Err(SetSortedError{index, len});
@@ -637,13 +707,17 @@ impl<T> SliceExt<T> for [T] {
             let dst = self.get_unchecked_mut(index);
             let should_reorder = &value != dst;
             *dst = value;
-            if should_reorder {self.reorder_unchecked(index)} else {index}
+            if should_reorder {self.reorder_unchecked(index)} else {SliceMove{from: index, to: index}}
         })
     }
 
-    #[inline] fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>> {
-        SliceRef::new(self, index)
+    #[inline] fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>> {SliceRef::new(self, index)}
+
+    #[inline] unsafe fn get_unchecked_aware(&self, index: usize) -> SliceRef<'_, T> {
+        SliceRef::raw(self.get_unchecked(index), index)
     }
+
+    #[inline] fn iter_aware(&self) -> AwareIter<'_, T> {AwareIter::new(self)}
 }
 
 #[test] fn slice_get_var() {
@@ -663,19 +737,19 @@ impl<T> SliceExt<T> for [T] {
 #[test] fn slice_reorder() {
     let mut x = [1, 2, 4, 8, 16, 32, 64];
     let old_x = x;
-    assert_eq!(x.reorder(3), Ok(3));
+    assert_eq!(x.reorder(3), Ok(SliceMove{from: 3, to: 3}));
     assert_eq!(x, old_x);
     x[1] = 17;
-    assert_eq!(x.reorder(1), Ok(4));
+    assert_eq!(x.reorder(1), Ok(SliceMove{from: 1, to: 4}));
     // [1, 2, 4, 8, 16, 32, 64] > [1, 4, 8, 16, 17, 32, 64]
     x[5] = 3;
-    assert_eq!(x.reorder(5), Ok(1));
+    assert_eq!(x.reorder(5), Ok(SliceMove{from: 5, to: 1}));
     // [1, 4, 8, 16, 17, 32, 64] > [1, 3, 4, 8, 16, 17, 64]
     let old_x = x;
     assert_eq!(x.reorder(69), Err(ReorderError{index: 69, len: 7}));
     assert_eq!(x, old_x);
     x[2] = 3;
-    assert_eq!(x.reorder(2), Ok(2));
+    assert_eq!(x.reorder(2), Ok(SliceMove{from: 2, to: 2}));
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -807,6 +881,7 @@ pub trait Take: Default {
 impl<T: Default> Take for T {}
 
 pub trait RangeExt<T> {
+    fn ordered(self) -> Self where T: Ord;
     fn overlap<O>(&self, other: &Range<O>) -> bool
     where O: PartialOrd<T>, T: PartialOrd<O>;
     fn loose_contain<O, I>(&self, item: I, offset: O) -> bool where
@@ -822,6 +897,10 @@ pub trait RangeExt<T> {
 }
 
 impl<T> RangeExt<T> for Range<T> {
+    #[inline] fn ordered(self) -> Self where T: Ord {
+        if self.start > self.end {self.end .. self.start} else {self}
+    }
+
     #[inline] fn overlap<O>(&self, other: &Range<O>) -> bool
     where O: PartialOrd<T>, T: PartialOrd<O> {
         self.contains(&other.start)
@@ -881,7 +960,7 @@ impl<O: Copy, T: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Self> + Copy> 
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Point {pub x: i32, pub y: i32}
 
 impl From<[R64; 2]> for Point {

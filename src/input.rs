@@ -2,12 +2,13 @@
 
 use std::{
     f64::consts::{PI, TAU},
-    ops::{Div, Mul, Add}};
+    ops::{Div, Mul, Add, Deref, DerefMut}};
+use wasm_bindgen::JsValue;
 use web_sys::{
     Element,
     HtmlCanvasElement,
     PointerEvent,
-    HtmlElement};
+    HtmlElement, MouseEvent};
 use yew::{
     html, 
     Component,
@@ -19,8 +20,56 @@ use yew::{
     AttrValue,
     NodeRef, Callback};
 use crate::{
-    utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, BoolExt, R64},
+    utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, BoolExt, R64, Point, HtmlElementExt},
     loc};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Buttons {
+    pub left: bool,
+    pub shift: bool,
+    pub meta: bool
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CanvasEvent {
+    pub point: Point,
+    buttons: Buttons
+}
+
+impl Deref for CanvasEvent {
+    type Target = Buttons;
+    #[inline] fn deref(&self) -> &Self::Target {&self.buttons}
+}
+
+impl DerefMut for CanvasEvent {
+    #[inline] fn deref_mut(&mut self) -> &mut Self::Target {&mut self.buttons}
+}
+
+impl TryFrom<&MouseEvent> for CanvasEvent {
+    type Error = JsValue;
+    fn try_from(value: &MouseEvent) -> Result<Self, Self::Error> {
+        let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result(loc!())?;
+        let point = Point{x: value.offset_x(), y: value.offset_y()}
+            .normalise(canvas.client_rect(), canvas.rect());
+        Ok(Self{point, buttons: Buttons{
+            left: value.buttons() & 1 == 1,
+            shift: value.shift_key(),
+            meta: value.meta_key()}})
+    }
+}
+
+impl TryFrom<&PointerEvent> for CanvasEvent {
+    type Error = JsValue;
+    fn try_from(value: &PointerEvent) -> Result<Self, Self::Error> {
+        let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result(loc!())?;
+        let point = Point{x: value.offset_x(), y: value.offset_y()}
+            .normalise(canvas.client_rect(), canvas.rect());
+        Ok(Self{point, buttons: Buttons{
+            left: value.buttons() & 1 == 1,
+            shift: value.shift_key(),
+            meta: value.meta_key()}})
+    }
+}
 
 #[derive(Debug)]
 pub enum Cmd {

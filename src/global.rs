@@ -14,7 +14,7 @@ use yew::{
     Component,
     Context,
     Html,
-    html};
+    html, AttrValue};
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats},
     visual::{HintHandler, SoundVisualiser, Graphable},
@@ -50,6 +50,7 @@ pub enum AppEvent {
     /// epllog version of `AudioStarted`
     AfterAudioStarted(Secs),
     /// emitted when the user selects a sound block to edit in the side editor
+    /// the contained value is index into the selected indices, not into the points directly
     Select(Option<usize>),
     /// epliog version of `Select`
     AfterSelect(Option<usize>),
@@ -63,7 +64,13 @@ pub enum AppEvent {
     Duration(R64),
     /// emitted when a `Noise` sound block's volume has been changed
     Volume(R32),
-    /// emitted when a `Note` sound block's notes' release time has been changed
+    /// emitted when a sound block's attack time has been changed
+    Attack(Beats),
+    /// emitted when a sound block's decay time has been changed
+    Decay(Beats),
+    /// emitted when a sound block's sustain level has been changed
+    Sustain(R32),
+    /// emitted when a sound block's release time has been changed
     Release(Beats),
     /// emitted when the global BPM has been changed
     Bpm(R64),
@@ -120,6 +127,9 @@ impl AppEvent {
             | Self::FetchHint(..)
             | Self::RedrawEditorPlane
             | Self::Duration(..)
+            | Self::Attack(..)
+            | Self::Decay(..)
+            | Self::Sustain(..)
             | Self::Release(..)
             | Self::Resize 
             | Self::Add(..) 
@@ -220,10 +230,11 @@ impl Component for App {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let block = self.sequencer.pattern().fixed();
+        // TODO: add switching between selected blocks
+        let block = self.sequencer.pattern().iter_selection().next();
 
         let setter = ctx.link().callback(|x| x);
-        let render_tab_info = |info: &TabInfo, tab_id: usize, desc: String| -> Html {
+        let render_tab_info = |info: &TabInfo, tab_id: usize, desc: AttrValue| -> Html {
             html!{
                 <div id={(self.ctx.selected_tab == tab_id).then_some("selected-tab")}
                 onpointerup={ctx.link().callback(move |_| AppEvent::SetTab(tab_id))}
@@ -236,14 +247,14 @@ impl Component for App {
         html! {<>
             <div id="main-panel">
                 <div id="ctrl-panel" class="dark-bg"
-                data-main-hint="Settings" data-aux-hint={block.map_or_else(|| "General".to_owned(), SoundBlock::desc)}>
+                data-main-hint="Settings" data-aux-hint={AttrValue::from(block.map_or_else(|| "General".into(), SoundBlock::desc))}>
                     <div id="hint" class="light-bg"
                     data-main-hint="Hint bar" data-aux-hint="for useful messages about the app's controls">
                         <span id="main-hint" ref={self.hint_handler.main_bar().clone()}/>
                         <br/>
                         <span id="aux-hint" ref={self.hint_handler.aux_bar().clone()}/>
                     </div>
-                    if let Some((tab_aux_hint, block)) = block.map(|x| (x.desc() + ": Settings tab", x)) {
+                    if let Some((tab_aux_hint, block)) = block.map(|x| (AttrValue::from(x.desc() + ": Settings tab"), x)) {
                         <div id="tab-list">
                             {for block.sound.tabs().iter().enumerate()
                                 .map(|(tab_id, tab)| render_tab_info(tab, tab_id, tab_aux_hint.clone()))}
@@ -358,7 +369,8 @@ impl App {
         if let Some(next) = self.sequencer.handle_event(&event, &self.ctx).add_loc(loc!())? {
             ctx.link().send_message(next);
         }
-        if let Some(mut block) = self.sequencer.pattern_mut().fixed_mut() {
+        if let Some(&id) = self.sequencer.pattern().selection().first() {
+            let mut block = unsafe{self.sequencer.pattern_mut().get_unchecked_mut(id)};
             let (prev, bps) = (self.ctx.play_since, self.ctx.bps);
             self.ctx.play_since += block.offset.to_secs(bps);
             if let Some(next) = block.inner().handle_event(&event, &self.ctx).add_loc(loc!())? {
