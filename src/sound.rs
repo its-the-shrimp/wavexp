@@ -1,5 +1,5 @@
 use std::{
-    ops::{Add, Sub, Range, AddAssign},
+    ops::{Add, Sub, Range, AddAssign, SubAssign},
     fmt::{self, Display, Formatter, Debug},
     cmp::Ordering,
     rc::Rc,
@@ -18,7 +18,7 @@ use crate::{
         JsResult,
         JsResultUtils,
         R64, R32,
-        LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt, js_error, Take, RangeExt, SliceRef, BoolExt, Check},
+        LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt, js_error, Take, SliceRef, Check},
     input::{Slider, Button, Buttons},
     visual::{GraphEditor, Graphable},
     global::{AppContext, AppEvent},
@@ -60,26 +60,31 @@ impl Display for Note {
 impl Add<isize> for Note {
     type Output = Note;
     #[inline] fn add(self, rhs: isize) -> Self::Output {
-        Self((self.0 as usize).saturating_add_signed(rhs).max(Self::N_NOTES) as u8)
+        Self((self.0 as usize).saturating_add_signed(rhs).min(Self::N_NOTES) as u8)
     }
 }
 
 impl AddAssign<isize> for Note {
     #[inline] fn add_assign(&mut self, rhs: isize) {
-        self.0 = (self.0 as usize).saturating_add_signed(rhs).max(Self::N_NOTES) as u8;
+        self.0 = (self.0 as usize).saturating_add_signed(rhs).min(Self::N_NOTES) as u8;
     }
 }
 
 impl Sub<isize> for Note {
     type Output = Note;
     #[inline] fn sub(self, rhs: isize) -> Self::Output {
-        Self((0 .. Self::N_NOTES as isize).fit((self.0 as isize).saturating_sub(rhs)) as u8)
+        Self((self.0 as isize - rhs).clamp(0, Self::N_NOTES as isize) as u8)
+    }
+}
+
+impl SubAssign<isize> for Note {
+    #[inline] fn sub_assign(&mut self, rhs: isize) {
+        self.0 = (self.0 as isize - rhs).clamp(0, Self::N_NOTES as isize) as u8;
     }
 }
 
 impl Note {
     pub const MAX: Note = Note(35);
-    // pub const MIN: Note = Note(0);
     pub const N_NOTES: usize = Self::FREQS.len();
     pub const FREQS: [R32; 36] = [
         r32![65.410] /*C2*/, r32![69.300] /*C#2*/,
@@ -208,8 +213,12 @@ impl Graphable for NoteBlock {
     }
 
     #[inline] fn move_point(&mut self, delta: [R64; 2], meta: bool) {
-        *meta.choose(&mut self.len, &mut self.offset) += delta[0];
-        self.value += delta[1].into();
+        if meta {
+            self.len += delta[0];
+        } else {
+            self.offset = r64![0.0].max(self.offset + delta[0]);
+        }
+        self.value -= delta[1].into();
     }
 
     #[inline] fn on_move(ids: &[usize], n_points: usize, _: [R64; 2], _: bool) -> Option<Self::Event> {
@@ -370,9 +379,10 @@ impl Sound {
                     block_core.start().add_loc(loc!())?;
                     let block = ctx.audio_ctx.create_gain().add_loc(loc!())?;
                     {
+                        let mut at = ctx.now;
                         let gain = block.gain();
-                        gain.set_value(f32::MIN_POSITIVE);
-                        let mut at = ctx.now + attack.to_secs(ctx.bps);
+                        gain.set_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
+                        at += attack.to_secs(ctx.bps);
                         gain.linear_ramp_to_value_at_time(**volume, *at).add_loc(loc!())?;
                         at += decay.to_secs(ctx.bps);
                         sustain *= *volume;
@@ -613,7 +623,7 @@ impl Graphable for SoundBlock {
     #[inline] fn loc(&self) -> [R64; 2] {[self.offset, self.layer.into()]}
 
     #[inline] fn move_point(&mut self, delta: [R64; 2], _: bool) {
-        self.offset += delta[0];
+        self.offset = r64![0.0].max(self.offset + delta[0]);
         self.layer += i32::from(delta[1]);
     }
 
@@ -636,7 +646,7 @@ impl Graphable for SoundBlock {
     }
 
     #[inline] fn fmt_loc(loc: [R64; 2]) -> String {
-        format!("{:.3}, layer {:.0}", loc[0], loc[1])
+        format!("{:.3}, layer {}", loc[0], loc[1].floor())
     }
 
     #[inline] fn on_click<'a, F, I1, I2>(loc: F, old_sel: I1, new_sel: I2, meta: bool) -> Option<Self::Event>
@@ -649,15 +659,15 @@ impl Graphable for SoundBlock {
         if len == 0 && old_sel.len() == 0 && meta {
             let [x, y] = loc();
             Some(AppEvent::Add(y.into(), x))
-        } else if len > 0 {
-            Some(AppEvent::Select(Some(0)))
-        } else {None}
+        } else {
+            Some(AppEvent::Select((len > 0).then_some(0)))
+        }
     }
 
     #[inline] fn plane_hover_hint(_: impl Fn() -> [R64; 2], buttons: Buttons) -> Option<[Cow<'static, str>; 2]> {
         Some(match buttons {
             Buttons{left: false, meta: false, ..} =>
-                [Self::EDITOR_NAME.into(), "Hold & drag to move (press Meta for actions)".into()],
+                [Self::EDITOR_NAME.into(), "Hold & drag to move (press Meta for other actions)".into()],
             Buttons{left: false, meta: true, ..} =>
                 [Self::EDITOR_NAME.into(), "Click to add block, hold & drag to select".into()],
             Buttons{left: true, meta: false, ..} =>
@@ -669,30 +679,20 @@ impl Graphable for SoundBlock {
 
     #[inline] fn point_hover_hint<'a>(point: SliceRef<'a, Self>, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
     where Self: 'a {
-        Some(match buttons {
-            Buttons{left: false, meta: false, ..} =>
-                [format!("Block @ {}", Self::fmt_loc(point.loc())).into(), "Hold & drag to move (press Meta for other actions)".into()],
-            Buttons{left: false, meta: true, ..} =>
-                [format!("Block @ {}", Self::fmt_loc(point.loc())).into(), "Hold & drag to stretch".into()],
-            Buttons{left: true, meta: false, ..} =>
-                [format!("Block @ {}: moving", Self::fmt_loc(point.loc())).into(), "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                [format!("Block @ {}: stretching", Self::fmt_loc(point.loc())).into(), "Release to stop".into()]
+        Some(if buttons.left {
+            [format!("Block @ {}", Self::fmt_loc(point.loc())).into(), "Hold & drag to move".into()]
+        } else {
+            [format!("Block @ {}: moving", Self::fmt_loc(point.loc())).into(), "Release to stop".into()]
         })
     }
 
     #[inline] fn selection_hover_hint<'a, I>(mut points: I, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
     where Self: 'a, I: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator {
         if let Some(p) = points.next().filter(|_| points.len() == 0) {return Self::point_hover_hint(p, buttons)}
-        Some(match buttons {
-            Buttons{left: false, meta: false, ..} =>
-                ["Multiple blocks".into(), "Click to de-select, hold & drag to move (press Meta for other actions)".into()],
-            Buttons{left: false, meta: true, ..} =>
-                ["Multiple blocks".into(), "Click to de-select, old & drag to stretch".into()],
-            Buttons{left: true, meta: false, ..} =>
-                ["Multiple blocks: moving".into(), "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                ["Multiple blocks: stretching".into(), "Release to stop".into()]
+        Some(if buttons.left {
+            ["Multiple blocks".into(), "Click to de-select, hold & drag to move".into()]
+        } else {
+            ["Multiple blocks: moving".into(), "Release to stop".into()]
         })
     }
 }

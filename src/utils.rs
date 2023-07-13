@@ -7,7 +7,7 @@ use std::{
     error::Error,
     collections::TryReserveError,
     cmp::Ordering,
-    any::type_name};
+    any::type_name, array::from_fn};
 use js_sys::{
     Object as JsObject,
     Error as JsError};
@@ -23,6 +23,11 @@ use web_sys::{
     Element,
     console::warn_1,
     HtmlElement};
+
+pub fn modify<T>(src: &mut T, f: impl FnOnce(T) -> T) {
+    let src = src as *mut T;
+    unsafe{src.write(f(src.read()))}
+}
 
 pub trait Check: Sized {
 	#[inline] fn check(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
@@ -100,6 +105,8 @@ impl BoolExt for bool {
 }
 
 pub trait ArrayExt<T, const N: usize>: Sized {
+    fn zip<O, R, F>(self, other: [O; N], f: F) -> [R; N]
+    where F: FnMut(T, O) -> R;
     fn add<'a, O>(self, other: &'a [O; N]) -> Self
     where T: AddAssign<&'a O>;
     fn sub<'a, O>(self, other: &'a [O; N]) -> Self
@@ -108,8 +115,12 @@ pub trait ArrayExt<T, const N: usize>: Sized {
     where T: MulAssign<&'a O>;
     fn div<'a, O>(self, other: &'a [O; N]) -> Self
     where T: DivAssign<&'a O>;
-    fn floor_to<'a, O>(self, other: &'a [O; N]) -> Self
-    where T: Copy + FloorTo<&'a O>;
+    fn rem<'a, O>(self, other: &'a [O; N]) -> Self
+    where T: RemAssign<&'a O>;
+    fn floor_to(self, other: &Self) -> Self
+    where T: RoundTo;
+    fn ceil_to(self, other: &Self) -> Self
+    where T: RoundTo;
     fn sum<R>(self) -> R
     where R: Sum<T>;
     fn array_check_in<R, O>(self, ranges: &[R; N]) -> Option<Self>
@@ -119,6 +130,11 @@ pub trait ArrayExt<T, const N: usize>: Sized {
 }
 
 impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
+    #[inline] fn zip<O, R, F>(self, other: [O; N], mut f: F) -> [R; N] where F: FnMut(T, O) -> R {
+        let (mut d, mut s) = (self.into_iter(), other.into_iter());
+        from_fn(|_| unsafe{f(d.next().unwrap_unchecked(), s.next().unwrap_unchecked())})
+    }
+
     #[inline] fn add<'a, O>(mut self, other: &'a [O; N]) -> Self where T: AddAssign<&'a O> {
         for (dst, src) in self.iter_mut().zip(other.iter()) {*dst += src}
         self
@@ -139,8 +155,18 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
         self
     }
 
-    #[inline] fn floor_to<'a, O>(mut self, other: &'a [O; N]) -> Self where T: Copy + FloorTo<&'a O> {
-        for (d, s) in self.iter_mut().zip(other) {*d = d.floor_to(s)}
+    #[inline] fn rem<'a, O>(mut self, other: &'a [O; N]) -> Self where T: RemAssign<&'a O> {
+        for (d, s) in self.iter_mut().zip(other.iter()) {*d %= s}
+        self
+    }
+
+    #[inline] fn floor_to(mut self, other: &Self) -> Self where T: RoundTo {
+        for (d, s) in self.iter_mut().zip(other) {*d = d.floor_to(*s)}
+        self
+    }
+
+    #[inline] fn ceil_to(mut self, other: &Self) -> Self where T: RoundTo {
+        for (d, s) in self.iter_mut().zip(other) {*d = d.ceil_to(*s)}
         self
     }
 
@@ -559,31 +585,30 @@ impl Display for SetSortedError {
 
 impl Error for SetSortedError {}
 
-pub struct AwareIter<'a, T: 'a> {
-    slice: &'a [T],
+pub struct IterMutWithCtx<'a, T: 'a + Copy> {
+    slice: &'a mut [T],
     state: usize
 }
 
-impl<'a, T: 'a> Iterator for AwareIter<'a, T> {
-    type Item = SliceRef<'a, T>;
+impl<'a, T: 'a + Copy> Iterator for IterMutWithCtx<'a, T> {
+    type Item = (&'a mut [T], T);
     #[inline] fn next(&mut self) -> Option<Self::Item> {
-        self.slice.get(self.state).map(|x| unsafe{
+        self.slice.get(self.state).copied().map(|x| unsafe {
             self.state += 1;
-            SliceRef::raw(x, self.state)
-        })
+            ((self.slice as *mut [T]).as_mut().unwrap_unchecked(), x)})
     }
 
     #[inline] fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.slice.len() - self.state).pipe(|x| (x, Some(x)))
+        self.slice.len().pipe(|x| (x, Some(x)))
     }
 }
 
-impl<'a, T: 'a> ExactSizeIterator for AwareIter<'a, T> {
-    #[inline] fn len(&self) -> usize {self.slice.len() - self.state}
+impl<'a, T: 'a + Copy> ExactSizeIterator for IterMutWithCtx<'a, T> {
+    #[inline] fn len(&self) -> usize {self.slice.len()}
 }
 
-impl<'a, T: 'a> AwareIter<'a, T> {
-    #[inline] fn new(slice: &'a [T]) -> Self {Self{slice, state: 0}}
+impl<'a, T: 'a + Copy> IterMutWithCtx<'a, T> {
+    #[inline] fn new(slice: &'a mut [T]) -> Self {Self{slice, state: 0}}
 }
 
 pub trait SliceExt<T> {
@@ -613,7 +638,7 @@ pub trait SliceExt<T> {
     //  where F: FnMut(&T) -> K, K: Ord
     fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>>;
     unsafe fn get_unchecked_aware(&self, index: usize) -> SliceRef<'_, T>;
-    fn iter_aware(&self) -> AwareIter<'_, T>;
+    fn iter_mut_with_ctx<'a>(&'a mut self) -> IterMutWithCtx<'a, T> where T: 'a + Copy;
 }
 
 impl<T> SliceExt<T> for [T] {
@@ -717,7 +742,9 @@ impl<T> SliceExt<T> for [T] {
         SliceRef::raw(self.get_unchecked(index), index)
     }
 
-    #[inline] fn iter_aware(&self) -> AwareIter<'_, T> {AwareIter::new(self)}
+    #[inline] fn iter_mut_with_ctx<'a>(&'a mut self) -> IterMutWithCtx<'a, T> where T: 'a + Copy {
+        IterMutWithCtx::new(self)
+    }
 }
 
 #[test] fn slice_get_var() {
@@ -1038,13 +1065,21 @@ impl Rect {
     #[inline] fn  height(&self) -> i32 {self.1.y - self.0.y}
 }
 
-pub trait FloorTo<S> {
-    fn floor_to(self, step: S) -> Self;
+pub trait RoundTo: Copy + Add<Self, Output=Self> + Sub<Self, Output=Self> + Rem<Self, Output=Self> {
+    const ONE: Self;
+    #[inline] fn floor_to(self, step: Self) -> Self {self - self % step}
+    #[inline] fn  ceil_to(self, step: Self) -> Self {step - (self - Self::ONE) % step + self - Self::ONE}
 }
 
-impl<T, S> FloorTo<S> for T where T: Copy + SubAssign + Sub<T, Output=T> + Rem<S, Output=T> {
-    #[inline] fn floor_to(self, step: S) -> Self {self - self % step}
+macro_rules! round_to_4ints {
+    ($($int:ty)+) => {$(
+        impl RoundTo for $int {
+            const ONE: Self = 1;
+        }
+    )+};
 }
+
+round_to_4ints!(i8 u8 i16 u16 i32 u32 isize usize i64 u64);
 
 #[derive(Debug)]
 pub struct NanError;
@@ -1405,11 +1440,18 @@ macro_rules! r32 {
     };
 }
 
+impl RoundTo for R32 {
+    const ONE: Self = r32![1.0];
+}
+
 #[macro_export]
 macro_rules! r64 {
     ($x:literal) => {
         unsafe{$crate::utils::R64::new_unchecked($x)}
     };
+}
+impl RoundTo for R64 {
+    const ONE: Self = r64![1.0];
 }
 
 #[test]

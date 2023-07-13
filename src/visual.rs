@@ -1,11 +1,11 @@
 use std::{
-    iter::{Iterator, successors as succ, empty, once},
+    iter::{Iterator, empty, once},
     slice::{from_raw_parts, from_mut, from_ref},
     mem::{replace, take},
     ops::{Range, Deref},
     fmt::Debug,
     rc::Rc,
-    borrow::Cow};
+    borrow::Cow, cmp::min};
 use web_sys::{
     HtmlCanvasElement,
     AnalyserNode,
@@ -21,7 +21,7 @@ use crate::{
     utils::{Check, SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, OptionExt,
         HtmlElementExt, 
-        Pipe, BoolExt, RangeExt, VecExt, R64, ArrayExt, ArrayFrom, IntoArray, SliceRef, ResultToJsResult, SliceMove},
+        Pipe, BoolExt, RangeExt, VecExt, R64, ArrayExt, ArrayFrom, IntoArray, SliceRef, ResultToJsResult, SliceMove, modify},
     sound::FromBeats,
     global::{AppEvent, AppContext},
     input::{Buttons, CanvasEvent},
@@ -312,11 +312,9 @@ pub trait Graphable: Ord {
     #[allow(unused_variables)] #[inline]
     fn on_click<'a, F, I1, I2>(loc: F, old_sel: I1, new_sel: I2, meta: bool) -> Option<Self::Event>
     where Self: 'a,
-    F: Fn() -> [R64; 2],
-    I1: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
-    I2: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator {
-        None
-    }
+        F: Fn() -> [R64; 2],
+        I1: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
+        I2: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator {None}
 
     // return type of `desc` and `fmt_loc` should be `impl AsRef<str>`
     // but feature `return_position_impl_trait_in_trait` is not usable yet
@@ -340,14 +338,6 @@ pub trait Graphable: Ord {
     /// `mapper` maps user coordinates to canvas coordinates, all vertices in the
     /// returned `Path2d` must be the result of the `mapper` function
     fn draw(&self, next: Option<&Self>, mapper: impl Fn([R64; 2]) -> [R64; 2]) -> JsResult<Path2d>;
-    /// visual representation of the meta key and left mouse button being held, i.e. of a selected
-    /// region
-    /// `origin` and `cur` are in canvas coordinates
-    #[allow(unused_variables)] #[inline]
-    fn draw_meta_drag(canvas_size: [R64; 2], scale: [R64; 2], origin: [R64; 2], cur: [R64; 2]) -> JsResult<Path2d> {
-        Path2d::new().add_loc(loc!()).inspect(|x|
-            x.rect(*cur[0], *cur[1], *origin[0] - *cur[0], *origin[1] - *cur[1]))
-    }
 }
 
 /// a special reference wrapper: access to everything is immutable,
@@ -371,18 +361,30 @@ impl<'a, T: Graphable> GraphPointView<'a, T> {
 // +aligned: aligned to snap step
 // +confined: limited to bounds specified by `Graphable::(X/Y)_BOUND`
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Focus {
-    #[default] None,
+    None{ids: Box<[usize]>},
     Zoom{init_offset: Point, pivot: Point, init_scale: [R64; 2]},
-    Plane{last_loc: Point /* +canvas +aligned */},
+    Plane{origin: Point},
     Point{id: usize, last_loc: [R64; 2] /* +user +aligned +confined */},
     Selection{ids: Box<[usize]> /* sorted */, last_loc: [R64; 2] /* +user +aligned +confined */, moved: bool}
 }
 
+impl Default for Focus {
+    #[inline] fn default() -> Self {
+        Self::None{ids: [].into()}
+    }
+}
+
 impl Focus {
     #[inline] pub fn selection(&self) -> &[usize] {
-        if let Focus::Selection{ids, ..} = self {ids} else {&[]}
+        use Focus::*;
+        if let Selection{ids, ..} | None{ids} = self {ids} else {&[]}
+    }
+
+    #[inline] pub fn into_selection(self) -> Box<[usize]> {
+        use Focus::*;
+        if let Selection{ids, ..} | None{ids} = self {ids} else {[].into()}
     }
 }
 
@@ -394,7 +396,8 @@ pub struct GraphEditor<T: Graphable> {
     focus: Focus,
     last_event: CanvasEvent,
     redraw: bool,
-    data: Vec<T>
+    data: Vec<T>,
+    grid: Option<(Path2d, [R64; 2])>
 }
 
 impl<T: Graphable> GraphEditor<T> {
@@ -405,10 +408,15 @@ impl<T: Graphable> GraphEditor<T> {
     const LINE_WIDTH: f64 = 3.0;
 
     #[inline] pub fn new(data: Vec<T>) -> Self {
-        Self{canvas: NodeRef::default(), offset: Point::ZERO,
-            focus: Focus::None, last_event: CanvasEvent::default(),
-            scale: [T::SCALE_X_BOUND.to_pair().mul(&[0.75, 0.25]).sum(), T::SCALE_Y_BOUND.to_pair().mul(&[0.75, 0.25]).sum()],
-            redraw: false, data}
+        Self{canvas: NodeRef::default(),
+            offset: Point::ZERO,
+            focus: Focus::default(),
+            last_event: CanvasEvent::default(),
+            scale: [T::SCALE_X_BOUND.to_pair(), T::SCALE_Y_BOUND.to_pair()]
+                .map(|x| x.mul(&[0.75, 0.25]).sum::<R64>().ceil()),
+            redraw: false,
+            grid: None,
+            data}
     }
 
     #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
@@ -443,10 +451,6 @@ impl<T: Graphable> GraphEditor<T> {
     }
 
     #[inline] pub fn selection(&self) -> &[usize] {self.focus.selection()}
-
-    #[inline] pub fn iter_selection(&self) -> impl Iterator<Item=&'_ T> {
-        self.focus.selection().iter().map(|x| unsafe{self.data.get_unchecked(*x)})
-    }
 
     /// returns the index at which the new point will be available
     #[inline] pub fn add_point(&mut self, point: T) -> usize {
@@ -491,6 +495,7 @@ impl<T: Graphable> GraphEditor<T> {
         let [w, h] = resizer(&canvas).add_loc(loc!())?;
         canvas.set_width(w);
         canvas.set_height(h);
+        self.grid = None;
         if self.offset.x <= 0 {
             self.offset.x = (T::OFFSET_X_BOUND.start * R64::from(w) / self.scale[0]).into();
         }
@@ -515,7 +520,7 @@ impl<T: Graphable> GraphEditor<T> {
 
     pub fn handle_hover(&mut self, event: Option<CanvasEvent>, ctx: &AppContext) -> JsResult<Option<T::Event>> {
         let Some(event) = event else {
-            self.focus = Focus::None;
+            modify(&mut self.focus, |x| Focus::None{ids: x.into_selection()});
             self.redraw = true;
             return Ok(None)
         };
@@ -528,27 +533,33 @@ impl<T: Graphable> GraphEditor<T> {
         // let canvas_plane = event.point;
         let offset = |loc| loc + self.offset;
         let to_user = |loc| R64::array_from(loc + self.offset).div(step);
-        let to_aligned_canvas = |loc| Point::from(R64::array_from(loc).floor_to(&snap_step.mul(step)));
+        let user_align = |loc: [R64; 2]| loc.floor_to(snap_step);
         let to_aligned_user = |loc| R64::array_from(loc + self.offset).div(step).floor_to(snap_step);
         let confine = |x| [T::X_BOUND, T::Y_BOUND].fit(x);
 
         let zoom_focus = ||
             Focus::Zoom{init_offset: self.offset, pivot: offset(event.point), init_scale: self.scale};
         let plane_focus = ||
-            Focus::Plane{last_loc: to_aligned_canvas(event.point)};
+            Focus::Plane{origin: offset(event.point)};
         let point_focus = |id|
             Focus::Point{id, last_loc: confine(to_aligned_user(event.point))};
         let selection_focus = |ids|
             Focus::Selection{ids, last_loc: confine(to_aligned_user(event.point)), moved: false};
 
-        let res = Ok(match self.focus {
-            Focus::None => self.set_focus(plane_focus()).pipe(|_| None),
+        let res = Ok(match &mut self.focus {
+            Focus::None{ids} => {
+                let ids = take(ids);
+                self.set_focus(if ids.is_empty() {plane_focus()} else {selection_focus(ids)});
+                None
+            }
 
-            Focus::Zoom{ref mut init_offset, ref mut init_scale, ref mut pivot} => if event.left {
+            Focus::Zoom{init_offset, init_scale, pivot} => if event.left {
                 if !self.last_event.left {
                     *pivot = offset(event.point);
                     *init_scale = self.scale;
                     *init_offset = self.offset;
+                } else {
+                    self.redraw = true;
                 }
                 let point = event.point + *init_offset - *pivot;
                 if !T::SCALE_X_BOUND.is_empty() {
@@ -561,101 +572,105 @@ impl<T: Graphable> GraphEditor<T> {
                 }
             } else if event.shift {
                 *pivot = event.point;
+                self.redraw = true;
             } else {
                 self.focus = plane_focus();
-            }.pipe(|_| {self.redraw = true; None}),
+            }.pipe(|_| None),
 
-            Focus::Plane{ref mut last_loc} => match *event {
+            Focus::Plane{origin} => match *event {
                 Buttons{shift: true, ..} => self.set_focus(zoom_focus()).pipe(|_| None),
 
-                Buttons{left: false, meta, ..} => if self.last_event.left && self.last_event.meta {
-                    let src = to_user(*last_loc);
-                    let dst = to_user(event.point);
-                    let area = [(src[0] .. dst[0]).ordered(), (src[1] .. dst[1]).ordered()];
-                    let sel: Box<_> = self.data.iter().enumerate()
-                        .filter_map(|(id, x)| x.loc().array_check_in(&area).map(|_| id))
-                        .collect();
-                    let res = T::on_click(|| confine(to_aligned_user(event.point)),
-                        empty(),
-                        sel.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)}),
-                        meta);
-                    if !sel.is_empty() {
-                        self.set_focus(selection_focus(sel))
-                    } else if meta {
-                        *last_loc = to_aligned_canvas(event.point);
-                        self.redraw = true;
-                    }
-                    res
+                Buttons{left: false, meta, ..} => if self.last_event.left {
+                    if self.last_event.meta {
+                        let src = to_user(*origin);
+                        let dst = to_user(event.point);
+                        let area = [(src[0] .. dst[0]).ordered(), (src[1] .. dst[1]).ordered()];
+                        let sel: Box<_> = self.data.iter().enumerate()
+                            .filter_map(|(id, x)| x.loc().array_check_in(&area).map(|_| id))
+                            .collect();
+                        let res = T::on_click(|| confine(to_aligned_user(event.point)),
+                            empty(),
+                            sel.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)}),
+                            meta);
+                        if !sel.is_empty() {
+                            self.focus = selection_focus(sel);
+                        }
+                        res
+                    } else {None}
                 } else if let Some(p) = self.point_by_pos(to_user(event.point)) {
                     self.set_focus(point_focus(p.index()));
                     None
-                } else if meta {
-                    self.set_focus(plane_focus());
+                } else {
+                    self.redraw = self.last_event.meta | meta;
                     None
-                } else {None}
+                }
 
                 Buttons{left: true, meta: false, ..} => {
+                    if !self.last_event.left {
+                        *origin = event.point;
+                    } else {
+                        self.redraw = true;
+                    }
                     if !T::OFFSET_X_BOUND.is_empty() {
                         self.offset.x = T::OFFSET_X_BOUND.map(|x| x * step[0])
-                            .extend(self.offset.x).fit(self.offset.x + last_loc.x - event.point.x);
+                            .extend(self.offset.x).fit(self.offset.x + self.last_event.point.x - event.point.x);
                     }
                     if !T::OFFSET_Y_BOUND.is_empty() {
                         self.offset.y = T::OFFSET_Y_BOUND.map(|y| y * step[1])
-                            .extend(self.offset.y).fit(self.offset.y + last_loc.y - event.point.y);
+                            .extend(self.offset.y).fit(self.offset.y + self.last_event.point.y - event.point.y);
                     }
-                    *last_loc = event.point;
-                    self.redraw = true;
                     None
                 }
 
-                Buttons{left: true, meta: true, ..} => {
-                    if !self.last_event.left {
-                        *last_loc = to_aligned_canvas(event.point);
-                    }
+                Buttons{left: true, meta: true, ..} => if self.last_event.left {
                     self.redraw = true;
-                    None
-                }
+                } else {
+                    *origin = event.point;
+                }.pipe(|_| None),
             }
 
-            Focus::Point{ref mut id, ref mut last_loc} => if event.shift {
-                self.set_focus(zoom_focus());
+            Focus::Point{id, last_loc} => if event.shift {
+                self.focus = zoom_focus();
                 None
             } else if event.left {
                 let delta = if !self.last_event.left {
-                    *last_loc = confine(to_aligned_user(event.point));
+                    *last_loc = to_aligned_user(event.point);
                     Default::default()
                 } else {
-                    let new = confine(to_aligned_user(event.point));
+                    let new = to_aligned_user(event.point);
                     new.sub(&replace(last_loc, new))
                 };
-                unsafe{self.data.get_unchecked_mut(*id)}.move_point(delta, event.meta);
-                unsafe{self.data.reorder_unchecked(*id)}.apply(from_mut(id));
-                T::on_move(from_ref(id), self.data.len(), delta, event.meta)
+                if *delta.sum::<R64>() != 0.0 {
+                    self.redraw = true;
+                    unsafe{self.data.get_unchecked_mut(*id)}.move_point(delta, event.meta);
+                    unsafe{self.data.reorder_unchecked(*id)}.apply(from_mut(id));
+                    T::on_move(from_ref(id), self.data.len(), delta, event.meta)
+                } else {None}
             } else {
                 let p = unsafe{self.data.get_unchecked_aware(*id)};
-                let (f, r) = match (self.last_event.left, p.in_hitbox(to_user(event.point))) {
+                let loc = to_user(event.point);
+                let (f, r) = match (self.last_event.left, p.in_hitbox(loc)) {
                     (false, false) =>
                         (Some(plane_focus()), None),
                     (false, true) =>
                         (None, None),
                     (true, false) => (Some(plane_focus()),
-                        T::on_click(|| confine(to_aligned_user(event.point)),
+                        T::on_click(|| confine(user_align(loc)),
                             empty(), empty(), self.last_event.meta)),
                     (true, true) => (Some(selection_focus([*id].into())),
-                        T::on_click(|| confine(to_aligned_user(event.point)),
+                        T::on_click(|| confine(user_align(loc)),
                             empty(), once(p), self.last_event.meta))
                 };
                 if let Some(f) = f {self.set_focus(f)}
                 r
             }
 
-            Focus::Selection{ref mut ids, ref mut last_loc, ref mut moved} => if event.shift {
-                self.set_focus(zoom_focus());
+            Focus::Selection{ids, last_loc, moved} => if event.shift {
+                self.focus = zoom_focus();
                 None
             } else if event.left {
                 let delta = if !self.last_event.left {
                     *last_loc = confine(to_aligned_user(event.point));
-                    self.redraw = true;
                     Default::default()
                 } else {
                     let new = confine(to_aligned_user(event.point));
@@ -665,28 +680,55 @@ impl<T: Graphable> GraphEditor<T> {
                     *moved = true;
                     self.redraw = true;
                     // TODO: some optimisation
-                    for &id in ids.clone().iter() {
+                    for (ids, id) in ids.iter_mut_with_ctx() {
                         unsafe{self.data.get_unchecked_mut(id)}.move_point(delta, event.meta);
                         unsafe{self.data.reorder_unchecked(id)}.apply(ids);
                     }
+                    ids.sort_unstable();
                     T::on_move(ids, self.data.len(), delta, event.meta)
                 } else {None}
-            } else if self.last_event.left && !*moved {
-                let e = T::on_click(|| confine(to_aligned_user(event.point)),
-                    ids.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)}),
-                    empty(),
-                    self.last_event.meta);
-                self.set_focus(self.point_by_pos(to_user(event.point))
-                    .map_or_else(plane_focus, |p| point_focus(p.index())));
-                e
+            } else if self.last_event.left {
+                if *moved {
+                    let iter = ids.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)});
+                    T::on_click(|| confine(to_aligned_user(event.point)),
+                        iter.clone(),
+                        iter,
+                        self.last_event.meta)
+                } else {
+                    let res = T::on_click(|| confine(to_aligned_user(event.point)),
+                        ids.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)}),
+                        empty(),
+                        self.last_event.meta);
+                    self.set_focus(self.point_by_pos(to_user(event.point))
+                        .map_or_else(plane_focus, |p| point_focus(p.index())));
+                    res
+                }
             } else {
                 *moved = false;
                 None
             }
         });
-        self.redraw |= *self.last_event != *event;
-        self.last_event = event;
+        self.redraw |= *event != *replace(&mut self.last_event, event);
         res
+    }
+
+    /// an offset of 0 is assumed
+    /// the returned array are the actual bounds of the rendered grid in user coordinates
+    fn draw_grid(canvas_size: [R64; 2], step: [R64; 2], scale: [R64; 2]) -> JsResult<(Path2d, [R64; 2])> {
+        let res = Path2d::new().add_loc(loc!())?;
+        let steps: [usize; 2] = [T::X_BOUND.end, T::Y_BOUND.end].mul(&step)
+            .zip(canvas_size, min).div(&canvas_size).mul(&scale)
+            .into_array();
+
+        for x in 0 .. steps[0] {
+            for y in (0 .. steps[1]).step_by(2) {
+                let [x, y] = [step[0] * x, step[1] * y];
+                res.rect(*x + Self::LINE_WIDTH, *y, *step[0] - Self::LINE_WIDTH, *step[1]);
+                res.rect(*x, *y + *step[1], Self::LINE_WIDTH, *step[1]);
+            }
+        }
+
+        Ok((res, scale))
     }
 
     pub fn redraw(&mut self, app_ctx: &AppContext) -> JsResult<Option<[Cow<'static, str>; 2]>> {
@@ -695,15 +737,7 @@ impl<T: Graphable> GraphEditor<T> {
         let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
         let size = canvas.size().map(R64::from);
         let snap_step = &[app_ctx.snap_step, T::Y_SNAP];
-        let step     = &R64::array_from(size).div(&self.scale);
         let ctx = canvas.get_2d_context(loc!())?;
-
-        let to_user = |loc| R64::array_from(loc + self.offset).div(step);
-        let to_aligned_user = |loc| R64::array_from(loc + self.offset).div(step).floor_to(snap_step);
-        let confine = |x| [T::X_BOUND, T::Y_BOUND].fit(x);
-
-        ctx.set_fill_style(&Self::BG_STYLE.into());
-        ctx.fill_rect(0.0, 0.0, *size[0], *size[1]);
 
         let step = &size.div(&self.scale);
         let offset_x = R64::from(-self.offset.x)
@@ -712,24 +746,32 @@ impl<T: Graphable> GraphEditor<T> {
         let offset_y = R64::from(-self.offset.y)
             % (self.offset.y > (T::Y_BOUND.start * step[1]).into())
             .choose(step[1] * 2.0, R64::INFINITY);
-        let max_x = size[0].min(T::X_BOUND.end * step[0] - self.offset.x);
-        let max_y = size[1].min(T::Y_BOUND.end * step[1] - self.offset.y);
 
-        // lighter horizontal bars
-        ctx.begin_path();
-        for y in succ(Some(offset_y), |y| (y + step[1] * 2u8).check_in(..max_y).ok()) {
-            for x in succ(Some(offset_x), |x| (x + step[0]).check_in(..max_x).ok()) {
-                ctx.rect(*x + Self::LINE_WIDTH, *y, *step[0] - Self::LINE_WIDTH, *step[1]);
-            }
-        }
-        // lighter vertical lines
-        for y in succ(Some(step[1] + offset_y), |y| (y + step[1] * 2u8).check_in(..max_y).ok()) {
-            for x in succ(Some(offset_x), |x| (x + step[0]).check_in(..max_x).ok()) {
-                ctx.rect(*x, *y, Self::LINE_WIDTH, *step[1]);
-            }
-        }
+        let to_user = |loc| R64::array_from(loc + self.offset).div(step);
+        let to_aligned_user = |loc| R64::array_from(loc + self.offset).div(step).floor_to(snap_step);
+        let confine = |x| [T::X_BOUND, T::Y_BOUND].fit(x);
+
+        ctx.set_fill_style(&Self::BG_STYLE.into());
+        ctx.fill_rect(0.0, 0.0, *size[0], *size[1]);
+
+        let (grid, original_scale) = self.grid.get_or_try_insert(||
+            Self::draw_grid(size, *step, self.scale).add_loc(loc!()))?;
+        let grid_scale = original_scale.div(&self.scale);
+        let repetitions = self.scale.sub(&[offset_x, offset_y].div(step))
+            .div(original_scale)
+            .map(|x| usize::from(x.ceil()));
+
         ctx.set_fill_style(&Self::MG_STYLE.into());
-        ctx.fill();
+        ctx.transform(*grid_scale[0], 0.0, 0.0, *grid_scale[1], *offset_x, *offset_y).add_loc(loc!())?;
+
+        for _ in 0 .. repetitions[1] {
+            for _ in 0 .. repetitions[0] {
+                ctx.fill_with_path_2d(grid);
+                ctx.translate(*size[0], 0.0).add_loc(loc!())?;
+            }
+            ctx.translate(-*size[0] * repetitions[0] as f64, *size[1]).add_loc(loc!())?;
+        }
+        ctx.reset_transform().add_loc(loc!())?;
 
         let points = Path2d::new().add_loc(loc!())?;
         let mapper = |loc: [R64; 2]| loc.mul(step).sub(&R64::array_from(self.offset));
@@ -774,7 +816,7 @@ impl<T: Graphable> GraphEditor<T> {
         }
 
         Ok(match self.focus {
-            Focus::None => None,
+            Focus::None{..} => None,
 
             Focus::Zoom{pivot, init_offset, ..} => if self.last_event.left {
                 let [x, y] = (pivot - init_offset).map(|x| x as f64);
@@ -795,19 +837,21 @@ impl<T: Graphable> GraphEditor<T> {
                 Some([T::EDITOR_NAME.into(), "Press and hold to zoom".into()])
             }
 
-            Focus::Plane{last_loc} => if self.last_event.meta {
+            Focus::Plane{origin} => if self.last_event.meta {
                 if self.last_event.left {
-                    let [cur, origin] = [self.last_event.point.into_array(), last_loc.into_array()];
+                    let [cur, origin] = [self.last_event.point.into_array(), origin.into_array()];
                     ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
                     ctx.stroke_rect(cur[0], cur[1], origin[0] - cur[0], origin[1] - cur[1]);
                     ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
                 } else {
-                    let [x, y] = last_loc.map(|x| x as f64);
+                    let [x, y] = self.last_event.point.map(|x| x as f64);
                     ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
+                    ctx.begin_path();
                     ctx.move_to(-*size[0], y);
                     ctx.line_to( *size[0], y);
                     ctx.move_to(x, -*size[1]);
                     ctx.line_to(x,  *size[1]);
+                    ctx.stroke();
                     ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
                 }
             }.pipe(|_| T::plane_hover_hint(|| confine(to_aligned_user(self.last_event.point)), *self.last_event)),

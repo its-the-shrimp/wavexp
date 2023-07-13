@@ -16,9 +16,9 @@ use yew::{
     Html,
     html, AttrValue};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats},
+    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, FromBeats},
     visual::{HintHandler, SoundVisualiser, Graphable},
-    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult},
+    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, Pipe},
     input::{Button, Slider, Switch},
     loc,
     r64,
@@ -195,6 +195,7 @@ pub struct App {
     ctx: AppContext,
     hint_handler: HintHandler,
     frame_emitter: Function,
+    selected_id: Option<usize>,
     epilog: Option<AppEvent>
 }
 
@@ -208,19 +209,28 @@ impl Component for App {
         let sound_visualiser = SoundVisualiser::new(&ctx.audio_ctx).unwrap_throw(loc!());
 
         let res = Self{epilog: None,
+            selected_id: None,
             hint_handler: HintHandler::default(),
             sequencer: Sequencer::new(&ctx.audio_ctx, Rc::clone(sound_visualiser.input())).unwrap_throw(loc!()),
-            sound_visualiser, ctx,
             frame_emitter: Closure::<dyn Fn(f64)>::new(move |x| cb.emit(R64::new_or(r64![0.0], x)))
-                .into_js_value().unchecked_into()};
+                .into_js_value().unchecked_into(),
+            sound_visualiser, ctx};
         window().request_animation_frame(&res.frame_emitter).unwrap_throw(loc!());
         res
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         _ = js_try!{type = !:
-            if let AppEvent::Frame(_) = msg {
-                window().request_animation_frame(&self.frame_emitter).add_loc(loc!())?;
+            match msg {
+                AppEvent::Frame(_) =>
+                    _ = window().request_animation_frame(&self.frame_emitter).add_loc(loc!())?,
+                AppEvent::Select(id) =>
+                    self.selected_id = id,
+                // TODO: something crashes here
+                AppEvent::Remove => self.selected_id.take().to_js_result(loc!())?
+                    .pipe(|i| *unsafe{self.sequencer.pattern().selection().get_unchecked(i)})
+                    .pipe(|i| self.sequencer.pattern_mut().remove_points(&[i])).add_loc(loc!())?,
+                _ => ()
             }
             self.epilog = msg.epilog();
             self.forward_event(ctx, msg).add_loc(loc!())?;
@@ -231,7 +241,7 @@ impl Component for App {
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         // TODO: add switching between selected blocks
-        let block = self.sequencer.pattern().iter_selection().next();
+        let block = self.selected_id.map(|i| unsafe{self.sequencer.pattern().get_unchecked_aware(i)});
 
         let setter = ctx.link().callback(|x| x);
         let render_tab_info = |info: &TabInfo, tab_id: usize, desc: AttrValue| -> Html {
@@ -247,7 +257,7 @@ impl Component for App {
         html! {<>
             <div id="main-panel">
                 <div id="ctrl-panel" class="dark-bg"
-                data-main-hint="Settings" data-aux-hint={AttrValue::from(block.map_or_else(|| "General".into(), SoundBlock::desc))}>
+                data-main-hint="Settings" data-aux-hint={block.as_ref().map_or(AttrValue::from("General"), |x| AttrValue::from(x.desc()))}>
                     <div id="hint" class="light-bg"
                     data-main-hint="Hint bar" data-aux-hint="for useful messages about the app's controls">
                         <span id="main-hint" ref={self.hint_handler.main_bar().clone()}/>
