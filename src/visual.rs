@@ -2,10 +2,10 @@ use std::{
     iter::{Iterator, empty, once},
     slice::{from_raw_parts, from_mut, from_ref},
     mem::{replace, take},
-    ops::{Range, Deref},
+    ops::{Range, Deref, Not},
     fmt::Debug,
     rc::Rc,
-    borrow::Cow, cmp::min};
+    borrow::Cow, cmp::{min, Ordering}};
 use web_sys::{
     HtmlCanvasElement,
     AnalyserNode,
@@ -21,7 +21,7 @@ use crate::{
     utils::{Check, SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, OptionExt,
         HtmlElementExt, 
-        Pipe, BoolExt, RangeExt, VecExt, R64, ArrayExt, ArrayFrom, IntoArray, SliceRef, ResultToJsResult, SliceMove, modify},
+        Pipe, BoolExt, RangeExt, VecExt, R64, ArrayExt, ArrayFrom, IntoArray, SliceRef, ResultToJsResult, SliceMove, modify, RoundTo},
     sound::FromBeats,
     global::{AppEvent, AppContext},
     input::{Buttons, CanvasEvent},
@@ -382,6 +382,11 @@ impl Focus {
         if let Selection{ids, ..} | None{ids} = self {ids} else {&[]}
     }
 
+    #[inline] pub fn selection_mut(&mut self) -> Option<&mut Box<[usize]>> {
+        use Focus::*;
+        if let Selection{ids, ..} | None{ids} = self {Some(ids)} else {None}
+    }
+
     #[inline] pub fn into_selection(self) -> Box<[usize]> {
         use Focus::*;
         if let Selection{ids, ..} | None{ids} = self {ids} else {[].into()}
@@ -412,11 +417,15 @@ impl<T: Graphable> GraphEditor<T> {
             offset: Point::ZERO,
             focus: Focus::default(),
             last_event: CanvasEvent::default(),
-            scale: [T::SCALE_X_BOUND.to_pair(), T::SCALE_Y_BOUND.to_pair()]
-                .map(|x| x.mul(&[0.75, 0.25]).sum::<R64>().ceil()),
+            scale: [T::SCALE_X_BOUND, T::SCALE_Y_BOUND]
+                .map(|x| x.to_pair().mul(&[0.75, 0.25]).sum()),
             redraw: false,
             grid: None,
             data}
+    }
+
+    #[inline] pub fn last_event(&self) -> Option<CanvasEvent> {
+        matches!(self.focus, Focus::None{..}).not().then_some(self.last_event)
     }
 
     #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
@@ -465,20 +474,25 @@ impl<T: Graphable> GraphEditor<T> {
     #[inline] pub fn remove_points(&mut self, to_remove: &[usize]) -> JsResult<()> {
         self.redraw = true;
         js_assert!(to_remove.is_sorted())?;
-        if let Focus::Selection{ids, ..} = &mut self.focus {
-            let mut ids = take(ids).to_vec();
+        if let Some(ids_box) = self.focus.selection_mut() {
+            let mut ids = take(ids_box).to_vec();
             let mut ids_iter = ids.iter_mut().rev();
             for &id in to_remove.iter().rev() {
                 self.data.try_remove(id).to_js_result(loc!())?;
-                let rem = ids_iter.len();
-                while let Some(x) = ids_iter.next().filter(|x| **x > id) {*x -= 1}
-                let skipped = rem - ids_iter.len();
-                if ids_iter.next().copied() == Some(id) {
-                    unsafe{ids_iter.len().pipe(|x| ids.remove_unchecked(x))};
-                }
-                ids_iter = ids.iter_mut().rev();
-                ids_iter.advance_by(skipped).to_js_result(loc!())?;
+                let rem = loop {
+                    let Some(x) = ids_iter.next() else {break 0};
+                    match id.cmp(x) {
+                        Ordering::Less =>
+                            *x -= 1,
+                        Ordering::Equal =>
+                            break ids_iter.len().pipe(|x| unsafe{ids.remove_unchecked(x); x}),
+                        Ordering::Greater =>
+                            break ids_iter.len()
+                    }
+                };
+                ids_iter = ids.get_mut(..rem).unwrap_or(&mut []).iter_mut().rev();
             }
+            *ids_box = Box::from(ids);
         } else {
             for &id in to_remove.iter().rev() {
                 self.data.try_remove(id).to_js_result(loc!())?;
@@ -495,6 +509,7 @@ impl<T: Graphable> GraphEditor<T> {
         let [w, h] = resizer(&canvas).add_loc(loc!())?;
         canvas.set_width(w);
         canvas.set_height(h);
+        self.scale = self.scale.map(|x| x.ceil_to(r64![2.0]));
         self.grid = None;
         if self.offset.x <= 0 {
             self.offset.x = (T::OFFSET_X_BOUND.start * R64::from(w) / self.scale[0]).into();
@@ -594,8 +609,13 @@ impl<T: Graphable> GraphEditor<T> {
                             meta);
                         if !sel.is_empty() {
                             self.focus = selection_focus(sel);
+                        } else if let Some(p) = self.point_by_pos(to_user(event.point)) {
+                            self.focus = point_focus(p.index());
                         }
                         res
+                    } else if let Some(p) = self.point_by_pos(to_user(event.point)) {
+                        self.focus = point_focus(p.index());
+                        None
                     } else {None}
                 } else if let Some(p) = self.point_by_pos(to_user(event.point)) {
                     self.set_focus(point_focus(p.index()));

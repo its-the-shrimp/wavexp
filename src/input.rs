@@ -1,5 +1,3 @@
-#![allow(non_camel_case_types)] // because derive(yew::Properties) generates them
-
 use std::{
     f64::consts::{PI, TAU},
     ops::{Div, Mul, Add, Deref, DerefMut}};
@@ -8,7 +6,9 @@ use web_sys::{
     Element,
     HtmlCanvasElement,
     PointerEvent,
-    HtmlElement, MouseEvent};
+    HtmlElement,
+    MouseEvent,
+    KeyboardEvent};
 use yew::{
     html, 
     Component,
@@ -18,7 +18,8 @@ use yew::{
     html::Children,
     Classes,
     AttrValue,
-    NodeRef, Callback};
+    NodeRef,
+    Callback};
 use crate::{
     utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, BoolExt, R64, Point, HtmlElementExt},
     loc};
@@ -43,6 +44,15 @@ impl Deref for CanvasEvent {
 
 impl DerefMut for CanvasEvent {
     #[inline] fn deref_mut(&mut self) -> &mut Self::Target {&mut self.buttons}
+}
+
+impl Add<&KeyboardEvent> for CanvasEvent {
+    type Output = Self;
+    #[inline] fn add(mut self, rhs: &KeyboardEvent) -> Self::Output {
+        self.shift = rhs.shift_key();
+        self.meta = rhs.meta_key();
+        self
+    }
 }
 
 impl TryFrom<&MouseEvent> for CanvasEvent {

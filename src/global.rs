@@ -9,12 +9,14 @@ use web_sys::{
     PointerEvent,
     MouseEvent,
     AudioContext,
-    UiEvent};
+    UiEvent,
+    KeyboardEvent};
 use yew::{
     Component,
     Context,
     Html,
-    html, AttrValue};
+    html,
+    AttrValue};
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, FromBeats},
     visual::{HintHandler, SoundVisualiser, Graphable},
@@ -92,8 +94,8 @@ pub enum AppEvent {
     FocusTab(PointerEvent),
     /// emitted when the user moves the cursor across the side editor plane
     HoverTab(MouseEvent),
-    /// emitted when a side editor plane is clicked twice in a row
-    DoubleClickTab(MouseEvent),
+    /// emitted when the user presses or releases any key on the keyboard
+    KeyToggle(KeyboardEvent),
     /// emitted when the user drags the cursor out of the side editor plane
     LeaveTab,
     /// emitted to set the hint for the user
@@ -141,7 +143,7 @@ impl AppEvent {
             | Self::LeavePlane 
             | Self::HoverPlane(..) 
             | Self::FocusTab(..) 
-            | Self::DoubleClickTab(..)
+            | Self::KeyToggle(..)
             | Self::HoverTab(..) 
             | Self::LeaveTab => None
         }
@@ -300,10 +302,10 @@ impl Component for App {
                     }
                 </div>
                 <canvas ref={self.sequencer.canvas().clone()} id="plane"
-                onpointerdown={ctx.link().callback(    AppEvent::FocusPlane)}
-                onpointerup={ctx.link().callback(|e|   AppEvent::HoverPlane(MouseEvent::from(e)))}
-                onpointermove={ctx.link().callback(|e| AppEvent::HoverPlane(MouseEvent::from(e)))}
-                onpointerout={ctx.link().callback(|_|  AppEvent::LeavePlane)}/>
+                onpointerdown={setter.reform(AppEvent::FocusPlane)}
+                onpointerup={setter.reform(|e| AppEvent::HoverPlane(MouseEvent::from(e)))}
+                onpointermove={setter.reform(|e| AppEvent::HoverPlane(MouseEvent::from(e)))}
+                onpointerout={setter.reform(|_| AppEvent::LeavePlane)}/>
             </div>
             <div id="io-panel" data-main-hint="Editor plane settings">
                 <div id="plane-settings" data-main-hint="Editor plane settings">
@@ -366,6 +368,12 @@ impl Component for App {
         let cb = Closure::<dyn Fn(UiEvent)>::new(move |e| cb.emit(e))
             .into_js_value().unchecked_into();
         window.set_onpointerover(Some(&cb));
+
+        let cb = ctx.link().callback(AppEvent::KeyToggle);
+        let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
+            .into_js_value().unchecked_into();
+        window.set_onkeydown(Some(&cb));
+        window.set_onkeyup(Some(&cb));
 
         ctx.link().send_message(AppEvent::Resize);
     }

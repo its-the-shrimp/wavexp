@@ -7,7 +7,8 @@ use std::{
     error::Error,
     collections::TryReserveError,
     cmp::Ordering,
-    any::type_name, array::from_fn};
+    any::type_name,
+    array::from_fn};
 use js_sys::{
     Object as JsObject,
     Error as JsError};

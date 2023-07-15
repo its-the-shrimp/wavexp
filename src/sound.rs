@@ -300,6 +300,24 @@ impl Graphable for NoteBlock {
     }
 }
 
+impl NoteBlockEvent {
+    #[inline] pub fn apply(self, pattern: &mut GraphEditor<NoteBlock>) -> JsResult<AppEvent> {
+        Ok(match self {
+            NoteBlockEvent::Add(offset, value) => {
+                pattern.add_point(NoteBlock{offset, value, len: r64![1.0]});
+                AppEvent::RedrawEditorPlane
+            }
+
+            NoteBlockEvent::Remove(ids) => {
+                pattern.remove_points(&ids).add_loc(loc!())?;
+                AppEvent::RedrawEditorPlane
+            }
+
+            NoteBlockEvent::Redraw => AppEvent::RedrawEditorPlane,
+        })
+    }
+}
+
 #[derive(Default, Debug, Clone)]
 pub enum Sound {
     #[default] None,
@@ -483,8 +501,7 @@ impl Sound {
                     onpointerdown={setter.reform(AppEvent::FocusTab)}
                     onpointerup={setter.reform(|e| AppEvent::HoverTab(MouseEvent::from(e)))}
                     onpointermove={setter.reform(|e| AppEvent::HoverTab(MouseEvent::from(e)))}
-                    onpointerout={setter.reform(|_| AppEvent::LeaveTab)}
-                    ondblclick={setter.reform(AppEvent::DoubleClickTab)}/>
+                    onpointerout={setter.reform(|_| AppEvent::LeaveTab)}/>
                 },
                 tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
             }
@@ -519,26 +536,18 @@ impl Sound {
                 AppEvent::FocusTab(e) => {
                     e.target_dyn_into::<Element>().to_js_result(loc!())?
                         .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    pattern.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx)
-                        .add_loc(loc!())?;
+                    pattern.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())?
+                        .map(|x| x.apply(pattern).add_loc(loc!())).transpose()?;
                     None
                 }
 
-                AppEvent::HoverTab(e) => match pattern.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())? {
-                    Some(NoteBlockEvent::Add(offset, value)) => {
-                        pattern.add_point(NoteBlock{offset, value, len: r64![1.0]});
-                        Some(AppEvent::RedrawEditorPlane)
-                    }
+                AppEvent::HoverTab(e) => pattern
+                    .handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())?
+                    .map(|x| x.apply(pattern).add_loc(loc!())).transpose()?,
 
-                    Some(NoteBlockEvent::Remove(ids)) => {
-                        pattern.remove_points(&ids).add_loc(loc!())?;
-                        Some(AppEvent::RedrawEditorPlane)
-                    }
-
-                    Some(NoteBlockEvent::Redraw) => Some(AppEvent::RedrawEditorPlane),
-
-                    None => None
-                }
+                AppEvent::KeyToggle(e) => pattern
+                    .handle_hover(pattern.last_event().map(|x| x + e), ctx).add_loc(loc!())?
+                    .map(|x| x.apply(pattern).add_loc(loc!())).transpose()?,
 
                 AppEvent::LeaveTab => pattern
                     .handle_hover(None, ctx).add_loc(loc!())?
@@ -827,12 +836,14 @@ impl Sequencer {
                     .add_loc(loc!())?
             }
 
-            AppEvent::HoverPlane(e) =>
-                self.pattern.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx)
-                    .add_loc(loc!())?,
+            AppEvent::HoverPlane(e) => self.pattern
+                .handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())?,
 
-            AppEvent::LeavePlane => self.pattern.handle_hover(None, ctx)
-                .add_loc(loc!())?,
+            AppEvent::KeyToggle(e) => self.pattern
+                .handle_hover(self.pattern.last_event().map(|x| x + e), ctx).add_loc(loc!())?,
+
+            AppEvent::LeavePlane => self.pattern
+                .handle_hover(None, ctx).add_loc(loc!())?,
 
             AppEvent::MasterGain(value) => self.gain.gain()
                 .set_value(**value).pipe(|_| None),
