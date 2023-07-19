@@ -1,5 +1,5 @@
 use std::{
-    ops::{Add, Sub, Range, AddAssign, SubAssign},
+    ops::{Add, Sub, Range, AddAssign, SubAssign, Deref},
     fmt::{self, Display, Formatter, Debug},
     cmp::Ordering,
     rc::Rc,
@@ -11,14 +11,14 @@ use web_sys::{
     AudioBufferSourceNode,
     AudioBuffer,
     GainNode,
-    Path2d, MouseEvent, Element, DynamicsCompressorNode, AnalyserNode, HtmlElement};
+    Path2d, MouseEvent, Element, DynamicsCompressorNode, AnalyserNode, HtmlCanvasElement};
 use yew::{html, Html, TargetCast, Callback, NodeRef};
 use crate::{
     utils::{
         JsResult,
         JsResultUtils,
         R64, R32,
-        LooseEq, OptionExt, Pipe, document, HtmlDocumentExt, VecExt, js_error, Take, SliceRef, Check},
+        LooseEq, OptionExt, Pipe, document, VecExt, js_error, Take, SliceRef, Check},
     input::{Slider, Button, Buttons},
     visual::{GraphEditor, Graphable},
     global::{AppContext, AppEvent},
@@ -212,30 +212,41 @@ impl Graphable for NoteBlock {
         [self.offset, self.value.recip().index().into()]
     }
 
-    #[inline] fn move_point(&mut self, delta: [R64; 2], meta: bool) {
-        if meta {
-            self.len += delta[0];
-        } else {
-            self.offset = r64![0.0].max(self.offset + delta[0]);
+    #[inline] fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], meta: bool) {
+        match point {
+            Ok(NoteBlock{offset, value, len}) => {
+                if meta {
+                    *len += delta[0];
+                } else {
+                    *offset = r64![0.0].max(*offset + delta[0]);
+                }
+                *value -= delta[1].into();
+            }
+            Err(point) => {
+                if !meta {
+                    point[0] += delta[0];
+                }
+                point[1] -= delta[1];
+            }
         }
-        self.value -= delta[1].into();
     }
 
     #[inline] fn on_move(ids: &[usize], n_points: usize, _: [R64; 2], _: bool) -> Option<Self::Event> {
         ids.contains(&(n_points - 1)).then_some(NoteBlockEvent::Redraw)
     }
 
-    #[inline] fn on_click<'a, F, I1, I2>(loc: F, old_sel: I1, new_sel: I2, meta: bool) -> Option<Self::Event>
-    where Self: 'a,
-        F: Fn() -> [R64; 2],
-        I1: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
-        I2: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator
-    {
-        if new_sel.len() == 0 && old_sel.len() == 0 && meta {
-            let [x, y] = loc();
+    #[inline] fn on_click<'a>(
+        pressed_at:    impl Deref<Target=[R64; 2]>,
+        released_at:   impl Deref<Target=[R64; 2]>,
+        old_selection: impl Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
+        new_selection: impl Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
+        meta: bool)
+    -> Option<Self::Event> where Self: 'a {
+        if meta && new_selection.len() == 0 && old_selection.len() == 0 && *pressed_at == *released_at {
+            let [x, y] = *released_at;
             return Some(NoteBlockEvent::Add(x, Note::from_index(y.into()).recip()))
         }
-        old_sel.filter_map(|x| (x.len == 0).then_some(x.index())).collect::<Box<_>>()
+        old_selection.filter_map(|x| (x.len == 0).then_some(x.index())).collect::<Box<_>>()
             .check(|x| x.len() > 0).ok().map(NoteBlockEvent::Remove)
     }
 
@@ -545,7 +556,7 @@ impl Sound {
                     .handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())?
                     .map(|x| x.apply(pattern).add_loc(loc!())).transpose()?,
 
-                AppEvent::KeyToggle(e) => pattern
+                AppEvent::KeyPress(e) | AppEvent::KeyRelease(e) => pattern
                     .handle_hover(pattern.last_event().map(|x| x + e), ctx).add_loc(loc!())?
                     .map(|x| x.apply(pattern).add_loc(loc!())).transpose()?,
 
@@ -554,8 +565,7 @@ impl Sound {
                     .pipe(|_| None),
 
                 AppEvent::AfterSetTab(1) => pattern
-                    .init(|c| Ok([c.client_width() as u32, c.client_height() as u32]))
-                    .add_loc(loc!())?.pipe(|_| None),
+                    .init().add_loc(loc!())?.pipe(|_| None),
 
                 AppEvent::Frame(_) if ctx.selected_tab == 1 => pattern
                     .redraw(ctx).add_loc(loc!())?
@@ -631,9 +641,17 @@ impl Graphable for SoundBlock {
 
     #[inline] fn loc(&self) -> [R64; 2] {[self.offset, self.layer.into()]}
 
-    #[inline] fn move_point(&mut self, delta: [R64; 2], _: bool) {
-        self.offset = r64![0.0].max(self.offset + delta[0]);
-        self.layer += i32::from(delta[1]);
+    #[inline] fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], _: bool) {
+         match point {
+            Ok(SoundBlock{layer, offset, ..}) => {
+                *offset = r64![0.0].max(*offset + delta[0]);
+                *layer += i32::from(delta[1]);
+            }
+            Err(point) => {
+                point[0] = r64![0.0].max(point[0] + delta[0]);
+                point[1] += delta[1];
+            }
+        }
     }
 
     #[inline] fn desc(&self) -> Cow<'static, str> {
@@ -658,18 +676,19 @@ impl Graphable for SoundBlock {
         format!("{:.3}, layer {}", loc[0], loc[1].floor())
     }
 
-    #[inline] fn on_click<'a, F, I1, I2>(loc: F, old_sel: I1, new_sel: I2, meta: bool) -> Option<Self::Event>
-    where Self: 'a,
-        F: Fn() -> [R64; 2],
-        I1: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
-        I2: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator
-    {
-        let len = new_sel.len();
-        if len == 0 && old_sel.len() == 0 && meta {
-            let [x, y] = loc();
+    #[inline] fn on_click<'a>(
+        pressed_at:    impl Deref<Target=[R64; 2]>,
+        released_at:   impl Deref<Target=[R64; 2]>,
+        old_selection: impl Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
+        new_selection: impl Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
+        meta: bool)
+    -> Option<Self::Event> where Self: 'a {
+        let new_len = new_selection.len();
+        if meta && new_len == 0 && old_selection.len() == 0 && *pressed_at == *released_at {
+            let [x, y] = *released_at;
             Some(AppEvent::Add(y.into(), x))
         } else {
-            Some(AppEvent::Select((len > 0).then_some(0)))
+            Some(AppEvent::Select((new_len > 0).then_some(0)))
         }
     }
 
@@ -689,9 +708,9 @@ impl Graphable for SoundBlock {
     #[inline] fn point_hover_hint<'a>(point: SliceRef<'a, Self>, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
     where Self: 'a {
         Some(if buttons.left {
-            [format!("Block @ {}", Self::fmt_loc(point.loc())).into(), "Hold & drag to move".into()]
-        } else {
             [format!("Block @ {}: moving", Self::fmt_loc(point.loc())).into(), "Release to stop".into()]
+        } else {
+            [format!("Block @ {}", Self::fmt_loc(point.loc())).into(), "Hold & drag to move".into()]
         })
     }
 
@@ -699,10 +718,19 @@ impl Graphable for SoundBlock {
     where Self: 'a, I: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator {
         if let Some(p) = points.next().filter(|_| points.len() == 0) {return Self::point_hover_hint(p, buttons)}
         Some(if buttons.left {
-            ["Multiple blocks".into(), "Click to de-select, hold & drag to move".into()]
-        } else {
             ["Multiple blocks: moving".into(), "Release to stop".into()]
+        } else {
+            ["Multiple blocks".into(), "Click to de-select, hold & drag to move".into()]
         })
+    }
+
+    #[inline] fn canvas_coords(canvas: &HtmlCanvasElement) -> JsResult<[u32; 2]> {
+        let doc = document();
+        let w = doc.body().to_js_result(loc!())?.client_width()
+            - canvas.previous_element_sibling().to_js_result(loc!())?
+            .client_width();
+        let h = canvas.client_height();
+        Ok([w as u32, h as u32])
     }
 }
 
@@ -817,17 +845,11 @@ impl Sequencer {
                 None
             }
 
-            AppEvent::Resize => self.pattern.init(|canvas| {
-                let doc = document();
-                let w = doc.body().to_js_result(loc!())?.client_width()
-                    - doc.element_dyn_into::<HtmlElement>("ctrl-panel").add_loc(loc!())?
-                    .client_width();
-                let h = canvas.client_height();
-                Ok([w as u32, h as u32])
-            }).add_loc(loc!())?.pipe(|_| None),
+            AppEvent::Resize => self.pattern
+                .init().add_loc(loc!())?.pipe(|_| None),
 
-            AppEvent::RedrawEditorPlane => self.pattern.force_redraw()
-                .pipe(|_| None),
+            AppEvent::RedrawEditorPlane => self.pattern
+                .force_redraw().pipe(|_| None),
 
             AppEvent::FocusPlane(e) => {
                 e.target_dyn_into::<Element>().to_js_result(loc!())?
@@ -839,7 +861,7 @@ impl Sequencer {
             AppEvent::HoverPlane(e) => self.pattern
                 .handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())?,
 
-            AppEvent::KeyToggle(e) => self.pattern
+            AppEvent::KeyPress(e) | AppEvent::KeyRelease(e) => self.pattern
                 .handle_hover(self.pattern.last_event().map(|x| x + e), ctx).add_loc(loc!())?,
 
             AppEvent::LeavePlane => self.pattern

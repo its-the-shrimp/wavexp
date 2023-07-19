@@ -94,8 +94,10 @@ pub enum AppEvent {
     FocusTab(PointerEvent),
     /// emitted when the user moves the cursor across the side editor plane
     HoverTab(MouseEvent),
-    /// emitted when the user presses or releases any key on the keyboard
-    KeyToggle(KeyboardEvent),
+    /// emitted when the user presses any key on the keyboard
+    KeyPress(KeyboardEvent),
+    /// emitted when the user releases any key on the keyboard
+    KeyRelease(KeyboardEvent),
     /// emitted when the user drags the cursor out of the side editor plane
     LeaveTab,
     /// emitted to set the hint for the user
@@ -143,7 +145,8 @@ impl AppEvent {
             | Self::LeavePlane 
             | Self::HoverPlane(..) 
             | Self::FocusTab(..) 
-            | Self::KeyToggle(..)
+            | Self::KeyPress(..)
+            | Self::KeyRelease(..)
             | Self::HoverTab(..) 
             | Self::LeaveTab => None
         }
@@ -369,10 +372,14 @@ impl Component for App {
             .into_js_value().unchecked_into();
         window.set_onpointerover(Some(&cb));
 
-        let cb = ctx.link().callback(AppEvent::KeyToggle);
+        let cb = ctx.link().callback(AppEvent::KeyPress);
         let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
             .into_js_value().unchecked_into();
         window.set_onkeydown(Some(&cb));
+
+        let cb = ctx.link().callback(AppEvent::KeyRelease);
+        let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
+            .into_js_value().unchecked_into();
         window.set_onkeyup(Some(&cb));
 
         ctx.link().send_message(AppEvent::Resize);

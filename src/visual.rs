@@ -5,7 +5,9 @@ use std::{
     ops::{Range, Deref, Not},
     fmt::Debug,
     rc::Rc,
-    borrow::Cow, cmp::{min, Ordering}};
+    borrow::Cow,
+    cmp::{min, Ordering},
+    cell::LazyCell};
 use web_sys::{
     HtmlCanvasElement,
     AnalyserNode,
@@ -18,11 +20,11 @@ use web_sys::{
 use wasm_bindgen::{Clamped, JsValue, JsCast};
 use yew::{TargetCast, NodeRef};
 use crate::{
-    utils::{Check, SliceExt, Point,
+    utils::{SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, OptionExt,
         HtmlElementExt, 
-        Pipe, BoolExt, RangeExt, VecExt, R64, ArrayExt, ArrayFrom, IntoArray, SliceRef, ResultToJsResult, SliceMove, modify, RoundTo},
-    sound::FromBeats,
+        Pipe, BoolExt, RangeExt, VecExt, R64, ArrayExt, ArrayFrom, IntoArray, SliceRef, ResultToJsResult, SliceMove, RoundTo, FlippedArray, default},
+    sound::{FromBeats, Secs},
     global::{AppEvent, AppContext},
     input::{Buttons, CanvasEvent},
     loc,
@@ -297,7 +299,7 @@ pub trait Graphable: Ord {
     fn loc(&self) -> [R64; 2];
     /// change the location of the point in user coordinates when moved in the UI
     /// `meta` signifies whether the meta key was held while moving the point
-    fn move_point(&mut self, delta: [R64; 2], meta: bool);
+    fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], meta: bool);
     /// returns `true` if the given user coordinates are inside the hitbox of the point
     fn in_hitbox(&self, point: [R64; 2]) -> bool;
 
@@ -309,12 +311,15 @@ pub trait Graphable: Ord {
     /// event to emit when the left mouse button is clicked, i.e. pressed & released
     /// `loc` returns a location of the click in user coordinates.
     /// `new_sel` are the IDs of the points that became focused after the click
-    #[allow(unused_variables)] #[inline]
-    fn on_click<'a, F, I1, I2>(loc: F, old_sel: I1, new_sel: I2, meta: bool) -> Option<Self::Event>
-    where Self: 'a,
-        F: Fn() -> [R64; 2],
-        I1: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
-        I2: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator {None}
+    #[allow(unused_variables)] #[inline] fn on_click<'a>(
+        pressed_at:    impl Deref<Target=[R64; 2]>,
+        released_at:   impl Deref<Target=[R64; 2]>,
+        old_selection: impl Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
+        new_selection: impl Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
+        meta: bool)
+    -> Option<Self::Event> where Self: 'a {
+        None
+    }
 
     // return type of `desc` and `fmt_loc` should be `impl AsRef<str>`
     // but feature `return_position_impl_trait_in_trait` is not usable yet
@@ -338,6 +343,11 @@ pub trait Graphable: Ord {
     /// `mapper` maps user coordinates to canvas coordinates, all vertices in the
     /// returned `Path2d` must be the result of the `mapper` function
     fn draw(&self, next: Option<&Self>, mapper: impl Fn([R64; 2]) -> [R64; 2]) -> JsResult<Path2d>;
+    /// the canvas's coordinate space
+    /// the function will be called every time the user 
+    #[inline] fn canvas_coords(canvas: &HtmlCanvasElement) -> JsResult<[u32; 2]> {
+        Ok([canvas.client_width() as u32, canvas.client_height() as u32])
+    }
 }
 
 /// a special reference wrapper: access to everything is immutable,
@@ -355,42 +365,19 @@ impl<'a, T: Graphable> GraphPointView<'a, T> {
     }
 }
 
-// coordinate space hints:
-// +user: in user coordinates
-// +canvas: in canvas coordinates without offset
-// +aligned: aligned to snap step
-// +confined: limited to bounds specified by `Graphable::(X/Y)_BOUND`
+// types as coordinate space hints:
+/// in canvas coordinates with plane offset
+type OffsetCanvasPoint = Point;
+/// in user coordinates, aligned to snap step and limited to bounds specified by `Graphable::(X/Y)_BOUND`
+type ConfinedAlignedUserPoint = [R64; 2];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 enum Focus {
-    None{ids: Box<[usize]>},
-    Zoom{init_offset: Point, pivot: Point, init_scale: [R64; 2]},
-    Plane{origin: Point},
-    Point{id: usize, last_loc: [R64; 2] /* +user +aligned +confined */},
-    Selection{ids: Box<[usize]> /* sorted */, last_loc: [R64; 2] /* +user +aligned +confined */, moved: bool}
-}
-
-impl Default for Focus {
-    #[inline] fn default() -> Self {
-        Self::None{ids: [].into()}
-    }
-}
-
-impl Focus {
-    #[inline] pub fn selection(&self) -> &[usize] {
-        use Focus::*;
-        if let Selection{ids, ..} | None{ids} = self {ids} else {&[]}
-    }
-
-    #[inline] pub fn selection_mut(&mut self) -> Option<&mut Box<[usize]>> {
-        use Focus::*;
-        if let Selection{ids, ..} | None{ids} = self {Some(ids)} else {None}
-    }
-
-    #[inline] pub fn into_selection(self) -> Box<[usize]> {
-        use Focus::*;
-        if let Selection{ids, ..} | None{ids} = self {ids} else {[].into()}
-    }
+    #[default] None,
+    Zoom{init_offset: Point, pivot: OffsetCanvasPoint, init_scale: [R64; 2]},
+    Plane{origin: ConfinedAlignedUserPoint, press_time: Secs},
+    Point{id: usize, last_loc: ConfinedAlignedUserPoint, origin: ConfinedAlignedUserPoint},
+    Selection{origin: ConfinedAlignedUserPoint, end: ConfinedAlignedUserPoint}
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -399,6 +386,9 @@ pub struct GraphEditor<T: Graphable> {
     offset: Point,
     scale: [R64; 2],
     focus: Focus,
+    selection: Vec<usize>,
+    selection_origin: ConfinedAlignedUserPoint,
+    selection_size: [R64; 2],
     last_event: CanvasEvent,
     redraw: bool,
     data: Vec<T>,
@@ -413,10 +403,13 @@ impl<T: Graphable> GraphEditor<T> {
     const LINE_WIDTH: f64 = 3.0;
 
     #[inline] pub fn new(data: Vec<T>) -> Self {
-        Self{canvas: NodeRef::default(),
+        Self{canvas: default(),
             offset: Point::ZERO,
-            focus: Focus::default(),
-            last_event: CanvasEvent::default(),
+            focus: default(),
+            selection: vec![],
+            selection_origin: default(),
+            selection_size: default(),
+            last_event: default(),
             scale: [T::SCALE_X_BOUND, T::SCALE_Y_BOUND]
                 .map(|x| x.to_pair().mul(&[0.75, 0.25]).sum()),
             redraw: false,
@@ -459,44 +452,34 @@ impl<T: Graphable> GraphEditor<T> {
         self.data.iter_mut().map(GraphPointView)
     }
 
-    #[inline] pub fn selection(&self) -> &[usize] {self.focus.selection()}
+    #[inline] pub fn selection(&self) -> &[usize] {&self.selection}
 
     /// returns the index at which the new point will be available
     #[inline] pub fn add_point(&mut self, point: T) -> usize {
         self.redraw = true;
         let to = self.data.push_sorted(point);
-        if let Focus::Selection{ids, ..} = &mut self.focus {
-            SliceMove{from: self.data.len(), to}.apply(ids)
-        }
+        SliceMove{from: self.data.len(), to}.apply(&mut self.selection);
         to
     }
 
     #[inline] pub fn remove_points(&mut self, to_remove: &[usize]) -> JsResult<()> {
         self.redraw = true;
         js_assert!(to_remove.is_sorted())?;
-        if let Some(ids_box) = self.focus.selection_mut() {
-            let mut ids = take(ids_box).to_vec();
-            let mut ids_iter = ids.iter_mut().rev();
-            for &id in to_remove.iter().rev() {
-                self.data.try_remove(id).to_js_result(loc!())?;
-                let rem = loop {
-                    let Some(x) = ids_iter.next() else {break 0};
-                    match id.cmp(x) {
-                        Ordering::Less =>
-                            *x -= 1,
-                        Ordering::Equal =>
-                            break ids_iter.len().pipe(|x| unsafe{ids.remove_unchecked(x); x}),
-                        Ordering::Greater =>
-                            break ids_iter.len()
-                    }
-                };
-                ids_iter = ids.get_mut(..rem).unwrap_or(&mut []).iter_mut().rev();
-            }
-            *ids_box = Box::from(ids);
-        } else {
-            for &id in to_remove.iter().rev() {
-                self.data.try_remove(id).to_js_result(loc!())?;
-            }
+        let mut ids_iter = self.selection.iter_mut().rev();
+        for &id in to_remove.iter().rev() {
+            self.data.try_remove(id).to_js_result(loc!())?;
+            let rem = loop {
+                let Some(x) = ids_iter.next() else {break 0};
+                match id.cmp(x) {
+                    Ordering::Less =>
+                        *x -= 1,
+                    Ordering::Equal =>
+                        break ids_iter.len().pipe(|x| unsafe{self.selection.remove_unchecked(x); x}),
+                    Ordering::Greater =>
+                        break ids_iter.len()
+                }
+            };
+            ids_iter = self.selection.get_mut(..rem).unwrap_or(&mut []).iter_mut().rev();
         }
         Ok(())
     }
@@ -504,9 +487,9 @@ impl<T: Graphable> GraphEditor<T> {
     #[inline] pub fn force_redraw(&mut self) {self.redraw = true}
 
     /// must be called when a canvas has just been bound or its dimensions have been changed
-    pub fn init(&mut self, resizer: impl FnOnce(&HtmlCanvasElement) -> JsResult<[u32; 2]>) -> JsResult<()> {
+    pub fn init(&mut self) -> JsResult<()> {
         let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
-        let [w, h] = resizer(&canvas).add_loc(loc!())?;
+        let [w, h] = T::canvas_coords(&canvas).add_loc(loc!())?;
         canvas.set_width(w);
         canvas.set_height(h);
         self.scale = self.scale.map(|x| x.ceil_to(r64![2.0]));
@@ -528,6 +511,10 @@ impl<T: Graphable> GraphEditor<T> {
             .map(|(id, x)| unsafe{SliceRef::raw(x, id)})
     }
 
+    #[inline] fn point_in_selection(&self, loc: ConfinedAlignedUserPoint) -> bool {
+        loc.sub(&self.selection_origin).zip_fold(true, self.selection_size, |r, x, y| r && 0.0 <= *x && x <= y)
+    }
+
     #[inline] fn set_focus(&mut self, focus: Focus) {
         self.focus = focus;
         self.redraw = true;
@@ -535,17 +522,16 @@ impl<T: Graphable> GraphEditor<T> {
 
     pub fn handle_hover(&mut self, event: Option<CanvasEvent>, ctx: &AppContext) -> JsResult<Option<T::Event>> {
         let Some(event) = event else {
-            modify(&mut self.focus, |x| Focus::None{ids: x.into_selection()});
+            self.focus = Focus::None;
             self.redraw = true;
             return Ok(None)
         };
 
         let size   = self.canvas.cast::<HtmlCanvasElement>()
             .to_js_result(loc!())?.size();
-        let snap_step = &[ctx.snap_step, T::Y_SNAP];
+        let snap_step = [ctx.snap_step, T::Y_SNAP];
         let step     = &R64::array_from(size).div(&self.scale);
 
-        // let canvas_plane = event.point;
         let offset = |loc| loc + self.offset;
         let to_user = |loc| R64::array_from(loc + self.offset).div(step);
         let user_align = |loc: [R64; 2]| loc.floor_to(snap_step);
@@ -555,18 +541,14 @@ impl<T: Graphable> GraphEditor<T> {
         let zoom_focus = ||
             Focus::Zoom{init_offset: self.offset, pivot: offset(event.point), init_scale: self.scale};
         let plane_focus = ||
-            Focus::Plane{origin: offset(event.point)};
+            Focus::Plane{origin: default(), press_time: default()};
         let point_focus = |id|
-            Focus::Point{id, last_loc: confine(to_aligned_user(event.point))};
-        let selection_focus = |ids|
-            Focus::Selection{ids, last_loc: confine(to_aligned_user(event.point)), moved: false};
+            Focus::Point{id, last_loc: default(), origin: default()};
+        let selection_focus = ||
+            Focus::Selection{origin: default(), end: default()};
 
         let res = Ok(match &mut self.focus {
-            Focus::None{ids} => {
-                let ids = take(ids);
-                self.set_focus(if ids.is_empty() {plane_focus()} else {selection_focus(ids)});
-                None
-            }
+            Focus::None => self.set_focus(plane_focus()).pipe(|_| None),
 
             Focus::Zoom{init_offset, init_scale, pivot} => if event.left {
                 if !self.last_event.left {
@@ -592,45 +574,64 @@ impl<T: Graphable> GraphEditor<T> {
                 self.focus = plane_focus();
             }.pipe(|_| None),
 
-            Focus::Plane{origin} => match *event {
+            Focus::Plane{origin, press_time} => match *event {
                 Buttons{shift: true, ..} => self.set_focus(zoom_focus()).pipe(|_| None),
 
                 Buttons{left: false, meta, ..} => if self.last_event.left {
+                    let cur_loc = to_user(event.point);
                     if self.last_event.meta {
-                        let src = to_user(*origin);
-                        let dst = to_user(event.point);
-                        let area = [(src[0] .. dst[0]).ordered(), (src[1] .. dst[1]).ordered()];
-                        let sel: Box<_> = self.data.iter().enumerate()
+                        let end = confine(user_align(cur_loc));
+                        let old_selection = self.selection.clone();
+                        let area = [*origin, end].flipped().map(|x| (x[0] .. x[1]).ordered());
+                        self.selection_origin = area.clone().map(|x| x.start);
+                        self.selection_size = area.clone().map(|x| x.end - x.start);
+                        self.selection = self.data.iter().enumerate()
                             .filter_map(|(id, x)| x.loc().array_check_in(&area).map(|_| id))
                             .collect();
-                        let res = T::on_click(|| confine(to_aligned_user(event.point)),
-                            empty(),
-                            sel.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)}),
+                        let res = T::on_click(origin, &end,
+                            old_selection.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)}),
+                            self.selection.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)}),
                             meta);
-                        if !sel.is_empty() {
-                            self.focus = selection_focus(sel);
-                        } else if let Some(p) = self.point_by_pos(to_user(event.point)) {
-                            self.focus = point_focus(p.index());
-                        }
+                        self.focus = self.point_by_pos(to_user(event.point))
+                            .map_or_else(plane_focus, |p| point_focus(p.index()));
                         res
-                    } else if let Some(p) = self.point_by_pos(to_user(event.point)) {
-                        self.focus = point_focus(p.index());
-                        None
-                    } else {None}
-                } else if let Some(p) = self.point_by_pos(to_user(event.point)) {
-                    self.set_focus(point_focus(p.index()));
-                    None
+                    } else {
+                        let cur_loc = confine(user_align(cur_loc));
+                        let ids_iter = self.selection.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)});
+                        if *ctx.now - **press_time > 0.33 {
+                            T::on_click(&cur_loc, &cur_loc,
+                                ids_iter.clone(), ids_iter,
+                                meta)
+                        } else {
+                            let res = T::on_click(&cur_loc, &cur_loc,
+                                ids_iter, empty(),
+                                meta);
+                            self.selection.clear();
+                            self.selection_size = default();
+                            res
+                        }
+                    }
                 } else {
-                    self.redraw = self.last_event.meta | meta;
+                    let loc = to_user(event.point);
+                    if self.point_in_selection(loc) {
+                        self.set_focus(selection_focus());
+                    } else if let Some(p) = self.point_by_pos(loc) {
+                        self.set_focus(point_focus(p.index()));
+                    } else {
+                        self.redraw |= self.last_event.meta | meta;
+                    }
                     None
                 }
 
-                Buttons{left: true, meta: false, ..} => {
+                Buttons{left: true, meta, ..} => if meta {
                     if !self.last_event.left {
-                        *origin = event.point;
-                    } else {
-                        self.redraw = true;
-                    }
+                        *origin = confine(to_aligned_user(event.point));
+                    } else {self.redraw = true}
+                } else {
+                    if !self.last_event.left {
+                        *press_time = ctx.now;
+                    } else {self.redraw = true}
+
                     if !T::OFFSET_X_BOUND.is_empty() {
                         self.offset.x = T::OFFSET_X_BOUND.map(|x| x * step[0])
                             .extend(self.offset.x).fit(self.offset.x + self.last_event.point.x - event.point.x);
@@ -639,30 +640,24 @@ impl<T: Graphable> GraphEditor<T> {
                         self.offset.y = T::OFFSET_Y_BOUND.map(|y| y * step[1])
                             .extend(self.offset.y).fit(self.offset.y + self.last_event.point.y - event.point.y);
                     }
-                    None
-                }
-
-                Buttons{left: true, meta: true, ..} => if self.last_event.left {
-                    self.redraw = true;
-                } else {
-                    *origin = event.point;
-                }.pipe(|_| None),
+                }.pipe(|_| None)
             }
 
-            Focus::Point{id, last_loc} => if event.shift {
+            Focus::Point{id, last_loc, origin} => if event.shift {
                 self.focus = zoom_focus();
                 None
             } else if event.left {
                 let delta = if !self.last_event.left {
-                    *last_loc = to_aligned_user(event.point);
+                    *last_loc = confine(to_aligned_user(event.point));
+                    *origin = *last_loc;
                     Default::default()
                 } else {
-                    let new = to_aligned_user(event.point);
+                    let new = confine(to_aligned_user(event.point));
                     new.sub(&replace(last_loc, new))
                 };
                 if *delta.sum::<R64>() != 0.0 {
                     self.redraw = true;
-                    unsafe{self.data.get_unchecked_mut(*id)}.move_point(delta, event.meta);
+                    T::move_point(Ok(unsafe{self.data.get_unchecked_mut(*id)}), delta, event.meta);
                     unsafe{self.data.reorder_unchecked(*id)}.apply(from_mut(id));
                     T::on_move(from_ref(id), self.data.len(), delta, event.meta)
                 } else {None}
@@ -675,56 +670,59 @@ impl<T: Graphable> GraphEditor<T> {
                     (false, true) =>
                         (None, None),
                     (true, false) => (Some(plane_focus()),
-                        T::on_click(|| confine(user_align(loc)),
-                            empty(), empty(), self.last_event.meta)),
-                    (true, true) => (Some(selection_focus([*id].into())),
-                        T::on_click(|| confine(user_align(loc)),
-                            empty(), once(p), self.last_event.meta))
+                        T::on_click(origin,
+                            LazyCell::new(|| confine(user_align(loc))),
+                            empty(), empty(),
+                            self.last_event.meta)),
+                    (true, true) => {
+                        [*id][..].clone_into(&mut self.selection);
+                        self.selection_size = default();
+                        let dst = confine(user_align(loc));
+                        (Some(selection_focus()),
+                            T::on_click(origin, &dst,
+                                empty(), once(p),
+                                self.last_event.meta))
+                    }
                 };
                 if let Some(f) = f {self.set_focus(f)}
                 r
             }
 
-            Focus::Selection{ids, last_loc, moved} => if event.shift {
+            Focus::Selection{origin, end} => if event.shift {
                 self.focus = zoom_focus();
                 None
             } else if event.left {
                 let delta = if !self.last_event.left {
-                    *last_loc = confine(to_aligned_user(event.point));
+                    *end = confine(to_aligned_user(event.point));
+                    *origin = *end;
                     Default::default()
                 } else {
                     let new = confine(to_aligned_user(event.point));
-                    new.sub(&replace(last_loc, new))
+                    new.sub(&replace(end, new))
                 };
                 if *delta.sum::<R64>() != 0.0 {
-                    *moved = true;
                     self.redraw = true;
-                    // TODO: some optimisation
-                    for (ids, id) in ids.iter_mut_with_ctx() {
-                        unsafe{self.data.get_unchecked_mut(id)}.move_point(delta, event.meta);
+                    for (ids, id) in self.selection.iter_mut_with_ctx() {
+                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, event.meta);
                         unsafe{self.data.reorder_unchecked(id)}.apply(ids);
                     }
-                    ids.sort_unstable();
-                    T::on_move(ids, self.data.len(), delta, event.meta)
+                    T::move_point(Err(&mut self.selection_origin), delta, event.meta);
+                    self.selection.sort_unstable();
+                    T::on_move(&self.selection, self.data.len(), delta, event.meta)
                 } else {None}
             } else if self.last_event.left {
-                if *moved {
-                    let iter = ids.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)});
-                    T::on_click(|| confine(to_aligned_user(event.point)),
-                        iter.clone(),
-                        iter,
-                        self.last_event.meta)
-                } else {
-                    let res = T::on_click(|| confine(to_aligned_user(event.point)),
-                        ids.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)}),
-                        empty(),
-                        self.last_event.meta);
-                    self.set_focus(self.point_by_pos(to_user(event.point))
-                        .map_or_else(plane_focus, |p| point_focus(p.index())));
-                    res
-                }
+                let cur_loc = confine(to_aligned_user(event.point));
+                let iter = self.selection.iter().map(|i| unsafe{self.data.get_unchecked_aware(*i)});
+                let origin = take(origin);
+                *end = default();
+                T::on_click(&origin, &cur_loc,
+                    iter.clone(), iter,
+                    self.last_event.meta)
             } else {
-                *moved = false;
+                let loc = to_user(event.point);
+                if !self.point_in_selection(loc) {
+                    self.set_focus(self.point_by_pos(loc).map_or_else(plane_focus, |p| point_focus(p.index())));
+                }
                 None
             }
         });
@@ -756,7 +754,7 @@ impl<T: Graphable> GraphEditor<T> {
 
         let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
         let size = canvas.size().map(R64::from);
-        let snap_step = &[app_ctx.snap_step, T::Y_SNAP];
+        let snap_step = [app_ctx.snap_step, T::Y_SNAP];
         let ctx = canvas.get_2d_context(loc!())?;
 
         let step = &size.div(&self.scale);
@@ -767,7 +765,9 @@ impl<T: Graphable> GraphEditor<T> {
             % (self.offset.y > (T::Y_BOUND.start * step[1]).into())
             .choose(step[1] * 2.0, R64::INFINITY);
 
-        let to_user = |loc| R64::array_from(loc + self.offset).div(step);
+        let offset = |loc| loc + self.offset;
+        let to_user = |loc| R64::array_from(offset(loc)).div(step);
+        let to_aligned_canvas = |loc: Point| loc.floor_to(snap_step.mul(step).into());
         let to_aligned_user = |loc| R64::array_from(loc + self.offset).div(step).floor_to(snap_step);
         let confine = |x| [T::X_BOUND, T::Y_BOUND].fit(x);
 
@@ -795,37 +795,21 @@ impl<T: Graphable> GraphEditor<T> {
 
         let points = Path2d::new().add_loc(loc!())?;
         let mapper = |loc: [R64; 2]| loc.mul(step).sub(&R64::array_from(self.offset));
-        ctx.set_stroke_style(&Self::FG_STYLE.into());
-        if let Ok(ids) = self.focus.selection().check(|x| !x.is_empty()) {
-            let non_ids = ids.first().map_or(0..0, |x| 0..*x)
-                .chain(ids.array_windows::<2>().flat_map(|[p, n]| p + 1 .. *n))
-                .chain(ids.last().map_or(0..0, |x| x + 1 .. self.data.len()));
-
-            for (this, next) in non_ids.map(|i| (unsafe{self.get_unchecked(i)}, self.get(i + 1))) {
-                points.add_path(&this.draw(next, mapper).add_loc(loc!())?)
-            }
-            ctx.fill_with_path_2d(&points);
-            ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
-            ctx.stroke_with_path(&points);
-            ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
-
-            let points = Path2d::new().add_loc(loc!())?;
-            for (this, next) in ids.iter().map(|i| (unsafe{self.get_unchecked(*i)}, self.get(i + 1))) {
-                points.add_path(&this.draw(next, mapper).add_loc(loc!())?)
-            }
-            ctx.fill_with_path_2d(&points);
-            ctx.stroke_with_path(&points);
-
-        } else {
-            for [this, next] in self.data.array_windows::<2>() {
-                points.add_path(&this.draw(Some(next), mapper).add_loc(loc!())?);
-            }
-            if let Some(last) = self.data.last() {
-                points.add_path(&last.draw(None, mapper).add_loc(loc!())?);
-            }
-            ctx.fill_with_path_2d(&points);
-            ctx.stroke_with_path(&points);
+        for [this, next] in self.data.array_windows::<2>() {
+            points.add_path(&this.draw(Some(next), mapper).add_loc(loc!())?);
         }
+        if let Some(last) = self.data.last() {
+            points.add_path(&last.draw(None, mapper).add_loc(loc!())?);
+        }
+        ctx.fill_with_path_2d(&points);
+        ctx.set_stroke_style(&Self::FG_STYLE.into());
+        ctx.stroke_with_path(&points);
+
+        let [x, y] = mapper(self.selection_origin);
+        let [w, h] = self.selection_size.mul(step);
+        ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
+        ctx.stroke_rect(*x, *y, *w, *h);
+        ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
 
         if app_ctx.play_since.is_finite() {
             ctx.set_fill_style(&Self::FG_STYLE.into());
@@ -857,11 +841,12 @@ impl<T: Graphable> GraphEditor<T> {
                 Some([T::EDITOR_NAME.into(), "Press and hold to zoom".into()])
             }
 
-            Focus::Plane{origin} => if self.last_event.meta {
+            Focus::Plane{origin, ..} => if self.last_event.meta {
                 if self.last_event.left {
-                    let [cur, origin] = [self.last_event.point.into_array(), origin.into_array()];
+                    let cur = to_aligned_canvas(self.last_event.point);
+                    let origin = mapper(origin).map(|x| *x);
                     ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
-                    ctx.stroke_rect(cur[0], cur[1], origin[0] - cur[0], origin[1] - cur[1]);
+                    ctx.stroke_rect(origin[0], origin[1], cur.x as f64 - origin[0], cur.y as f64 - origin[1]);
                     ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
                 } else {
                     let [x, y] = self.last_event.point.map(|x| x as f64);
@@ -879,8 +864,9 @@ impl<T: Graphable> GraphEditor<T> {
             Focus::Point{id, ..} =>
                 T::point_hover_hint(unsafe{self.get_unchecked_aware(id)}, *self.last_event),
 
-            Focus::Selection{ref ids, ..} =>
-                T::selection_hover_hint(ids.iter().map(|x| unsafe{self.get_unchecked_aware(*x)}), *self.last_event)
+            Focus::Selection{..} =>
+                T::selection_hover_hint(self.selection.iter().map(|x| unsafe{self.get_unchecked_aware(*x)}),
+                    *self.last_event)
         })
     }
 }

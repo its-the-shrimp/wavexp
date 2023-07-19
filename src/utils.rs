@@ -1,6 +1,6 @@
 use std::{
     ptr,
-    mem::take,
+    mem::{take, transmute_copy, MaybeUninit, forget},
     fmt::{self, Debug, Formatter, Display},
     ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Rem, RemAssign, Range},
     iter::{successors, Sum},
@@ -29,6 +29,8 @@ pub fn modify<T>(src: &mut T, f: impl FnOnce(T) -> T) {
     let src = src as *mut T;
     unsafe{src.write(f(src.read()))}
 }
+
+pub fn default<T: Default>() -> T {T::default()}
 
 pub trait Check: Sized {
 	#[inline] fn check(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
@@ -108,6 +110,8 @@ impl BoolExt for bool {
 pub trait ArrayExt<T, const N: usize>: Sized {
     fn zip<O, R, F>(self, other: [O; N], f: F) -> [R; N]
     where F: FnMut(T, O) -> R;
+    fn zip_fold<O, R, F>(self, init: R, other: [O; N], f: F) -> R
+    where F: FnMut(R, T, O) -> R;
     fn add<'a, O>(self, other: &'a [O; N]) -> Self
     where T: AddAssign<&'a O>;
     fn sub<'a, O>(self, other: &'a [O; N]) -> Self
@@ -118,9 +122,9 @@ pub trait ArrayExt<T, const N: usize>: Sized {
     where T: DivAssign<&'a O>;
     fn rem<'a, O>(self, other: &'a [O; N]) -> Self
     where T: RemAssign<&'a O>;
-    fn floor_to(self, other: &Self) -> Self
+    fn floor_to(self, other: Self) -> Self
     where T: RoundTo;
-    fn ceil_to(self, other: &Self) -> Self
+    fn ceil_to(self, other: Self) -> Self
     where T: RoundTo;
     fn sum<R>(self) -> R
     where R: Sum<T>;
@@ -134,6 +138,11 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
     #[inline] fn zip<O, R, F>(self, other: [O; N], mut f: F) -> [R; N] where F: FnMut(T, O) -> R {
         let (mut d, mut s) = (self.into_iter(), other.into_iter());
         from_fn(|_| unsafe{f(d.next().unwrap_unchecked(), s.next().unwrap_unchecked())})
+    }
+
+    #[inline] fn zip_fold<O, R, F>(self, init: R, other: [O; N], mut f: F) -> R
+    where F: FnMut(R, T, O) -> R {
+        self.into_iter().zip(other).fold(init, |r, (x, y)| f(r, x, y))
     }
 
     #[inline] fn add<'a, O>(mut self, other: &'a [O; N]) -> Self where T: AddAssign<&'a O> {
@@ -161,13 +170,13 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
         self
     }
 
-    #[inline] fn floor_to(mut self, other: &Self) -> Self where T: RoundTo {
-        for (d, s) in self.iter_mut().zip(other) {*d = d.floor_to(*s)}
+    #[inline] fn floor_to(mut self, other: Self) -> Self where T: RoundTo {
+        for (d, s) in self.iter_mut().zip(other) {modify(d, |d| d.floor_to(s))}
         self
     }
 
-    #[inline] fn ceil_to(mut self, other: &Self) -> Self where T: RoundTo {
-        for (d, s) in self.iter_mut().zip(other) {*d = d.ceil_to(*s)}
+    #[inline] fn ceil_to(mut self, other: Self) -> Self where T: RoundTo {
+        for (d, s) in self.iter_mut().zip(other) {modify(d, |d| d.ceil_to(s))}
         self
     }
 
@@ -201,6 +210,41 @@ pub trait IntoArray<T, const N: usize> {
 
 impl<T, U, const N: usize> IntoArray<U, N> for T where U: ArrayFrom<T, N> {
     #[inline] fn into_array(self) -> [U; N] {U::array_from(self)}
+}
+
+pub trait FlippedArray<T, const OUTER: usize, const INNER: usize> {
+    fn flipped(self) -> [[T; OUTER]; INNER];
+}
+
+impl<T, const OUTER: usize, const INNER: usize> FlippedArray<T, OUTER, INNER> for [[T; INNER]; OUTER] {
+    fn flipped(mut self) -> [[T; OUTER]; INNER] {
+        unsafe {
+            if OUTER == INNER {
+                let mut src = self.as_mut_ptr() as *mut T;
+                for outer in 0 .. OUTER {
+                    src = src.add(outer + 1);
+                    for inner in outer + 1 .. INNER {
+                        src.swap(src.add((inner - outer) * (INNER - 1)));
+                        src = src.add(1);
+                    }
+                }
+                transmute_copy(&self)
+            } else {
+                let mut new_self: MaybeUninit<_> = MaybeUninit::uninit();
+                let mut res = new_self.as_mut_ptr() as *mut T;
+                for inner in 0 .. INNER {
+                    let mut src = (self.as_mut_ptr() as *mut T).add(inner);
+                    for _ in 0 .. OUTER {
+                        res.copy_from(src, 1);
+                        res = res.add(1);
+                        src = src.add(INNER);
+                    }
+                }
+                forget(self);
+                new_self.assume_init()
+            }
+        }
+    }
 }
 
 // this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
@@ -1041,6 +1085,16 @@ impl LooseEq for Point {
     }
 }
 
+impl RoundTo for Point {
+    #[inline] fn floor_to(self, step: Self) -> Self {
+        Self{x: self.x.floor_to(step.x), y: self.y.floor_to(step.y)}
+    }
+
+    #[inline] fn ceil_to(self, step: Self) -> Self {
+        Self{x: self.x.ceil_to(step.x), y: self.y.ceil_to(step.y)}
+    }
+}
+
 impl Point {
     pub const ZERO: Self = Self{x:0, y:0};
     #[inline] pub fn normalise(mut self, old_space: Rect, new_space: Rect) -> Self {
@@ -1066,16 +1120,16 @@ impl Rect {
     #[inline] fn  height(&self) -> i32 {self.1.y - self.0.y}
 }
 
-pub trait RoundTo: Copy + Add<Self, Output=Self> + Sub<Self, Output=Self> + Rem<Self, Output=Self> {
-    const ONE: Self;
-    #[inline] fn floor_to(self, step: Self) -> Self {self - self % step}
-    #[inline] fn  ceil_to(self, step: Self) -> Self {step - (self - Self::ONE) % step + self - Self::ONE}
+pub trait RoundTo {
+    fn floor_to(self, step: Self) -> Self;
+    fn  ceil_to(self, step: Self) -> Self;
 }
 
 macro_rules! round_to_4ints {
     ($($int:ty)+) => {$(
         impl RoundTo for $int {
-            const ONE: Self = 1;
+            #[inline] fn floor_to(self, step: Self) -> Self {self - self % step}
+            #[inline] fn  ceil_to(self, step: Self) -> Self {step - (self - 1) % step + self - 1}
         }
     )+};
 }
@@ -1319,6 +1373,11 @@ macro_rules! real_impl {
             }
         }
 
+        impl RoundTo for $real {
+            #[inline] fn floor_to(self, step: Self) -> Self {self - self % step}
+            #[inline] fn  ceil_to(self, step: Self) -> Self {step - (self - 1) % step + self - 1}
+        }
+
         real_from_ints_impl!($real{$float}:
             u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
         real_int_operator_impl!($real{$float}, u8:
@@ -1441,18 +1500,11 @@ macro_rules! r32 {
     };
 }
 
-impl RoundTo for R32 {
-    const ONE: Self = r32![1.0];
-}
-
 #[macro_export]
 macro_rules! r64 {
     ($x:literal) => {
         unsafe{$crate::utils::R64::new_unchecked($x)}
     };
-}
-impl RoundTo for R64 {
-    const ONE: Self = r64![1.0];
 }
 
 #[test]
