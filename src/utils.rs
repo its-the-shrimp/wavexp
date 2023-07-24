@@ -1,6 +1,6 @@
 use std::{
     ptr,
-    mem::{take, transmute_copy, MaybeUninit, forget},
+    mem::{take, transmute_copy, MaybeUninit, forget, transmute},
     fmt::{self, Debug, Formatter, Display},
     ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Rem, RemAssign, Range},
     iter::{successors, Sum},
@@ -31,6 +31,14 @@ pub fn modify<T>(src: &mut T, f: impl FnOnce(T) -> T) {
 }
 
 pub fn default<T: Default>() -> T {T::default()}
+
+#[repr(transparent)]
+pub struct Alias<'a, T: ?Sized>(pub &'a T);
+
+impl<'a, T: ?Sized + Deref> Deref for Alias<'a, T> {
+    type Target = T::Target;
+    #[inline] fn deref(&self) -> &Self::Target {self.0.deref()}
+}
 
 pub trait Check: Sized {
 	#[inline] fn check(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
@@ -247,9 +255,9 @@ impl<T, const OUTER: usize, const INNER: usize> FlippedArray<T, OUTER, INNER> fo
     }
 }
 
-// this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
-// them from containing types that don't implement `Sync`. On any other architecture this
-// limitation makes sense, but in Webassembly, which doesn't support threading, this limitation is meaningless.
+/// this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
+/// them from containing types that don't implement `Sync`. On any other architecture this
+/// limitation makes sense, but in Webassembly, which doesn't support threading, this limitation is meaningless.
 pub struct WasmCell<T>(T);
 
 unsafe impl<T> Sync for WasmCell<T> {}

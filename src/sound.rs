@@ -3,7 +3,7 @@ use std::{
     fmt::{self, Display, Formatter, Debug},
     cmp::Ordering,
     rc::Rc,
-    borrow::Cow};
+    borrow::Cow, cell::RefCell};
 use js_sys::Math::random;
 use web_sys::{
     AudioNode,
@@ -11,20 +11,24 @@ use web_sys::{
     AudioBufferSourceNode,
     AudioBuffer,
     GainNode,
-    Path2d, MouseEvent, Element, DynamicsCompressorNode, AnalyserNode, HtmlCanvasElement};
-use yew::{html, Html, TargetCast, Callback, NodeRef};
+    Path2d, DynamicsCompressorNode, AnalyserNode, HtmlCanvasElement};
+use yew::{
+    html,
+    Html,
+    Callback,
+    scheduler::Shared};
 use crate::{
     utils::{
         JsResult,
         JsResultUtils,
         R64, R32,
-        LooseEq, OptionExt, Pipe, document, VecExt, js_error, Take, SliceRef, Check},
-    input::{Slider, Button, Buttons},
-    visual::{GraphEditor, Graphable},
+        LooseEq, OptionExt, Pipe, document, VecExt, js_error, Take, default, ResultToJsResult, report_err},
+    input::{Slider, Button, Buttons, Cursor},
+    visual::{GraphEditor, Graphable, GraphEditorCanvas},
     global::{AppContext, AppEvent},
     loc,
     r32,
-    r64
+    r64, js_log
 };
 
 pub type MSecs = R64;
@@ -189,12 +193,6 @@ impl Ord for NoteBlock {
     }
 }
 
-pub enum NoteBlockEvent {
-    Add(R64, Note),
-    Remove(Box<[usize]>),
-    Redraw
-}
-
 impl Graphable for NoteBlock {
     const EDITOR_NAME: &'static str = "Note Editor";
     // TODO: make this generic over the number of defined notes
@@ -203,7 +201,6 @@ impl Graphable for NoteBlock {
     const OFFSET_Y_BOUND: Range<R64> = r64![-2.0] .. r64![-2.0];
     const Y_SNAP: R64 = r64![1.0];
     type Inner = Beats;
-    type Event = NoteBlockEvent;
 
     #[inline] fn inner(&self) -> &Self::Inner {&self.len}
     #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.len}
@@ -230,26 +227,6 @@ impl Graphable for NoteBlock {
             }
         }
     }
-
-    #[inline] fn on_move(ids: &[usize], n_points: usize, _: [R64; 2], _: bool) -> Option<Self::Event> {
-        ids.contains(&(n_points - 1)).then_some(NoteBlockEvent::Redraw)
-    }
-
-    #[inline] fn on_click<'a>(
-        pressed_at:    impl Deref<Target=[R64; 2]>,
-        released_at:   impl Deref<Target=[R64; 2]>,
-        old_selection: impl Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
-        new_selection: impl Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
-        meta: bool)
-    -> Option<Self::Event> where Self: 'a {
-        if meta && new_selection.len() == 0 && old_selection.len() == 0 && *pressed_at == *released_at {
-            let [x, y] = *released_at;
-            return Some(NoteBlockEvent::Add(x, Note::from_index(y.into()).recip()))
-        }
-        old_selection.filter_map(|x| (x.len == 0).then_some(x.index())).collect::<Box<_>>()
-            .check(|x| x.len() > 0).ok().map(NoteBlockEvent::Remove)
-    }
-
     fn draw(&self, _next: Option<&Self>, mapper: impl Fn([R64; 2]) -> [R64; 2]) -> JsResult<Path2d> {
         let res = Path2d::new().add_loc(loc!())?;
         let y: R64 = self.value.recip().index().into();
@@ -268,71 +245,112 @@ impl Graphable for NoteBlock {
         format!("{:.3}, {}", loc[0], Note::from_index(loc[1].into()).recip())
     }
 
-    #[inline] fn plane_hover_hint(_: impl Fn() -> [R64; 2], buttons: Buttons) -> Option<[Cow<'static, str>; 2]> {
-        Some(match buttons {
-            Buttons{left: false, meta: false, ..} =>
-                [Self::EDITOR_NAME.into(), "Hold & drag to move around (press Meta for actions)".into()],
-            Buttons{left: false, meta: true, ..} =>
-                [Self::EDITOR_NAME.into(), "Click to add note, hold & drag to select".into()],
-            Buttons{left: true, meta: false, ..} =>
-                [Cow::from(Self::EDITOR_NAME) + ": Moving", "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                [Cow::from(Self::EDITOR_NAME) + ": Selecting", "Release to select".into()]
-        })
+    #[inline] fn on_move(editor: &mut GraphEditor<Self>, ctx: &AppContext, _: Cursor, _: [R64; 2]) {
+        if editor.selection().contains(&(editor.len() - 1)) {
+            ctx.emit_event(AppEvent::RedrawEditorPlane)
+        }
     }
 
-    #[inline] fn point_hover_hint<'a>(point: SliceRef<'a, Self>, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
-    where Self: 'a {
-        Some(match buttons {
-            Buttons{left: false, meta: false, ..} =>
-                [format!("Note @ {}", Self::fmt_loc(point.loc())).into(), "LMB to move, LMB + Meta to stretch".into()],
-            Buttons{left: false, meta: true, ..} =>
-                [format!("Note @ {}", Self::fmt_loc(point.loc())).into(), "Hold LMB to stretch it".into()],
-            Buttons{left: true, meta: false, ..} =>
-                [format!("Note @ {}: moving", Self::fmt_loc(point.loc())).into(), "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                [format!("Note @ {}: stretching", Self::fmt_loc(point.loc())).into(), "Release to stop".into()]
-        })
-    }
-
-    #[inline] fn selection_hover_hint<'a, I>(mut points: I, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
-    where Self: 'a, I: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator {
-        if let Some(p) = points.next().filter(|_| points.len() == 0) {return Self::point_hover_hint(p, buttons)}
-        Some(match buttons {
-            Buttons{left: false, meta: false, ..} =>
-                ["Multiple notes".into(), "LMB to move, LMB + Meta to stretch".into()],
-            Buttons{left: false, meta: true, ..} =>
-                ["Multiple notes".into(), "Hold LMB to stretch it".into()],
-            Buttons{left: true, meta: false, ..} =>
-                ["Multiple notes: moving".into(), "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                ["Multiple notes: stretching".into(), "Release to stop".into()]
-        })
-    }
-}
-
-impl NoteBlockEvent {
-    #[inline] pub fn apply(self, pattern: &mut GraphEditor<NoteBlock>) -> JsResult<AppEvent> {
-        Ok(match self {
-            NoteBlockEvent::Add(offset, value) => {
-                pattern.add_point(NoteBlock{offset, value, len: r64![1.0]});
-                AppEvent::RedrawEditorPlane
+    #[inline] fn on_click(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        cursor: Cursor,
+        pressed_at:    impl Deref<Target = [R64; 2]>,
+        released_at:   impl Deref<Target = [R64; 2]>,
+        mut old_selection: Cow<'_, [usize]>
+    ) {
+        if cursor.meta && editor.selection().is_empty() && old_selection.is_empty() && *pressed_at == *released_at {
+            let [offset, y] = *released_at;
+            editor.add_point(Self{offset, value: Note::from_index(y.into()).recip(), len: r64![1.0]});
+            ctx.emit_event(AppEvent::RedrawEditorPlane)
+        } else {
+            old_selection.to_mut().retain(|i| *unsafe{editor.get_unchecked(*i)}.len > 0.0);
+            if !old_selection.is_empty() {
+                _ = editor.remove_points(&old_selection).report_err(loc!());
+                ctx.emit_event(AppEvent::RedrawEditorPlane)
             }
+        }
+    }
 
-            NoteBlockEvent::Remove(ids) => {
-                pattern.remove_points(&ids).add_loc(loc!())?;
-                AppEvent::RedrawEditorPlane
-            }
+    #[inline] fn on_plane_hover(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        cursor: Cursor,
+        _: impl Deref<Target = [R64; 2]>,
+        first: bool
+    ) {
+        if !first && Some(&*cursor) == editor.last_cursor().as_deref() {return}
+        let [m, a] = match *cursor {
+            Buttons{left: false, shift: true, ..} =>
+                [Self::EDITOR_NAME.into(),
+                "Press and hold to zoom".into()],
+            Buttons{left: true, shift: true, ..} =>
+                [Cow::from(Self::EDITOR_NAME) + ": zooming",
+                "Release to stop".into()],
+            Buttons{left: false, meta: false, ..} =>
+                [Self::EDITOR_NAME.into(),
+                "Hold & drag to move around (press Meta for actions)".into()],
+            Buttons{left: false, meta: true, ..} =>
+                [Self::EDITOR_NAME.into(),
+                "Click to add note, hold & drag to select".into()],
+            Buttons{left: true, meta: false, ..} => 
+                [Cow::from(Self::EDITOR_NAME) + ": Moving",
+                "Release to stop".into()],
+            Buttons{left: true, meta: true, ..} =>
+                [Cow::from(Self::EDITOR_NAME) + ": Selecting",
+                "Release to select".into()]
+        };
+        ctx.emit_event(AppEvent::SetHint(m, a))
+    }
 
-            NoteBlockEvent::Redraw => AppEvent::RedrawEditorPlane,
-        })
+    #[inline] fn on_point_hover(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        cursor: Cursor,
+        point_id: usize,
+        first: bool
+    ) {
+        if !first {return}
+        let m = Self::fmt_loc(unsafe{editor.get_unchecked(point_id)}.loc());
+        let [m, a] = match *cursor {
+            Buttons{left: false, meta: false, ..} =>
+                [m.into(), "Hold & drag to move around (press Meta for actions)".into()],
+            Buttons{left: false, meta: true, ..} =>
+                [m.into(), "Click to add note, hold & drag to select".into()],
+            Buttons{left: true, meta: false, ..} =>
+                [Cow::from(m) + ": Moving", "Release to stop".into()],
+            Buttons{left: true, meta: true, ..} =>
+                [Cow::from(m) + ": Selecting", "Release to select".into()]
+        };
+        ctx.emit_event(AppEvent::SetHint(m, a))
+    }
+
+    #[inline] fn on_selection_hover(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        cursor: Cursor,
+        first: bool
+    ) {
+        if !first {return}
+        let m = editor.selection().len().pipe(|l| format!("{l} note{}", if l == 1 {""} else {"s"}));
+        let [m, a] = match *cursor {
+            Buttons{left: false, meta: false, ..} =>
+                [m.into(), "LMB to move, LMB + Meta to stretch".into()],
+            Buttons{left: false, meta: true, ..} =>
+                [m.into(), "Hold LMB to stretch it".into()],
+            Buttons{left: true, meta: false, ..} =>
+                [(m + ": moving").into(), "Release to stop".into()],
+            Buttons{left: true, meta: true, ..} =>
+                [(m + ": stretching").into(), "Release to stop".into()],
+        };
+        ctx.emit_event(AppEvent::SetHint(m, a))
     }
 }
 
 #[derive(Default, Debug, Clone)]
 pub enum Sound {
     #[default] None,
-    Note{volume: R32, pattern: GraphEditor<NoteBlock>,
+    Note{volume: R32, pattern: Shared<GraphEditor<NoteBlock>>,
         attack: Beats, decay: Beats, sustain: R32, release: Beats},
     Noise{gen: AudioBufferSourceNode, src: AudioBuffer,
         gain: GainNode, len: Beats}
@@ -347,7 +365,7 @@ impl Sound {
     #[inline] pub fn new(sound_type: SoundType, ctx: &AudioContext) -> JsResult<Self> {
         Ok(match sound_type {
             SoundType::Note =>
-                Self::Note{volume: r32![1.0], pattern: GraphEditor::new(vec![]),
+                Self::Note{volume: r32![1.0], pattern: Rc::new(RefCell::new(GraphEditor::new(vec![]))),
                     attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2]},
 
             SoundType::Noise => {
@@ -382,11 +400,12 @@ impl Sound {
 
             Sound::Note{pattern, ..} =>
                 scheduler(SoundEvent::BlockStart{id: self_id, state: 0,
-                    when: self_offset + unsafe{pattern.first_unchecked()}.offset}),
+                    when: self_offset
+                        + unsafe{pattern.try_borrow().to_js_result(loc!())?.first_unchecked()}.offset}),
 
             Sound::Noise{gen, src, gain, ..} => {
                 gen.disconnect().add_loc(loc!())?;
-                *gen = ctx.audio_ctx.create_buffer_source().add_loc(loc!())?;
+                *gen = ctx.audio_ctx().create_buffer_source().add_loc(loc!())?;
                 gen.set_loop(true);
                 gen.set_buffer(Some(src));
                 gen.start().add_loc(loc!())?;
@@ -402,28 +421,29 @@ impl Sound {
 
             Sound::Note{volume, pattern, attack, decay, mut sustain, release} => match src {
                 SoundEvent::BlockStart{id, when, mut state} => {
+                    let pattern = pattern.try_borrow().to_js_result(loc!())?;
                     let cur = unsafe{pattern.get_unchecked(state)};
-                    let block_core = ctx.audio_ctx.create_oscillator().add_loc(loc!())?;
+                    let block_core = ctx.audio_ctx().create_oscillator().add_loc(loc!())?;
                     block_core.frequency().set_value(*cur.value.freq());
                     block_core.start().add_loc(loc!())?;
-                    let block = ctx.audio_ctx.create_gain().add_loc(loc!())?;
+                    let block = ctx.audio_ctx().create_gain().add_loc(loc!())?;
                     {
-                        let mut at = ctx.now;
+                        let mut at = ctx.now();
                         let gain = block.gain();
                         gain.set_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
-                        at += attack.to_secs(ctx.bps);
+                        at += attack.to_secs(ctx.bps());
                         gain.linear_ramp_to_value_at_time(**volume, *at).add_loc(loc!())?;
-                        at += decay.to_secs(ctx.bps);
+                        at += decay.to_secs(ctx.bps());
                         sustain *= *volume;
                         gain.linear_ramp_to_value_at_time(*sustain, *at).add_loc(loc!())?;
-                        at = ctx.now + cur.len.to_secs(ctx.bps);
+                        at = ctx.now() + cur.len.to_secs(ctx.bps());
                         gain.set_value_at_time(*sustain, *at).add_loc(loc!())?;
-                        at += release.to_secs(ctx.bps);
+                        at += release.to_secs(ctx.bps());
                         gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
                     }
                     block_core.connect_with_audio_node(&block).add_loc(loc!())?
                         .connect_with_audio_node(plug).add_loc(loc!())?;
-                    scheduler(SoundEvent::BlockEnd{id, when: when + cur.len + *release + r64![0.1].secs_to_beats(ctx.bps), block});
+                    scheduler(SoundEvent::BlockEnd{id, when: when + cur.len + *release + r64![0.1].secs_to_beats(ctx.bps()), block});
 
                     state += 1;
                     if let Some(next) = pattern.get(state) {
@@ -452,8 +472,10 @@ impl Sound {
     #[inline] pub fn len(&self) -> Beats {
         match self {
             Sound::None => r64![1.0],
-            Sound::Note{pattern, ..} =>
-                unsafe{pattern.last_unchecked()}.pipe(|x| x.offset + x.len),
+            Sound::Note{pattern, ..} => match pattern.try_borrow().to_js_result(loc!()) {
+                Ok(p) => unsafe{p.last_unchecked()}.pipe(|x| x.offset + x.len),
+                Err(err) => {report_err(err); default()}
+            }
             Sound::Noise{len, ..} => *len
         }
     }
@@ -480,7 +502,7 @@ impl Sound {
                 })}
             </div>},
 
-            Sound::Note{volume, pattern, attack, decay, sustain, release} => match ctx.selected_tab {
+            Sound::Note{volume, pattern, attack, decay, sustain, release} => match ctx.selected_tab() {
                 0 /* General */ => html!{<div id="inputs">
                     <Slider key="note-att"
                     setter={setter.reform(AppEvent::Attack)}
@@ -499,7 +521,7 @@ impl Sound {
                     <Slider key="note-rel"
                     setter={setter.reform(AppEvent::Release)}
                     name="Note Release Time" postfix="Beats"
-                    min={r64![0.1].secs_to_beats(ctx.bps)}
+                    min={r64![0.1].secs_to_beats(ctx.bps())}
                     max={r64![3.0]}
                     initial={*release}/>
                     <Slider key="note-vol"
@@ -508,16 +530,12 @@ impl Sound {
                     initial={*volume}/>
                 </div>},
                 1 /* Pattern */ => html!{
-                    <canvas ref={pattern.canvas().clone()} class="blue-border"
-                    onpointerdown={setter.reform(AppEvent::FocusTab)}
-                    onpointerup={setter.reform(|e| AppEvent::HoverTab(MouseEvent::from(e)))}
-                    onpointermove={setter.reform(|e| AppEvent::HoverTab(MouseEvent::from(e)))}
-                    onpointerout={setter.reform(|_| AppEvent::LeaveTab)}/>
+                    <GraphEditorCanvas<NoteBlock> editor={pattern} emitter={setter}/>
                 },
                 tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
             }
 
-            Sound::Noise{len, gain, ..} => match ctx.selected_tab {
+            Sound::Noise{len, gain, ..} => match ctx.selected_tab() {
                 0 /* General */ => html!{<div id="inputs">
                     <Slider key="noise-dur"
                     setter={setter.reform(AppEvent::Duration)}
@@ -536,65 +554,38 @@ impl Sound {
         }
     }
 
-    pub fn handle_event(&mut self, event: &AppEvent, ctx: &AppContext) -> JsResult<Option<AppEvent>> {
+    pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> JsResult<()> {
         Ok(match self {
             Sound::None => if let AppEvent::SetBlockType(ty) = event {
-                *self = Self::new(*ty, &ctx.audio_ctx).add_loc(loc!())?;
-                Some(AppEvent::RedrawEditorPlane)
-            } else {None}
+                *self = Self::new(*ty, ctx.audio_ctx()).add_loc(loc!())?;
+                ctx.emit_event(AppEvent::RedrawEditorPlane)
+            }
 
             Sound::Note{volume, pattern, attack, decay, sustain, release} => match event {
-                AppEvent::FocusTab(e) => {
-                    e.target_dyn_into::<Element>().to_js_result(loc!())?
-                        .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    pattern.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())?
-                        .map(|x| x.apply(pattern).add_loc(loc!())).transpose()?;
-                    None
+                AppEvent::AfterSetTab(1) => pattern.try_borrow_mut().to_js_result(loc!())?
+                    .init().add_loc(loc!())?,
+
+                AppEvent::Volume(value)  =>  *volume = *value,
+                AppEvent::Attack(value)  =>  *attack = *value,
+                AppEvent::Decay(value)   =>   *decay = *value,
+                AppEvent::Sustain(value) => *sustain = *value,
+                AppEvent::Release(value) => *release = *value,
+
+                e => if ctx.selected_tab() == 1 {
+                    pattern.try_borrow_mut().to_js_result(loc!())?
+                        .handle_event(e, ctx).add_loc(loc!())?
                 }
-
-                AppEvent::HoverTab(e) => pattern
-                    .handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())?
-                    .map(|x| x.apply(pattern).add_loc(loc!())).transpose()?,
-
-                AppEvent::KeyPress(e) | AppEvent::KeyRelease(e) => pattern
-                    .handle_hover(pattern.last_event().map(|x| x + e), ctx).add_loc(loc!())?
-                    .map(|x| x.apply(pattern).add_loc(loc!())).transpose()?,
-
-                AppEvent::LeaveTab => pattern
-                    .handle_hover(None, ctx).add_loc(loc!())?
-                    .pipe(|_| None),
-
-                AppEvent::AfterSetTab(1) => pattern
-                    .init().add_loc(loc!())?.pipe(|_| None),
-
-                AppEvent::Frame(_) if ctx.selected_tab == 1 => pattern
-                    .redraw(ctx).add_loc(loc!())?
-                    .map(|[m, a]| AppEvent::SetHint(m, a)),
-
-                AppEvent::Volume(value)  =>  {*volume = *value; None}
-                AppEvent::Attack(value)  =>  {*attack = *value; None}
-                AppEvent::Decay(value)   =>   {*decay = *value; None}
-                AppEvent::Sustain(value) => {*sustain = *value; None}
-                AppEvent::Release(value) => {*release = *value; None}
-
-                AppEvent::AudioStarted(_) => pattern.force_redraw()
-                    .pipe(|_| None),
-
-                _ => None
             }
 
             Sound::Noise{len, gain, ..} => match event {
                 AppEvent::Duration(value) => {
                     *len = *value;
-                    Some(AppEvent::RedrawEditorPlane)
+                    ctx.emit_event(AppEvent::RedrawEditorPlane)
                 }
 
-                AppEvent::Volume(value) => {
-                    gain.gain().set_value(**value);
-                    None
-                }
+                AppEvent::Volume(value) => gain.gain().set_value(**value),
 
-                _ => None,
+                _ => ()
             }
         })
     }
@@ -634,7 +625,6 @@ impl Graphable for SoundBlock {
     const OFFSET_Y_BOUND: Range<R64> = r64![-1.0] .. R64::INFINITY;
     const Y_SNAP: R64 = r64![1.0];
     type Inner = Sound;
-    type Event = AppEvent;
 
     #[inline] fn inner(&self) -> &Self::Inner {&self.sound}
     #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.sound}
@@ -652,10 +642,6 @@ impl Graphable for SoundBlock {
                 point[1] += delta[1];
             }
         }
-    }
-
-    #[inline] fn desc(&self) -> Cow<'static, str> {
-        self.sound.name().into()
     }
 
     fn draw(&self, _: Option<&Self>, mapper: impl Fn([R64; 2]) -> [R64; 2]) -> JsResult<Path2d> {
@@ -676,52 +662,83 @@ impl Graphable for SoundBlock {
         format!("{:.3}, layer {}", loc[0], loc[1].floor())
     }
 
-    #[inline] fn on_click<'a>(
-        pressed_at:    impl Deref<Target=[R64; 2]>,
-        released_at:   impl Deref<Target=[R64; 2]>,
-        old_selection: impl Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
-        new_selection: impl Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator,
-        meta: bool)
-    -> Option<Self::Event> where Self: 'a {
-        let new_len = new_selection.len();
-        if meta && new_len == 0 && old_selection.len() == 0 && *pressed_at == *released_at {
-            let [x, y] = *released_at;
-            Some(AppEvent::Add(y.into(), x))
+    #[inline] fn on_click(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        cursor: Cursor,
+        pressed_at:    impl Deref<Target = [R64; 2]>,
+        released_at:   impl Deref<Target = [R64; 2]>,
+        old_selection: Cow<'_, [usize]>
+    ) {
+        let new_len = || editor.selection().len();
+        if cursor.meta && new_len() == 0 && old_selection.is_empty() && *pressed_at == *released_at {
+            let [offset, y] = *released_at;
+            editor.add_point(SoundBlock { sound: default(), layer: y.into(), offset});
         } else {
-            Some(AppEvent::Select((new_len > 0).then_some(0)))
+            ctx.emit_event(AppEvent::Select((new_len() > 0).then_some(0)));
         }
     }
-
-    #[inline] fn plane_hover_hint(_: impl Fn() -> [R64; 2], buttons: Buttons) -> Option<[Cow<'static, str>; 2]> {
-        Some(match buttons {
+    #[inline] fn on_plane_hover(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        cursor: Cursor,
+        _: impl Deref<Target = [R64; 2]>,
+        first: bool
+    ) {
+        if !first && Some(&*cursor) == editor.last_cursor().as_deref() {return}
+        let [m, a] = match *cursor {
+            Buttons{left: false, shift: true, ..} =>
+                [Self::EDITOR_NAME.into(),
+                "Press and hold to zoom".into()],
+            Buttons{left: true, shift: true, ..} =>
+                [Cow::from(Self::EDITOR_NAME) + ": zooming",
+                "Release to stop".into()],
             Buttons{left: false, meta: false, ..} =>
-                [Self::EDITOR_NAME.into(), "Hold & drag to move (press Meta for other actions)".into()],
+                [Self::EDITOR_NAME.into(),
+                "Hold & drag to move around (press Meta for actions)".into()],
             Buttons{left: false, meta: true, ..} =>
-                [Self::EDITOR_NAME.into(), "Click to add block, hold & drag to select".into()],
-            Buttons{left: true, meta: false, ..} =>
-                [Cow::from(Self::EDITOR_NAME) + ": Moving", "Release to stop".into()],
+                [Self::EDITOR_NAME.into(),
+                "Click to add block, hold & drag to select".into()],
+            Buttons{left: true, meta: false, ..} => 
+                [Cow::from(Self::EDITOR_NAME) + ": Moving",
+                "Release to stop".into()],
             Buttons{left: true, meta: true, ..} =>
-                [Cow::from(Self::EDITOR_NAME) + ": Selecting", "Release to select".into()]
-        })
+                [Cow::from(Self::EDITOR_NAME) + ": Selecting",
+                "Release to select".into()]
+        };
+        ctx.emit_event(AppEvent::SetHint(m, a))
     }
 
-    #[inline] fn point_hover_hint<'a>(point: SliceRef<'a, Self>, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
-    where Self: 'a {
-        Some(if buttons.left {
-            [format!("Block @ {}: moving", Self::fmt_loc(point.loc())).into(), "Release to stop".into()]
-        } else {
-            [format!("Block @ {}", Self::fmt_loc(point.loc())).into(), "Hold & drag to move".into()]
-        })
+    #[inline] fn on_point_hover(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        cursor: Cursor,
+        point_id: usize,
+        first: bool
+    ) {
+        let m = || unsafe{editor.get_unchecked(point_id)}.desc().into();
+        let [m, a] = if cursor.left {
+            [m() + ": moving", "Release to stop".into()]
+        } else if first {
+            [m(), "Hold & drag to move".into()]
+        } else {return};
+        ctx.emit_event(AppEvent::SetHint(m, a))
     }
 
-    #[inline] fn selection_hover_hint<'a, I>(mut points: I, buttons: Buttons) -> Option<[Cow<'static, str>; 2]>
-    where Self: 'a, I: Iterator<Item=SliceRef<'a, Self>> + ExactSizeIterator {
-        if let Some(p) = points.next().filter(|_| points.len() == 0) {return Self::point_hover_hint(p, buttons)}
-        Some(if buttons.left {
-            ["Multiple blocks: moving".into(), "Release to stop".into()]
+    #[inline] fn on_selection_hover(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        cursor: Cursor,
+        first: bool
+    ) {
+        if !first {return}
+        let m = editor.selection().len().pipe(|l| format!("{l} block{}", if l == 1 {""} else {"s"}));
+        let [m, a] = if cursor.left {
+            [(m + ": moving").into(), "Release to stop".into()]
         } else {
-            ["Multiple blocks".into(), "Click to de-select, hold & drag to move".into()]
-        })
+            [m.into(), "Hold & drag to move".into()]
+        };
+        ctx.emit_event(AppEvent::SetHint(m, a))
     }
 
     #[inline] fn canvas_coords(canvas: &HtmlCanvasElement) -> JsResult<[u32; 2]> {
@@ -731,6 +748,12 @@ impl Graphable for SoundBlock {
             .client_width();
         let h = canvas.client_height();
         Ok([w as u32, h as u32])
+    }
+}
+
+impl SoundBlock {
+    #[inline] pub fn desc(&self) -> String {
+        format!("{} @ {}", self.sound.name(), Self::fmt_loc(self.loc()))
     }
 }
 
@@ -776,7 +799,7 @@ impl SoundEvent {
 }
 
 pub struct Sequencer {
-    pattern: GraphEditor<SoundBlock>,
+    pattern: Shared<GraphEditor<SoundBlock>>,
     pending: Vec<SoundEvent>,
     plug: DynamicsCompressorNode,
     gain: GainNode,
@@ -796,7 +819,7 @@ impl Sequencer {
             .connect_with_audio_node(&visualiser).add_loc(loc!())?
             .connect_with_audio_node(&audio_ctx.destination()).add_loc(loc!())?;
 
-        Ok(Self{plug, gain, pattern: GraphEditor::new(vec![]), pending: vec![],
+        Ok(Self{plug, gain, pattern: Rc::new(RefCell::new(GraphEditor::new(vec![]))), pending: vec![],
             playing: false, used_to_play: false})
     }
 
@@ -804,87 +827,56 @@ impl Sequencer {
         R32::new_or(R32::ZERO, self.gain.gain().value())
     }
 
-    #[inline] pub fn canvas(&self) -> &NodeRef {
-        self.pattern.canvas()
-    }
-
-    #[inline] pub fn pattern_mut(&mut self) -> &mut GraphEditor<SoundBlock> {
-        &mut self.pattern
-    }
-
-    #[inline] pub fn pattern(&self) -> &GraphEditor<SoundBlock> {
+    #[inline] pub fn pattern(&self) -> &Shared<GraphEditor<SoundBlock>> {
         &self.pattern
     }
 
-    pub fn handle_event(&mut self, event: &AppEvent, ctx: &AppContext) -> JsResult<Option<AppEvent>> {
-        Ok(match event {
-            &AppEvent::Add(layer, offset) => self.pattern
-                .add_point(SoundBlock{sound: Sound::default(), layer, offset})
-                .pipe(|_| None),
-
+    pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> JsResult<()> {
+        match event {
             AppEvent::StartPlay => {
                 self.pending.clear();
-                for (id, mut block) in self.pattern.iter_mut().enumerate() {
+                let mut pattern = self.pattern.try_borrow_mut().to_js_result(loc!())?;
+                for (id, mut block) in pattern.iter_mut().enumerate() {
                     let offset = block.offset;
                     block.inner().reset(ctx, id, offset,
                         |x| _ = self.pending.push_sorted(x)).add_loc(loc!())?;
                 }
                 self.playing = true;
-                None
             }
 
             AppEvent::StopPlay => {
                 self.pending.clear();
                 self.plug.disconnect().add_loc(loc!())?;
-                self.plug = ctx.audio_ctx.create_dynamics_compressor().add_loc(loc!())?;
+                self.plug = ctx.audio_ctx().create_dynamics_compressor().add_loc(loc!())?;
                 self.plug.ratio().set_value(20.0);
                 self.plug.release().set_value(1.0);
                 self.plug.connect_with_audio_node(&self.gain).add_loc(loc!())?;
                 self.playing = false;
                 self.used_to_play = false;
-                None
             }
-
-            AppEvent::Resize => self.pattern
-                .init().add_loc(loc!())?.pipe(|_| None),
 
             AppEvent::RedrawEditorPlane => self.pattern
-                .force_redraw().pipe(|_| None),
+                .try_borrow_mut().to_js_result(loc!())?
+                .force_redraw(),
 
-            AppEvent::FocusPlane(e) => {
-                e.target_dyn_into::<Element>().to_js_result(loc!())?
-                    .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                self.pattern.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx)
-                    .add_loc(loc!())?
-            }
-
-            AppEvent::HoverPlane(e) => self.pattern
-                .handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())?,
-
-            AppEvent::KeyPress(e) | AppEvent::KeyRelease(e) => self.pattern
-                .handle_hover(self.pattern.last_event().map(|x| x + e), ctx).add_loc(loc!())?,
-
-            AppEvent::LeavePlane => self.pattern
-                .handle_hover(None, ctx).add_loc(loc!())?,
-
-            AppEvent::MasterGain(value) => self.gain.gain()
-                .set_value(**value).pipe(|_| None),
+            AppEvent::MasterGain(value) => self.gain
+                .gain().set_value(**value),
 
             AppEvent::Frame(_) => {
-                let to_emit = if self.playing {
-                    let mut ctx = Cow::Borrowed(ctx);
-                    let (to_emit, now) = if self.used_to_play {
-                        (None, (ctx.now - ctx.play_since).secs_to_beats(ctx.bps))
+                let mut pattern = self.pattern.try_borrow_mut().to_js_result(loc!())?;
+                if self.playing {
+                    let (ctx, now) = if self.used_to_play {
+                        (Cow::Borrowed(ctx), (ctx.now() - ctx.play_since()).secs_to_beats(ctx.bps()))
                     } else {
-                        ctx.to_mut().play_since = ctx.now;
                         self.used_to_play = true;
-                        self.pattern.force_redraw();
-                        (Some(AppEvent::AudioStarted(ctx.now)), r64![0.0])
+                        pattern.force_redraw();
+                        ctx.emit_event(AppEvent::AudioStarted(ctx.now()));
+                        (Cow::Owned(ctx.clone().set_play_since(ctx.now())), r64![0.0])
                     };
                     let n_due = self.pending.iter().position(|x| x.when() > now).unwrap_or(self.pending.len());
                     for event in self.pending.drain(..n_due).collect::<Vec<_>>() {
                         let id = event.target();
-                        let mut block = unsafe{self.pattern.get_unchecked_mut(id)};
+                        let mut block = unsafe{pattern.get_unchecked_mut(id)};
                         let mut due_now = vec![event];
 
                         while !due_now.is_empty() {
@@ -897,15 +889,13 @@ impl Sequencer {
                             }
                         }
                     }
-                    to_emit
-                } else {None};
-
-                if let x @Some(_) = to_emit {x} else {
-                    self.pattern.redraw(ctx).add_loc(loc!())?.map(|[m, a]| AppEvent::SetHint(m, a))
                 }
+                pattern.handle_event(event, ctx).add_loc(loc!())?
             }
 
-            _ => None
-        })
+            e => self.pattern().try_borrow_mut().to_js_result(loc!())?
+                .handle_event(e, ctx).add_loc(loc!())?
+        }
+        Ok(())
     }
 }

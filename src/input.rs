@@ -32,21 +32,21 @@ pub struct Buttons {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct CanvasEvent {
+pub struct Cursor {
     pub point: Point,
     buttons: Buttons
 }
 
-impl Deref for CanvasEvent {
+impl Deref for Cursor {
     type Target = Buttons;
     #[inline] fn deref(&self) -> &Self::Target {&self.buttons}
 }
 
-impl DerefMut for CanvasEvent {
+impl DerefMut for Cursor {
     #[inline] fn deref_mut(&mut self) -> &mut Self::Target {&mut self.buttons}
 }
 
-impl Add<&KeyboardEvent> for CanvasEvent {
+impl Add<&KeyboardEvent> for Cursor {
     type Output = Self;
     #[inline] fn add(mut self, rhs: &KeyboardEvent) -> Self::Output {
         self.shift = rhs.shift_key();
@@ -55,7 +55,7 @@ impl Add<&KeyboardEvent> for CanvasEvent {
     }
 }
 
-impl TryFrom<&MouseEvent> for CanvasEvent {
+impl TryFrom<&MouseEvent> for Cursor {
     type Error = JsValue;
     fn try_from(value: &MouseEvent) -> Result<Self, Self::Error> {
         let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result(loc!())?;
@@ -68,7 +68,7 @@ impl TryFrom<&MouseEvent> for CanvasEvent {
     }
 }
 
-impl TryFrom<&PointerEvent> for CanvasEvent {
+impl TryFrom<&PointerEvent> for Cursor {
     type Error = JsValue;
     fn try_from(value: &PointerEvent) -> Result<Self, Self::Error> {
         let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result(loc!())?;

@@ -4,7 +4,6 @@
 #![feature(const_slice_index)]
 #![feature(const_float_classify)]
 #![feature(array_windows)]
-#![feature(associated_type_defaults)]
 #![feature(const_range_bounds)]
 #![feature(is_sorted)]
 #![feature(iter_advance_by)]

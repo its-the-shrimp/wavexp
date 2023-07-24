@@ -16,11 +16,11 @@ use yew::{
     Context,
     Html,
     html,
-    AttrValue};
+    AttrValue, Callback};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, FromBeats},
-    visual::{HintHandler, SoundVisualiser, Graphable},
-    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, Pipe},
+    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats},
+    visual::{HintHandler, SoundVisualiser, GraphEditorCanvas},
+    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, ResultToJsResult, Point},
     input::{Button, Slider, Switch},
     loc,
     r64,
@@ -32,8 +32,8 @@ pub enum AppEvent {
     /// emitted every frame, i.e. roughly every 17 ms
     /// the field is the current time, but in milliseconds, unlike `AppContext::now`
     Frame(MSecs),
-    /// emitted by the selected sound bloock when its visual representation is expected to have
-    /// changed
+    /// emitted by the selected sound block when its visual representation is expected to
+    /// have been changed
     RedrawEditorPlane,
     /// emitted when the user switches tabs in the side editor
     SetTab(usize),
@@ -56,8 +56,6 @@ pub enum AppEvent {
     Select(Option<usize>),
     /// epliog version of `Select`
     AfterSelect(Option<usize>),
-    /// emitted when the user adds a sound block
-    Add(i32, Beats),
     /// emitted when the user deletes the selected sound block
     Remove,
     /// epilog version of `Remove`
@@ -80,31 +78,37 @@ pub enum AppEvent {
     MasterGain(R32),
     /// emitted when the global editor snap step has been changed
     SnapStep(R64),
-    /// emitted when the user focuses the main editor plane i.e. by holding left click
-    FocusPlane(PointerEvent),
-    /// emitted when the user moves the cursor across the main editor plane
-    HoverPlane(MouseEvent),
-    /// emitted when the user drags the cursor out of the main editor plane
-    LeavePlane,
     /// emitted when the user selects the type of sound block for the selected sound block
     SetBlockType(SoundType),
     /// epilog version of `SetBlockType`
     AfterSetBlockType(SoundType),
-    /// emitted when the user focuses the side editor plane i.e. by holding left click
-    FocusTab(PointerEvent),
-    /// emitted when the user moves the cursor across the side editor plane
-    HoverTab(MouseEvent),
+    /// emitted when the user focuses an editor plane i.e. by holding left click
+    /// the 1st field is the `GraphEditor::id` of the recipient
+    Focus(usize, PointerEvent),
+    /// emitted when the user moves the cursor across an editor plane
+    /// the 1st field is the `GraphEditor::id` of the recipient
+    Hover(usize, MouseEvent),
     /// emitted when the user presses any key on the keyboard
-    KeyPress(KeyboardEvent),
+    /// the 1st field is the `GraphEditor::id` of the recipient
+    KeyPress(usize, KeyboardEvent),
     /// emitted when the user releases any key on the keyboard
-    KeyRelease(KeyboardEvent),
-    /// emitted when the user drags the cursor out of the side editor plane
-    LeaveTab,
+    /// the 1st field is the `GraphEditor::id` of the recipient
+    KeyRelease(usize, KeyboardEvent),
+    /// emitted when the user drags the cursor out of an editor plane
+    /// the inner `usize` is the `GraphEditor::id` of the recipient
+    Enter(usize, MouseEvent),
+    /// emitted when the user drags the cursor out of an editor plane
+    /// the inner `usize` is the `GraphEditor::id` of the recipient
+    Leave(usize),
     /// emitted to set the hint for the user
     /// 1st is the main, shorter, hint, 2nd is the auxillary, longer, hint
     SetHint(Cow<'static, str>, Cow<'static, str>),
     /// similar to `SetHint` but gets the hint from an event's target
-    FetchHint(UiEvent)
+    FetchHint(UiEvent),
+    /// emiited when a cancelable action is done.
+    ActionDone(AppAction),
+    /// emitted when the user has press the key combination for cancelling an action
+    Undo(AppAction)
 }
 
 impl AppEvent {
@@ -127,6 +131,8 @@ impl AppEvent {
             | Self::StartPlay
             | Self::AfterRemove
             | Self::AfterSetBlockType(..)
+            | Self::ActionDone(..)
+            | Self::Undo(..)
             | Self::SetHint(..)
             | Self::FetchHint(..)
             | Self::RedrawEditorPlane
@@ -136,40 +142,70 @@ impl AppEvent {
             | Self::Sustain(..)
             | Self::Release(..)
             | Self::Resize 
-            | Self::Add(..) 
             | Self::Volume(..) 
             | Self::Bpm(..) 
             | Self::MasterGain(..) 
             | Self::SnapStep(..) 
-            | Self::FocusPlane(..) 
-            | Self::LeavePlane 
-            | Self::HoverPlane(..) 
-            | Self::FocusTab(..) 
+            | Self::Hover(..) 
+            | Self::Focus(..) 
             | Self::KeyPress(..)
             | Self::KeyRelease(..)
-            | Self::HoverTab(..) 
-            | Self::LeaveTab => None
+            | Self::Enter(..)
+            | Self::Leave(..) => None
         }
     }
+}
+
+/// action reversible by Ctrl-Z
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppAction {
+    MovePoint{editor_id: usize, point_id: usize, src: [R64; 2], dst: [R64; 2], meta: bool},
+    MoveSelection{editor_id: usize, src: [R64; 2], dst: [R64; 2], meta: bool},
+    ChangeSelection{editor_id: usize, ids: Box<[usize]>, origin: [R64; 2], size: [R64; 2]},
+    ZoomPlane{editor_id: usize, from_offset: Point, from_scale: [R64; 2], to_offset: Point, to_scale: [R64; 2]},
 }
 
 /// carries all the app-wide settings that are passed to all the event receivers
 #[derive(Debug, Clone)]
 pub struct AppContext {
-    pub bps: Beats,
-    pub play_since: Secs,
-    pub now: Secs,
-    pub audio_ctx: Rc<AudioContext>,
-    pub snap_step: R64,
-    pub selected_tab: usize
+    bps: Beats,
+    play_since: Secs,
+    now: Secs,
+    audio_ctx: Rc<AudioContext>,
+    snap_step: R64,
+    selected_tab: usize,
+    event_emitter: Callback<AppEvent>
 }
 
 impl AppContext {
-    #[inline] fn new() -> JsResult<Self> {
-        Ok(Self{bps: r64![2.0], play_since: Secs::NEG_INFINITY, now: r64![0.0],
+    #[inline] pub fn new(event_emitter: Callback<AppEvent>) -> JsResult<Self> {
+        Ok(Self{bps: r64![2.0],
+            play_since: Secs::NEG_INFINITY,
+            now: r64![0.0],
             audio_ctx: Rc::new(AudioContext::new().add_loc(loc!())?),
-            snap_step: r64![1.0], selected_tab: 0})
+            snap_step: r64![1.0],
+            selected_tab: 0,
+            event_emitter})
     }
+
+    #[inline] pub fn bps(&self) -> R64 {self.bps}
+    #[inline] pub fn play_since(&self) -> R64 {self.play_since}
+    #[inline] pub fn now(&self) -> R64 {self.now}
+    #[inline] pub fn audio_ctx(&self) -> &AudioContext {&self.audio_ctx}
+    #[inline] pub fn snap_step(&self) -> R64 {self.snap_step}
+    #[inline] pub fn selected_tab(&self) -> usize {self.selected_tab}
+
+    #[inline] pub fn set_play_since(mut self, value: Secs) -> Self {
+        self.play_since = value;
+        self
+    }
+
+    #[inline] pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
+
+    #[inline] pub fn register_action(&mut self, action: AppAction) {
+        todo!()
+    }
+
 }
 
 impl AppContext {
@@ -210,7 +246,7 @@ impl Component for App {
 
     fn create(ctx: &Context<Self>) -> Self {
         let cb = ctx.link().callback(AppEvent::Frame);
-        let ctx = AppContext::new().unwrap_throw(loc!());
+        let ctx = AppContext::new(ctx.link().callback(|x| x)).unwrap_throw(loc!());
         let sound_visualiser = SoundVisualiser::new(&ctx.audio_ctx).unwrap_throw(loc!());
 
         let res = Self{epilog: None,
@@ -229,16 +265,40 @@ impl Component for App {
             match msg {
                 AppEvent::Frame(_) =>
                     _ = window().request_animation_frame(&self.frame_emitter).add_loc(loc!())?,
+
                 AppEvent::Select(id) =>
                     self.selected_id = id,
-                // TODO: something crashes here
-                AppEvent::Remove => self.selected_id.take().to_js_result(loc!())?
-                    .pipe(|i| *unsafe{self.sequencer.pattern().selection().get_unchecked(i)})
-                    .pipe(|i| self.sequencer.pattern_mut().remove_points(&[i])).add_loc(loc!())?,
+
+                AppEvent::Remove => {
+                    let mut pattern = self.sequencer.pattern().try_borrow_mut().to_js_result(loc!())?;
+                    let id = self.selected_id.take().to_js_result(loc!())?;
+                    let id = *unsafe{pattern.selection().get_unchecked(id)};
+                    pattern.remove_points(&[id]).add_loc(loc!())?
+                }
+
+                AppEvent::Enter(id, _) => {
+                    let window = window();
+                    let cb = ctx.link().callback(move |e| AppEvent::KeyPress(id, e));
+                    let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
+                        .into_js_value().unchecked_into();
+                    window.set_onkeydown(Some(&cb));
+                    let cb = ctx.link().callback(move |e| AppEvent::KeyRelease(id, e));
+                    let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
+                        .into_js_value().unchecked_into();
+                    window.set_onkeyup(Some(&cb));
+                }
+
+                AppEvent::Leave(_) => {
+                    let window = window();
+                    window.set_onkeydown(None);
+                    window.set_onkeyup(None);
+                }
+
                 _ => ()
             }
+
             self.epilog = msg.epilog();
-            self.forward_event(ctx, msg).add_loc(loc!())?;
+            self.forward_event(msg).add_loc(loc!())?;
             return self.epilog.is_some()
         }.report_err(loc!());
         false
@@ -246,7 +306,8 @@ impl Component for App {
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         // TODO: add switching between selected blocks
-        let block = self.selected_id.map(|i| unsafe{self.sequencer.pattern().get_unchecked_aware(i)});
+        let pattern = self.sequencer.pattern().try_borrow().to_js_result(loc!()).unwrap_throw(loc!());
+        let block = self.selected_id.map(|i| unsafe{pattern.get_unchecked_aware(i)});
 
         let setter = ctx.link().callback(|x| x);
         let render_tab_info = |info: &TabInfo, tab_id: usize, desc: AttrValue| -> Html {
@@ -304,11 +365,9 @@ impl Component for App {
                         </div>
                     }
                 </div>
-                <canvas ref={self.sequencer.canvas().clone()} id="plane"
-                onpointerdown={setter.reform(AppEvent::FocusPlane)}
-                onpointerup={setter.reform(|e| AppEvent::HoverPlane(MouseEvent::from(e)))}
-                onpointermove={setter.reform(|e| AppEvent::HoverPlane(MouseEvent::from(e)))}
-                onpointerout={setter.reform(|_| AppEvent::LeavePlane)}/>
+                <GraphEditorCanvas<SoundBlock>
+                editor={self.sequencer.pattern()}
+                emitter={setter.clone()}/>
             </div>
             <div id="io-panel" data-main-hint="Editor plane settings">
                 <div id="plane-settings" data-main-hint="Editor plane settings">
@@ -356,7 +415,7 @@ impl Component for App {
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         if let Some(event) = self.epilog.take() {
-            _ = self.forward_event(ctx, event).report_err(loc!());
+            _ = self.forward_event(event).report_err(loc!());
         }
 
         if !first_render {return}
@@ -372,35 +431,23 @@ impl Component for App {
             .into_js_value().unchecked_into();
         window.set_onpointerover(Some(&cb));
 
-        let cb = ctx.link().callback(AppEvent::KeyPress);
-        let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
-            .into_js_value().unchecked_into();
-        window.set_onkeydown(Some(&cb));
-
-        let cb = ctx.link().callback(AppEvent::KeyRelease);
-        let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
-            .into_js_value().unchecked_into();
-        window.set_onkeyup(Some(&cb));
-
         ctx.link().send_message(AppEvent::Resize);
     }
 }
 
 impl App {
-    fn forward_event(&mut self, ctx: &Context<Self>, event: AppEvent) -> JsResult<()> {
+    fn forward_event(&mut self, event: AppEvent) -> JsResult<()> {
         self.ctx.handle_event(&event);
         self.hint_handler.handle_event(&event, &self.ctx).add_loc(loc!())?;
         self.sound_visualiser.handle_event(&event, &self.ctx).add_loc(loc!())?;
-        if let Some(next) = self.sequencer.handle_event(&event, &self.ctx).add_loc(loc!())? {
-            ctx.link().send_message(next);
-        }
-        if let Some(&id) = self.sequencer.pattern().selection().first() {
-            let mut block = unsafe{self.sequencer.pattern_mut().get_unchecked_mut(id)};
+        self.sequencer.handle_event(&event, &mut self.ctx).add_loc(loc!())?;
+
+        let mut pattern = self.sequencer.pattern().try_borrow_mut().to_js_result(loc!())?;
+        if let Some(&id) = pattern.selection().first() {
+            let mut block = unsafe{pattern.get_unchecked_mut(id)};
             let (prev, bps) = (self.ctx.play_since, self.ctx.bps);
             self.ctx.play_since += block.offset.to_secs(bps);
-            if let Some(next) = block.inner().handle_event(&event, &self.ctx).add_loc(loc!())? {
-                ctx.link().send_message(next);
-            }
+            block.inner().handle_event(&event, &mut self.ctx).add_loc(loc!())?;
             self.ctx.play_since = prev;
         }
         Ok(())
