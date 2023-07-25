@@ -1,6 +1,6 @@
 use std::{
     ptr,
-    mem::{take, transmute_copy, MaybeUninit, forget, transmute},
+    mem::{take, transmute_copy, MaybeUninit, forget},
     fmt::{self, Debug, Formatter, Display},
     ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Rem, RemAssign, Range},
     iter::{successors, Sum},
@@ -665,6 +665,7 @@ impl<'a, T: 'a + Copy> IterMutWithCtx<'a, T> {
 }
 
 pub trait SliceExt<T> {
+    fn to_box(&self) -> Box<Self> where T: Clone;
     fn get_saturating(&self, id: usize) -> &T;
     fn get_saturating_mut(&mut self, id: usize) -> &mut T;
     fn get_wrapping(&self, id: usize) -> &T;
@@ -695,6 +696,8 @@ pub trait SliceExt<T> {
 }
 
 impl<T> SliceExt<T> for [T] {
+    #[inline] fn to_box(&self) -> Box<Self> where T: Clone {self.into()}
+
     #[inline] fn get_saturating(&self, id: usize) -> &T {
         unsafe{self.get_unchecked(id.min(self.len() - 1))}
     }

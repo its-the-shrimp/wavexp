@@ -6,7 +6,7 @@ use std::{
     fmt::Debug,
     rc::Rc,
     cmp::{min, Ordering},
-    cell::{LazyCell, Cell}, any::Any, borrow::Cow};
+    cell::{LazyCell, Cell}};
 use web_sys::{
     HtmlCanvasElement,
     AnalyserNode,
@@ -309,14 +309,19 @@ pub trait Graphable: Sized + Ord {
     ) {} 
     /// Handle the editor space being clicked, i.e. pressed & released.
     /// The current selection will be available in the `editor` itself.
+    /// If `old_selection` is `None`, it means that it didn't change.
+    /// If `old_selection` is `Some`, it doesn't mean that `editor.selection != old_selection`,
+    /// it just means that selection was changed.
+    /// Returns the action to register after the click; if `None` is returned, the default action
+    /// will be chosen by the graph editor itself.
     #[allow(unused_variables)] #[inline] fn on_click(
         editor: &mut GraphEditor<Self>,
         ctx: &AppContext,
         cursor: Cursor,
         pressed_at:    impl Deref<Target = [R64; 2]>,
         released_at:   impl Deref<Target = [R64; 2]>,
-        old_selection: Cow<'_, [usize]>
-    ) {}
+        old_selection: Option<&[usize]>
+    ) -> Option<AppAction> {None}
     /// Handle cursor moving across the editor plane (not across a selection or a point).
     /// `loc` is in user coordinates; the location in canvas coordinates is in `cursor`.
     /// `first` signifies whether this call is the first consecutive one.
@@ -388,9 +393,9 @@ type ConfinedAlignedUserPoint = [R64; 2];
 enum Focus {
     #[default] None,
     Zoom{init_offset: Point, pivot: OffsetCanvasPoint, init_scale: [R64; 2]},
-    Plane{origin: ConfinedAlignedUserPoint, press_time: Secs},
-    Point{id: usize, last_loc: ConfinedAlignedUserPoint, origin: ConfinedAlignedUserPoint},
-    Selection{origin: ConfinedAlignedUserPoint, end: ConfinedAlignedUserPoint}
+    Plane{origin: ConfinedAlignedUserPoint, init_offset: Point, press_time: Secs},
+    Point{id: usize, last_loc: ConfinedAlignedUserPoint, origin: ConfinedAlignedUserPoint, meta: bool},
+    Selection{origin: ConfinedAlignedUserPoint, end: ConfinedAlignedUserPoint, meta: bool}
 }
 
 static GRAPH_EDITOR_COUNT: WasmCell<Cell<usize>> = WasmCell::new(Cell::new(AnyGraphEditor::INVALID_ID + 1));
@@ -420,9 +425,9 @@ impl AnyGraphEditor {
     const FG_STYLE: &str = "#0069E1";
     const LINE_WIDTH: f64 = 3.0;
     /// an ID that's guaranteed to never be used by any graph editor
-    const INVALID_ID: usize = 0;
+    pub const INVALID_ID: usize = 0;
 
-    #[inline] fn id(&self) -> usize {self.id}
+    #[inline] pub fn id(&self) -> usize {self.id}
 
     #[inline] pub fn last_cursor(&self) -> Option<Cursor> {
         matches!(self.focus, Focus::None).not().then_some(self.last_cursor)
@@ -450,11 +455,14 @@ impl<T: Graphable> DerefMut for GraphEditor<T> {
 
 impl<T: Graphable> GraphEditor<T> {
     #[inline] pub fn new(data: Vec<T>) -> Self {
-        Self{data,
+        let res = Self{data,
             inner: AnyGraphEditor{
                 scale: [T::SCALE_X_BOUND, T::SCALE_Y_BOUND]
                     .map(|x| x.to_pair().mul(&[0.75, 0.25]).sum()),
-                ..default()}}
+                id: GRAPH_EDITOR_COUNT.get(),
+                ..default()}};
+        GRAPH_EDITOR_COUNT.set(res.id + 1);
+        res
     }
 
     #[inline] pub fn len(&self) -> usize {self.data.len()}
@@ -560,19 +568,19 @@ impl<T: Graphable> GraphEditor<T> {
     }
 
     #[inline] fn set_plane_focus(&mut self, ctx: &AppContext, cursor: Cursor, loc: impl Deref<Target = [R64; 2]>) {
-        self.focus = Focus::Plane{origin: default(), press_time: default()};
+        self.focus = Focus::Plane{origin: default(), init_offset: default(), press_time: default()};
         self.changed_focus = true;
         T::on_plane_hover(self, ctx, cursor, loc, true);
     }
 
     #[inline] fn set_point_focus(&mut self, ctx: &AppContext, cursor: Cursor, id: usize) {
-        self.focus = Focus::Point{id, last_loc: default(), origin: default()};
+        self.focus = Focus::Point{id, last_loc: default(), origin: default(), meta: false};
         self.changed_focus = true;
         T::on_point_hover(self, ctx, cursor, id, true)
     }
 
     #[inline] fn set_selection_focus(&mut self, ctx: &AppContext, cursor: Cursor) {
-        self.focus = Focus::Selection{origin: default(), end: default()};
+        self.focus = Focus::Selection{origin: default(), end: default(), meta: false};
         self.changed_focus = true;
         T::on_selection_hover(self, ctx, cursor, true)
     }
@@ -618,29 +626,28 @@ impl<T: Graphable> GraphEditor<T> {
                 }
             } else {
                 if self.inner.last_cursor.left {
-                    ctx.register_action(AppAction::ZoomPlane{
+                    ctx.register_action(AppAction::DragPlane{
                         editor_id: self.inner.id,
-                        from_offset: *init_offset, from_scale: *init_scale,
-                        to_offset: self.inner.offset, to_scale: self.inner.scale})
+                        offset: *init_offset, scale: *init_scale})
                 }
                 if cursor.shift {
                     *pivot = cursor.point;
-                    self.inner.redraw = true;
+                    self.redraw = true;
                 } else {
                     self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined));
                 }
             }
 
-            Focus::Plane{origin, press_time} => match *cursor {
-                Buttons{shift: true, ..} => self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined)),
+            Focus::Plane{origin, init_offset, press_time} => match *cursor {
+                Buttons{shift: true, left: false, ..} =>
+                    self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined)),
 
                 Buttons{left: false, meta, ..} => if self.inner.last_cursor.left {
                     let cur_loc = *cursor_point_user;
                     if self.inner.last_cursor.meta {
-
                         let origin = *origin;
                         let end = *cursor_point_user_aligned_confined;
-                        let old_selection = self.inner.selection.clone().into_boxed_slice();
+                        let old_selection = self.selection.to_box();
                         let area = [origin, end].flipped().map(|x| (x[0] .. x[1]).ordered());
 
                         self.inner.selection_origin = area.clone().map(|x| x.start);
@@ -648,46 +655,48 @@ impl<T: Graphable> GraphEditor<T> {
                         self.inner.selection = self.data.iter().enumerate()
                             .filter_map(|(id, x)| x.loc().array_check_in(&area).map(|_| id))
                             .collect();
-                        T::on_click(self, ctx, cursor,
-                            &origin, &end,
-                            Cow::Borrowed(&old_selection));
-
-                        ctx.register_action(AppAction::ChangeSelection{
-                            editor_id: self.inner.id,
-                            ids: old_selection, 
-                            origin: self.inner.selection_origin,
-                            size: self.inner.selection_size});
-
                         if let Some(p) = self.point_by_pos(cur_loc) {
                             self.set_point_focus(ctx, cursor, p.index());
                         } else {
                             self.set_plane_focus(ctx, cursor, &end);
                         }
+
+                        let action = T::on_click(self, ctx, cursor,
+                            &origin, &end,
+                            Some(&old_selection));
+                        ctx.register_action(action.unwrap_or_else(|| AppAction::SetSelection{
+                            editor_id: self.id,
+                            ids: old_selection, src: self.selection_origin, size: self.selection_size}))
+                    } else if *ctx.now() - **press_time > 0.33 {
+                        let offset = *init_offset;
+                        let action = T::on_click(self, ctx, cursor,
+                            Alias(&cursor_point_user_aligned_confined), Alias(&cursor_point_user_aligned_confined),
+                            None);
+
+                        ctx.register_action(action.unwrap_or(AppAction::DragPlane{
+                            editor_id: self.inner.id,
+                            offset, scale: self.inner.scale}));
                     } else {
-                        let ids = self.inner.selection.clone();
-                        if *ctx.now() - **press_time > 0.33 {
-                            T::on_click(self, ctx, cursor,
-                                Alias(&cursor_point_user_aligned_confined), Alias(&cursor_point_user_aligned_confined),
-                                Cow::Owned(ids))
-                        } else {
-                            self.inner.selection.clear();
-                            let size = take(&mut self.inner.selection_size);
-                            T::on_click(self, ctx, cursor,
-                                Alias(&cursor_point_user_aligned_confined), Alias(&cursor_point_user_aligned_confined),
-                                Cow::Borrowed(&ids));
-                            ctx.register_action(AppAction::ChangeSelection{
-                                editor_id: self.inner.id,
-                                ids: ids.into_boxed_slice(),
-                                size,
-                                origin: self.inner.selection_origin})
-                        }
+                        let offset = *init_offset;
+                        let ids = take(&mut self.selection).into_boxed_slice();
+                        let size = take(&mut self.selection_size);
+                        let action = T::on_click(self, ctx, cursor,
+                            Alias(&cursor_point_user_aligned_confined), Alias(&cursor_point_user_aligned_confined),
+                            Some(&ids));
+
+                        ctx.register_action(action.unwrap_or(AppAction::DragPlane{
+                            editor_id: self.inner.id,
+                            offset, scale: self.inner.scale}));
+                        ctx.register_action(AppAction::SetSelection{
+                            editor_id: self.id,
+                            ids, size, src: self.selection_origin})
                     }
                 } else if self.point_in_selection(*cursor_point_user) {
                     self.set_selection_focus(ctx, cursor);
                 } else if let Some(p) = self.point_by_pos(*cursor_point_user) {
                     self.set_point_focus(ctx, cursor, p.index());
                 } else {
-                    self.inner.redraw |= self.inner.last_cursor.meta | meta;
+                    self.redraw |= self.last_cursor.meta | meta;
                 }
 
                 Buttons{left: true, meta, ..} => if meta {
@@ -697,6 +706,7 @@ impl<T: Graphable> GraphEditor<T> {
                 } else {
                     if !self.inner.last_cursor.left {
                         *press_time = ctx.now();
+                        *init_offset = self.inner.offset;
                     } else {self.inner.redraw = true}
 
                     if !T::OFFSET_X_BOUND.is_empty() {
@@ -710,53 +720,53 @@ impl<T: Graphable> GraphEditor<T> {
                 }
             }
 
-            Focus::Point{id, last_loc, origin} => if cursor.shift {
-                self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined));
-            } else if cursor.left {
+            Focus::Point{id, last_loc, origin, meta} => if cursor.left {
                 let delta = if !self.inner.last_cursor.left {
                     *last_loc = *cursor_point_user_aligned_confined;
                     *origin = *last_loc;
+                    *meta = cursor.meta;
                     default()
                 } else {
                     let new = *cursor_point_user_aligned_confined;
                     new.sub(&replace(last_loc, new))
                 };
                 if *delta.sum::<R64>() != 0.0 {
-                    self.inner.redraw = true;
-                    T::move_point(Ok(unsafe{self.data.get_unchecked_mut(*id)}), delta, cursor.meta);
+                    T::move_point(Ok(unsafe{self.data.get_unchecked_mut(*id)}), delta, *meta);
                     unsafe{self.data.reorder_unchecked(*id)}.apply(from_mut(id));
+                    self.redraw = true;
                     T::on_move(self, ctx, cursor, delta)
                 }
-            } else {
-                let p = unsafe{self.data.get_unchecked_aware(*id)};
-                match (self.inner.last_cursor.left, p.in_hitbox(*cursor_point_user)) {
-                    (false, false) => self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined)),
-                    (false, true) => (),
-                    (true, false) => {
-                        let origin = *origin;
-                        let old_selection = take(&mut self.inner.selection);
-                        self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined));
-                        T::on_click(self, ctx, cursor,
-                            &origin, Alias(&cursor_point_user_aligned_confined),
-                            Cow::Owned(old_selection))
-                    }
-                    (true, true) => {
-                        let origin = *origin;
-                        let old_selection = replace(&mut self.inner.selection, vec![*id]);
+            } else if self.inner.last_cursor.left {
+                    let (meta, src, point_id) = (*meta, *origin, *id);
+                    let prev_selection = if unsafe{self.get_unchecked(point_id)}.in_hitbox(*cursor_point_user) {
                         self.set_selection_focus(ctx, cursor);
-                        T::on_click(self, ctx, cursor,
-                            &origin, Alias(&cursor_point_user_aligned_confined),
-                            Cow::Owned(old_selection))
-                    }
-                }
+                        replace(&mut self.selection, vec![point_id])
+                    } else {
+                        self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined));
+                        take(&mut self.selection)
+                    }.into_boxed_slice();
+                    let action = T::on_click(self, ctx, cursor,
+                        &src, Alias(&cursor_point_user_aligned_confined),
+                        Some(&prev_selection));
+
+                    ctx.register_action(action.unwrap_or_else(|| AppAction::DragPoint{
+                        editor_id: self.id, point_id,
+                        delta: cursor_point_user_aligned_confined.sub(&src),
+                        meta}));
+                    ctx.register_action(AppAction::SetSelection{
+                        editor_id: self.id,
+                        ids: prev_selection, src, size: take(&mut self.selection_size)});
+            } else if cursor.shift {
+                self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))
+            } else if !unsafe{self.data.get_unchecked(*id)}.in_hitbox(*cursor_point_user) {
+                self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))
             }
 
-            Focus::Selection{origin, end} => if cursor.shift {
-                self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined));
-            } else if cursor.left {
+            Focus::Selection{origin, end, meta} => if cursor.left {
                 let delta = if !self.inner.last_cursor.left {
                     *end = *cursor_point_user_aligned_confined;
                     *origin = *end;
+                    *meta = cursor.meta;
                     default()
                 } else {
                     let new = *cursor_point_user_aligned_confined;
@@ -765,33 +775,39 @@ impl<T: Graphable> GraphEditor<T> {
                 if *delta.sum::<R64>() != 0.0 {
                     self.inner.redraw = true;
                     for (ids, id) in self.inner.selection.iter_mut_with_ctx() {
-                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, cursor.meta);
+                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, *meta);
                         unsafe{self.data.reorder_unchecked(id)}.apply(ids);
                     }
-                    T::move_point(Err(&mut self.inner.selection_origin), delta, cursor.meta);
-                    self.inner.selection.sort_unstable();
+                    T::move_point(Err(&mut self.inner.selection_origin), delta, *meta);
+                    self.selection.sort_unstable();
                     T::on_move(self, ctx, cursor, delta)
                 }
             } else if self.inner.last_cursor.left {
-                let selection = self.inner.selection.clone();
-                let origin = take(origin);
+                let (meta, src) = (*meta, take(origin));
                 *end = default();
-                T::on_click(self, ctx, cursor,
-                    &origin, Alias(&cursor_point_user_aligned_confined),
-                    Cow::Owned(selection))
+                let action = T::on_click(self, ctx, cursor,
+                    &src, Alias(&cursor_point_user_aligned_confined),
+                    None);
+
+                ctx.register_action(action.unwrap_or_else(|| AppAction::DragSelection{
+                    editor_id: self.id,
+                    delta: cursor_point_user_aligned_confined.sub(&src),
+                    meta}))
+            } else if cursor.shift {
+                self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))
             } else if !self.point_in_selection(*cursor_point_user) {
                 if let Some(p) = self.point_by_pos(*cursor_point_user) {
-                    self.set_point_focus(ctx, cursor, p.index());
+                    self.set_point_focus(ctx, cursor, p.index())
                 } else {
-                    self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined));
+                    self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))
                 }
             }
         };
 
-        if self.inner.changed_focus {
-            self.inner.changed_focus = false
+        if self.changed_focus {
+            self.changed_focus = false
         } else {
-            match self.inner.focus {
+            match self.focus {
                 Focus::None => (),
                 Focus::Zoom{..} | Focus::Plane{..} =>
                     T::on_plane_hover(self, ctx, cursor, cursor_point_user_aligned_confined, false),
@@ -802,8 +818,8 @@ impl<T: Graphable> GraphEditor<T> {
             }
         }
 
-        let old_buttons = *replace(&mut self.inner.last_cursor, cursor);
-        self.inner.redraw |= *cursor != old_buttons;
+        let old_buttons = *replace(&mut self.last_cursor, cursor);
+        self.redraw |= *cursor != old_buttons;
         Ok(())
     }
 
@@ -847,6 +863,37 @@ impl<T: Graphable> GraphEditor<T> {
                 self.init().add_loc(loc!())?,
 
             AppEvent::AudioStarted(_) => self.redraw = true,
+
+            AppEvent::Undo(action) => match *action {
+                AppAction::DragPlane{editor_id, offset, scale} => if editor_id == self.id {
+                    self.offset = offset;
+                    self.scale = scale;
+                }
+
+                AppAction::DragPoint{editor_id, point_id, mut delta, meta} => if editor_id == self.id {
+                    delta = delta.map(|x| -x);
+                    T::move_point(Ok(unsafe{self.data.get_unchecked_mut(point_id)}), delta, meta)
+                }
+
+                AppAction::DragSelection{editor_id, mut delta, meta} => if editor_id == self.id {
+                    delta = delta.map(|x| -x);
+                    for &id in self.inner.selection.iter() {
+                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, meta);
+                    }
+                    T::move_point(Err(&mut self.selection_origin), delta, meta)
+                }
+
+                AppAction::SetSelection{editor_id, ref ids, src, size} => if editor_id == self.id {
+                    // TODO: introduce ability to consume events to remove this `clone()`
+                    self.selection = ids.to_vec();
+                    self.selection_origin = src;
+                    self.selection_size = size;
+                }
+
+                AppAction::AddPoint{editor_id, point_id} => if editor_id == self.id {
+                    self.remove_points(&[point_id]).add_loc(loc!())?;
+                }
+            }
 
             AppEvent::Frame(_) if self.redraw => {
                 let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;

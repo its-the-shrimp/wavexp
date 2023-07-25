@@ -1,9 +1,9 @@
 use std::{
-    ops::{Add, Sub, Range, AddAssign, SubAssign, Deref},
+    ops::{Add, Sub, Range, AddAssign, SubAssign, Deref, Not},
     fmt::{self, Display, Formatter, Debug},
     cmp::Ordering,
     rc::Rc,
-    borrow::Cow, cell::RefCell};
+    borrow::Cow, cell::{RefCell, LazyCell}};
 use js_sys::Math::random;
 use web_sys::{
     AudioNode,
@@ -25,10 +25,10 @@ use crate::{
         LooseEq, OptionExt, Pipe, document, VecExt, js_error, Take, default, ResultToJsResult, report_err},
     input::{Slider, Button, Buttons, Cursor},
     visual::{GraphEditor, Graphable, GraphEditorCanvas},
-    global::{AppContext, AppEvent},
+    global::{AppContext, AppEvent, AppAction},
     loc,
     r32,
-    r64, js_log
+    r64
 };
 
 pub type MSecs = R64;
@@ -257,18 +257,21 @@ impl Graphable for NoteBlock {
         cursor: Cursor,
         pressed_at:    impl Deref<Target = [R64; 2]>,
         released_at:   impl Deref<Target = [R64; 2]>,
-        mut old_selection: Cow<'_, [usize]>
-    ) {
-        if cursor.meta && editor.selection().is_empty() && old_selection.is_empty() && *pressed_at == *released_at {
+        old_selection: Option<&[usize]>
+    ) -> Option<AppAction> {
+        if cursor.meta && editor.selection().is_empty() && old_selection.map_or(true, |x| x.is_empty()) && *pressed_at == *released_at {
             let [offset, y] = *released_at;
-            editor.add_point(Self{offset, value: Note::from_index(y.into()).recip(), len: r64![1.0]});
-            ctx.emit_event(AppEvent::RedrawEditorPlane)
+            let point_id = editor.add_point(Self{offset, value: Note::from_index(y.into()).recip(), len: r64![1.0]});
+            ctx.emit_event(AppEvent::RedrawEditorPlane);
+            Some(AppAction::AddPoint{editor_id: editor.id(), point_id})
         } else {
-            old_selection.to_mut().retain(|i| *unsafe{editor.get_unchecked(*i)}.len > 0.0);
-            if !old_selection.is_empty() {
-                _ = editor.remove_points(&old_selection).report_err(loc!());
+            let mut sel = editor.selection().to_owned();
+            sel.retain(|i| *unsafe{editor.get_unchecked(*i)}.len > 0.0);
+            if !sel.is_empty() {
+                _ = editor.remove_points(&sel).report_err(loc!());
                 ctx.emit_event(AppEvent::RedrawEditorPlane)
             }
+            None
         }
     }
 
@@ -668,16 +671,19 @@ impl Graphable for SoundBlock {
         cursor: Cursor,
         pressed_at:    impl Deref<Target = [R64; 2]>,
         released_at:   impl Deref<Target = [R64; 2]>,
-        old_selection: Cow<'_, [usize]>
-    ) {
-        let new_len = || editor.selection().len();
-        if cursor.meta && new_len() == 0 && old_selection.is_empty() && *pressed_at == *released_at {
+        old_selection: Option<&[usize]>
+    ) -> Option<AppAction> {
+        let sel_is_empty = LazyCell::new(|| editor.selection().is_empty());
+        if cursor.meta && *sel_is_empty && old_selection.map_or(true, |x| x.is_empty()) && *pressed_at == *released_at {
             let [offset, y] = *released_at;
-            editor.add_point(SoundBlock { sound: default(), layer: y.into(), offset});
+            let point_id = editor.add_point(SoundBlock{sound: default(), layer: y.into(), offset});
+            Some(AppAction::AddPoint{editor_id: editor.id(), point_id})
         } else {
-            ctx.emit_event(AppEvent::Select((new_len() > 0).then_some(0)));
+            ctx.emit_event(AppEvent::Select(sel_is_empty.not().then_some(0)));
+            None
         }
     }
+
     #[inline] fn on_plane_hover(
         editor: &mut GraphEditor<Self>,
         ctx: &AppContext,

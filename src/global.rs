@@ -19,12 +19,12 @@ use yew::{
     AttrValue, Callback};
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats},
-    visual::{HintHandler, SoundVisualiser, GraphEditorCanvas},
-    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, ResultToJsResult, Point},
+    visual::{HintHandler, SoundVisualiser, GraphEditorCanvas, AnyGraphEditor},
+    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, ResultToJsResult, Point, Tee},
     input::{Button, Slider, Switch},
     loc,
     r64,
-    js_try};
+    js_try, js_log};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, PartialEq, Clone)]
@@ -105,8 +105,6 @@ pub enum AppEvent {
     SetHint(Cow<'static, str>, Cow<'static, str>),
     /// similar to `SetHint` but gets the hint from an event's target
     FetchHint(UiEvent),
-    /// emiited when a cancelable action is done.
-    ActionDone(AppAction),
     /// emitted when the user has press the key combination for cancelling an action
     Undo(AppAction)
 }
@@ -131,7 +129,6 @@ impl AppEvent {
             | Self::StartPlay
             | Self::AfterRemove
             | Self::AfterSetBlockType(..)
-            | Self::ActionDone(..)
             | Self::Undo(..)
             | Self::SetHint(..)
             | Self::FetchHint(..)
@@ -159,10 +156,17 @@ impl AppEvent {
 /// action reversible by Ctrl-Z
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
-    MovePoint{editor_id: usize, point_id: usize, src: [R64; 2], dst: [R64; 2], meta: bool},
-    MoveSelection{editor_id: usize, src: [R64; 2], dst: [R64; 2], meta: bool},
-    ChangeSelection{editor_id: usize, ids: Box<[usize]>, origin: [R64; 2], size: [R64; 2]},
-    ZoomPlane{editor_id: usize, from_offset: Point, from_scale: [R64; 2], to_offset: Point, to_scale: [R64; 2]},
+    DragPlane{editor_id: usize,
+        offset: Point, scale: [R64; 2]},
+    DragPoint{editor_id: usize, point_id: usize,
+        delta: [R64; 2],
+        meta: bool},
+    DragSelection{editor_id: usize,
+        delta: [R64; 2],
+        meta: bool},
+    SetSelection{editor_id: usize,
+        ids: Box<[usize]>, src: [R64; 2], size: [R64; 2]},
+    AddPoint{editor_id: usize, point_id: usize}
 }
 
 /// carries all the app-wide settings that are passed to all the event receivers
@@ -174,7 +178,8 @@ pub struct AppContext {
     audio_ctx: Rc<AudioContext>,
     snap_step: R64,
     selected_tab: usize,
-    event_emitter: Callback<AppEvent>
+    event_emitter: Callback<AppEvent>,
+    actions: Vec<AppAction>
 }
 
 impl AppContext {
@@ -185,6 +190,7 @@ impl AppContext {
             audio_ctx: Rc::new(AudioContext::new().add_loc(loc!())?),
             snap_step: r64![1.0],
             selected_tab: 0,
+            actions: vec![],
             event_emitter})
     }
 
@@ -195,6 +201,8 @@ impl AppContext {
     #[inline] pub fn snap_step(&self) -> R64 {self.snap_step}
     #[inline] pub fn selected_tab(&self) -> usize {self.selected_tab}
 
+    /// properties cannot be modified through a mutable reference, this is done to prevent
+    /// components from modifying global context while handling an event
     #[inline] pub fn set_play_since(mut self, value: Secs) -> Self {
         self.play_since = value;
         self
@@ -202,13 +210,8 @@ impl AppContext {
 
     #[inline] pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
 
-    #[inline] pub fn register_action(&mut self, action: AppAction) {
-        todo!()
-    }
+    #[inline] pub fn register_action(&mut self, action: AppAction) {self.actions.push(action)}
 
-}
-
-impl AppContext {
     pub fn handle_event(&mut self, event: &AppEvent) {
         match event {
             AppEvent::Bpm(bpm) =>
@@ -225,6 +228,9 @@ impl AppContext {
                 self.selected_tab = 0,
             AppEvent::SetTab(id) =>
                 self.selected_tab = *id,
+            AppEvent::KeyPress(_, e) if &e.code() == "KeyZ" && e.meta_key() && !e.repeat() =>
+                _ = self.actions.pop().map(|a|
+                    self.event_emitter.emit(AppEvent::Undo(a))),
             _ => ()
         }
     }
@@ -290,10 +296,18 @@ impl Component for App {
 
                 AppEvent::Leave(_) => {
                     let window = window();
-                    window.set_onkeydown(None);
-                    window.set_onkeyup(None);
+                    let cb = ctx.link().callback(|e| AppEvent::KeyPress(AnyGraphEditor::INVALID_ID, e));
+                    let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
+                        .into_js_value().unchecked_into();
+                    window.set_onkeydown(Some(&cb));
+                    let cb = ctx.link().callback(|e| AppEvent::KeyRelease(AnyGraphEditor::INVALID_ID, e));
+                    let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
+                        .into_js_value().unchecked_into();
+                    window.set_onkeyup(Some(&cb));
                 }
 
+
+                AppEvent::Undo(ref a) => js_log!("undoing {a:?}"),
                 _ => ()
             }
 
