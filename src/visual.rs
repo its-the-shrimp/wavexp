@@ -353,6 +353,20 @@ pub trait Graphable: Sized + Ord {
         cursor: Cursor,
         first: bool
     ) {}
+    /// Handle the user canceling an action.
+    /// The handler is only called if the graph editor doesn't know how to handle the action.
+    #[allow(unused_variables)] #[inline] fn on_undo(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        action: &AppAction
+    ) {}
+    /// Handle the user canceling cancellation of an action.
+    /// The handler is only called if the graph editor doesn't know how to handle the action.
+    #[allow(unused_variables)] #[inline] fn on_redo(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        action: &AppAction
+    ) {}
 
     /// `loc` is in user coordinates
     fn fmt_loc(loc: [R64; 2]) -> String;
@@ -409,7 +423,7 @@ pub struct AnyGraphEditor {
     scale: [R64; 2],
     focus: Focus,
     selection: Vec<usize>,
-    selection_origin: ConfinedAlignedUserPoint,
+    selection_src: ConfinedAlignedUserPoint,
     selection_size: [R64; 2],
     last_cursor: Cursor,
     redraw: bool,
@@ -555,7 +569,7 @@ impl<T: Graphable> GraphEditor<T> {
     }
 
     #[inline] fn point_in_selection(&self, loc: ConfinedAlignedUserPoint) -> bool {
-        loc.sub(&self.selection_origin).zip_fold(true, self.selection_size, |r, x, y| r && 0.0 <= *x && x <= y)
+        loc.sub(&self.selection_src).zip_fold(true, self.selection_size, |r, x, y| r && 0.0 <= *x && x <= y)
     }
 
     #[inline] fn set_zoom_focus(&mut self, ctx: &AppContext, cursor: Cursor, loc: impl Deref<Target = [R64; 2]>) {
@@ -628,7 +642,8 @@ impl<T: Graphable> GraphEditor<T> {
                 if self.inner.last_cursor.left {
                     ctx.register_action(AppAction::DragPlane{
                         editor_id: self.inner.id,
-                        offset: *init_offset, scale: *init_scale})
+                        offset_delta: self.inner.offset - *init_offset,
+                        scale_delta: self.inner.scale.sub(init_scale)})
                 }
                 if cursor.shift {
                     *pivot = cursor.point;
@@ -647,14 +662,13 @@ impl<T: Graphable> GraphEditor<T> {
                     if self.inner.last_cursor.meta {
                         let origin = *origin;
                         let end = *cursor_point_user_aligned_confined;
-                        let old_selection = self.selection.to_box();
                         let area = [origin, end].flipped().map(|x| (x[0] .. x[1]).ordered());
+                        let prev_src = replace(&mut self.inner.selection_src, area.clone().map(|x| x.start));
+                        let prev_size = replace(&mut self.inner.selection_size, area.clone().map(|x| x.end - x.start));
 
-                        self.inner.selection_origin = area.clone().map(|x| x.start);
-                        self.inner.selection_size = area.clone().map(|x| x.end - x.start);
-                        self.inner.selection = self.data.iter().enumerate()
+                        let prev_ids = replace(&mut self.inner.selection, self.data.iter().enumerate()
                             .filter_map(|(id, x)| x.loc().array_check_in(&area).map(|_| id))
-                            .collect();
+                            .collect()).to_box();
                         if let Some(p) = self.point_by_pos(cur_loc) {
                             self.set_point_focus(ctx, cursor, p.index());
                         } else {
@@ -663,33 +677,46 @@ impl<T: Graphable> GraphEditor<T> {
 
                         let action = T::on_click(self, ctx, cursor,
                             &origin, &end,
-                            Some(&old_selection));
+                            Some(&prev_ids));
                         ctx.register_action(action.unwrap_or_else(|| AppAction::SetSelection{
                             editor_id: self.id,
-                            ids: old_selection, src: self.selection_origin, size: self.selection_size}))
+                            prev_ids, prev_src, prev_size,
+                            cur_ids: self.selection.to_box(), cur_src: self.selection_src, cur_size: self.selection_size}))
                     } else if *ctx.now() - **press_time > 0.33 {
-                        let offset = *init_offset;
+                        let init_offset = *init_offset;
                         let action = T::on_click(self, ctx, cursor,
                             Alias(&cursor_point_user_aligned_confined), Alias(&cursor_point_user_aligned_confined),
                             None);
 
-                        ctx.register_action(action.unwrap_or(AppAction::DragPlane{
+                        ctx.register_action(action.unwrap_or_else(|| AppAction::DragPlane{
                             editor_id: self.inner.id,
-                            offset, scale: self.inner.scale}));
+                            offset_delta: self.inner.offset - init_offset,
+                            scale_delta: default()}));
                     } else {
-                        let offset = *init_offset;
-                        let ids = take(&mut self.selection).into_boxed_slice();
-                        let size = take(&mut self.selection_size);
+                        let init_offset = *init_offset;
+                        let prev_ids = take(&mut self.selection).into_boxed_slice();
+                        let prev_size = take(&mut self.selection_size);
                         let action = T::on_click(self, ctx, cursor,
                             Alias(&cursor_point_user_aligned_confined), Alias(&cursor_point_user_aligned_confined),
-                            Some(&ids));
+                            Some(&prev_ids));
 
-                        ctx.register_action(action.unwrap_or(AppAction::DragPlane{
-                            editor_id: self.inner.id,
-                            offset, scale: self.inner.scale}));
-                        ctx.register_action(AppAction::SetSelection{
-                            editor_id: self.id,
-                            ids, size, src: self.selection_origin})
+                        if let Some(action) = action {
+                            ctx.register_action(action)
+                        } else {
+                            let offset_delta = self.offset - init_offset;
+                            if offset_delta != Point::ZERO {
+                                ctx.register_action(AppAction::DragPlane{
+                                    editor_id: self.id,
+                                    offset_delta,
+                                    scale_delta: default()});
+                            }
+                        }
+                        if !prev_ids.is_empty() {
+                            ctx.register_action(AppAction::SetSelection{
+                                editor_id: self.id,
+                                prev_ids, prev_size, prev_src: self.selection_src,
+                                cur_ids: self.selection.to_box(), cur_size: default(), cur_src: self.selection_src})
+                        }
                     }
                 } else if self.point_in_selection(*cursor_point_user) {
                     self.set_selection_focus(ctx, cursor);
@@ -737,25 +764,33 @@ impl<T: Graphable> GraphEditor<T> {
                     T::on_move(self, ctx, cursor, delta)
                 }
             } else if self.inner.last_cursor.left {
-                    let (meta, src, point_id) = (*meta, *origin, *id);
-                    let prev_selection = if unsafe{self.get_unchecked(point_id)}.in_hitbox(*cursor_point_user) {
-                        self.set_selection_focus(ctx, cursor);
-                        replace(&mut self.selection, vec![point_id])
-                    } else {
-                        self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined));
-                        take(&mut self.selection)
-                    }.into_boxed_slice();
-                    let action = T::on_click(self, ctx, cursor,
-                        &src, Alias(&cursor_point_user_aligned_confined),
-                        Some(&prev_selection));
+                let (meta, src, point_id) = (*meta, *origin, *id);
+                let prev_ids = if unsafe{self.get_unchecked(point_id)}.in_hitbox(*cursor_point_user) {
+                    self.set_selection_focus(ctx, cursor);
+                    replace(&mut self.selection, vec![point_id])
+                } else {
+                    self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined));
+                    take(&mut self.selection)
+                }.into_boxed_slice();
+                let action = T::on_click(self, ctx, cursor,
+                    &src, Alias(&cursor_point_user_aligned_confined),
+                    Some(&prev_ids));
 
-                    ctx.register_action(action.unwrap_or_else(|| AppAction::DragPoint{
-                        editor_id: self.id, point_id,
-                        delta: cursor_point_user_aligned_confined.sub(&src),
-                        meta}));
+                if let Some(action) = action {
+                    ctx.register_action(action)
+                } else {
+                    let delta = cursor_point_user_aligned_confined.sub(&src);
+                    if *delta.sum::<R64>() > 0.0 {
+                        ctx.register_action(AppAction::DragPoint{
+                            editor_id: self.id, point_id, delta, meta});
+                    }
+                }
+                if self.selection[..] != prev_ids[..] {
                     ctx.register_action(AppAction::SetSelection{
                         editor_id: self.id,
-                        ids: prev_selection, src, size: take(&mut self.selection_size)});
+                        prev_ids, prev_src: self.selection_src, prev_size: take(&mut self.selection_size),
+                        cur_ids: self.selection.to_box(), cur_src: self.selection_src, cur_size: default()});
+                }
             } else if cursor.shift {
                 self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))
             } else if !unsafe{self.data.get_unchecked(*id)}.in_hitbox(*cursor_point_user) {
@@ -778,7 +813,7 @@ impl<T: Graphable> GraphEditor<T> {
                         T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, *meta);
                         unsafe{self.data.reorder_unchecked(id)}.apply(ids);
                     }
-                    T::move_point(Err(&mut self.inner.selection_origin), delta, *meta);
+                    T::move_point(Err(&mut self.inner.selection_src), delta, *meta);
                     self.selection.sort_unstable();
                     T::on_move(self, ctx, cursor, delta)
                 }
@@ -864,34 +899,69 @@ impl<T: Graphable> GraphEditor<T> {
 
             AppEvent::AudioStarted(_) => self.redraw = true,
 
-            AppEvent::Undo(action) => match *action {
-                AppAction::DragPlane{editor_id, offset, scale} => if editor_id == self.id {
-                    self.offset = offset;
-                    self.scale = scale;
-                }
-
-                AppAction::DragPoint{editor_id, point_id, mut delta, meta} => if editor_id == self.id {
-                    delta = delta.map(|x| -x);
-                    T::move_point(Ok(unsafe{self.data.get_unchecked_mut(point_id)}), delta, meta)
-                }
-
-                AppAction::DragSelection{editor_id, mut delta, meta} => if editor_id == self.id {
-                    delta = delta.map(|x| -x);
-                    for &id in self.inner.selection.iter() {
-                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, meta);
+            AppEvent::Undo(actions) => for action in actions.iter() {
+                match *action {
+                    AppAction::DragPlane{editor_id, offset_delta, scale_delta} => if editor_id == self.id {
+                        self.redraw  = true;
+                        self.offset -= offset_delta;
+                        self.scale   = self.scale.sub(&scale_delta);
                     }
-                    T::move_point(Err(&mut self.selection_origin), delta, meta)
-                }
 
-                AppAction::SetSelection{editor_id, ref ids, src, size} => if editor_id == self.id {
-                    // TODO: introduce ability to consume events to remove this `clone()`
-                    self.selection = ids.to_vec();
-                    self.selection_origin = src;
-                    self.selection_size = size;
-                }
+                    AppAction::DragPoint{editor_id, point_id, mut delta, meta} => if editor_id == self.id {
+                        self.redraw = true;
+                        delta = delta.map(|x| -x);
+                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(point_id)}), delta, meta)
+                    }
 
-                AppAction::AddPoint{editor_id, point_id} => if editor_id == self.id {
-                    self.remove_points(&[point_id]).add_loc(loc!())?;
+                    AppAction::DragSelection{editor_id, mut delta, meta} => if editor_id == self.id {
+                        self.redraw = true;
+                        delta = delta.map(|x| -x);
+                        for &id in self.inner.selection.iter() {
+                            T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, meta);
+                        }
+                        T::move_point(Err(&mut self.selection_src), delta, meta)
+                    }
+
+                    AppAction::SetSelection{editor_id, ref prev_ids, prev_src, prev_size, ..} => if editor_id == self.id {
+                        self.redraw = true;
+                        self.selection = prev_ids.to_vec();
+                        self.selection_src = prev_src;
+                        self.selection_size = prev_size;
+                    }
+
+                    _ => T::on_undo(self, ctx, action)
+                }
+            }
+
+            AppEvent::Redo(actions) => for action in actions.iter() {
+                match *action {
+                    AppAction::DragPlane{editor_id, offset_delta, scale_delta} => if editor_id == self.id {
+                        self.redraw  = true;
+                        self.offset += offset_delta;
+                        self.scale   = self.scale.add(&scale_delta);
+                    }
+
+                    AppAction::DragPoint{editor_id, point_id, delta, meta} => if editor_id == self.id {
+                        self.redraw = true;
+                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(point_id)}), delta, meta)
+                    }
+
+                    AppAction::DragSelection{editor_id, delta, meta} => if editor_id == self.id {
+                        self.redraw = true;
+                        for &id in self.inner.selection.iter() {
+                            T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, meta);
+                        }
+                        T::move_point(Err(&mut self.selection_src), delta, meta)
+                    }
+
+                    AppAction::SetSelection{editor_id, ref cur_ids, cur_src, cur_size, ..} => if editor_id == self.id {
+                        self.redraw = true;
+                        self.selection = cur_ids.to_vec();
+                        self.selection_src = cur_src;
+                        self.selection_size = cur_size;
+                    }
+
+                    _ => T::on_redo(self, ctx, action)
                 }
             }
 
@@ -948,7 +1018,7 @@ impl<T: Graphable> GraphEditor<T> {
                 canvas_ctx.set_stroke_style(&AnyGraphEditor::FG_STYLE.into());
                 canvas_ctx.stroke_with_path(&points);
 
-                let [x, y] = mapper(self.selection_origin);
+                let [x, y] = mapper(self.selection_src);
                 let [w, h] = self.selection_size.mul(step);
                 canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
                 canvas_ctx.stroke_rect(*x, *y, *w, *h);

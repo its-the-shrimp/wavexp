@@ -56,8 +56,7 @@
 				display: flex;
 				justify-content: space-evenly
 			}
-			#io-panel div {
-				flex: 1;
+			#io-panel > div {
 				align-self: center;
 			}
 			#piano {
@@ -170,25 +169,45 @@
 				border-color: #0069E1;
 				border-bottom-color: transparent
 			}
-			#block-add-menu {
+			.undone {
+				border-top-style: dashed;
+				border-bottom-style: dashed;
+			}
+			.horizontal-menu {
 				display: flex;
 				flex-direction: column;
 				justify-content: start
 			}
-			#block-add-menu button {
+			.horizontal-menu > * {
 				flex: 1;
-				border: 3px solid transparent;
-				border-top-color: #0069E1;
-				border-bottom-color: #0069E1;
+				max-height: 3em;
+				min-height: 3em;
 				align-self: stretch;
 			}
-			#block-add-menu button:hover {
+			.horizontal-menu > div {
+				display: flex;
+			}
+			.horizontal-menu > button {
+				border-top-color: #0069E1;
+				border-bottom-color: #0069E1;
+			}
+			.horizontal-menu > button:hover {
 				border-style: dashed;
 				border-color: #0069E1
+			}
+			.horizontal-menu * p {
+				margin: auto;
 			}
 			#plane-settings {
 				display: flex;
 				align-content: center
+			}
+			#actions {
+				height: inherit;
+				min-width: 20em;
+				padding: 1em;
+				box-sizing: border-box;
+				overflow-y: scroll;
 			}
 		</style>
 	</head>

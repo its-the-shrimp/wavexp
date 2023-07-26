@@ -3,7 +3,7 @@ use std::{
     fmt::{self, Display, Formatter, Debug},
     cmp::Ordering,
     rc::Rc,
-    borrow::Cow, cell::{RefCell, LazyCell}};
+    borrow::Cow, cell::{RefCell, LazyCell}, slice::from_ref};
 use js_sys::Math::random;
 use web_sys::{
     AudioNode,
@@ -261,9 +261,10 @@ impl Graphable for NoteBlock {
     ) -> Option<AppAction> {
         if cursor.meta && editor.selection().is_empty() && old_selection.map_or(true, |x| x.is_empty()) && *pressed_at == *released_at {
             let [offset, y] = *released_at;
-            let point_id = editor.add_point(Self{offset, value: Note::from_index(y.into()).recip(), len: r64![1.0]});
+            let value = Note::from_index(y.into()).recip();
+            let note_id = editor.add_point(Self{offset, value, len: r64![1.0]});
             ctx.emit_event(AppEvent::RedrawEditorPlane);
-            Some(AppAction::AddPoint{editor_id: editor.id(), point_id})
+            Some(AppAction::AddNoteBlock{note_id, offset, value})
         } else {
             let mut sel = editor.selection().to_owned();
             sel.retain(|i| *unsafe{editor.get_unchecked(*i)}.len > 0.0);
@@ -347,6 +348,30 @@ impl Graphable for NoteBlock {
                 [(m + ": stretching").into(), "Release to stop".into()],
         };
         ctx.emit_event(AppEvent::SetHint(m, a))
+    }
+
+    #[inline] fn on_undo(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        action: &AppAction
+    ) {
+        if let AppAction::AddNoteBlock{note_id, ..} = action {
+            editor.force_redraw();
+            _ = editor.remove_points(from_ref(note_id)).report_err(loc!());
+            ctx.emit_event(AppEvent::RedrawEditorPlane)
+        }
+    }
+
+    #[inline] fn on_redo(
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        action: &AppAction
+    ) {
+        if let &AppAction::AddNoteBlock{offset, value, ..} = action {
+            editor.force_redraw();
+            _ = editor.add_point(NoteBlock{offset, value, len: r64![1.0]});
+            ctx.emit_event(AppEvent::RedrawEditorPlane)
+        }
     }
 }
 
@@ -496,7 +521,7 @@ impl Sound {
 
     pub fn params(&self, ctx: &AppContext, setter: Callback<AppEvent>) -> Html {
         match self {
-            Sound::None => html!{<div id="block-add-menu">
+            Sound::None => html!{<div class="horizontal-menu">
                 {for Sound::TYPES.iter().map(|x| html!{
                     <Button name={x.name()}
                         setter={setter.reform(|_| AppEvent::SetBlockType(*x))}>
@@ -559,9 +584,21 @@ impl Sound {
 
     pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> JsResult<()> {
         Ok(match self {
-            Sound::None => if let AppEvent::SetBlockType(ty) = event {
-                *self = Self::new(*ty, ctx.audio_ctx()).add_loc(loc!())?;
-                ctx.emit_event(AppEvent::RedrawEditorPlane)
+            Sound::None => match event {
+                &AppEvent::SetBlockType(ty) => {
+                    *self = Self::new(ty, ctx.audio_ctx()).add_loc(loc!())?;
+                    ctx.register_action(AppAction::SetBlockType(ty));
+                    ctx.emit_event(AppEvent::RedrawEditorPlane)
+                }
+
+                AppEvent::Redo(actions) => for action in actions.iter() {
+                    if let &AppAction::SetBlockType(ty) = action {
+                        *self = Self::new(ty, ctx.audio_ctx()).add_loc(loc!())?;
+                        ctx.emit_event(AppEvent::RedrawEditorPlane)
+                    }
+                }
+
+                _ => (),
             }
 
             Sound::Note{volume, pattern, attack, decay, sustain, release} => match event {
@@ -574,9 +611,18 @@ impl Sound {
                 AppEvent::Sustain(value) => *sustain = *value,
                 AppEvent::Release(value) => *release = *value,
 
-                e => if ctx.selected_tab() == 1 {
-                    pattern.try_borrow_mut().to_js_result(loc!())?
-                        .handle_event(e, ctx).add_loc(loc!())?
+                e => {
+                    if ctx.selected_tab() == 1 {
+                        pattern.try_borrow_mut().to_js_result(loc!())?
+                            .handle_event(e, ctx).add_loc(loc!())?
+                    }
+                    if let AppEvent::Undo(actions) = e {
+                        for action in actions.iter() {
+                            if let AppAction::SetBlockType(_) = action {
+                                *self = default()
+                            }
+                        }
+                    }
                 }
             }
 
@@ -587,6 +633,13 @@ impl Sound {
                 }
 
                 AppEvent::Volume(value) => gain.gain().set_value(**value),
+
+                AppEvent::Undo(actions) => for action in actions.iter() {
+                    if let AppAction::SetBlockType(_) = action {
+                        *self = default();
+                        ctx.emit_event(AppEvent::RedrawEditorPlane)
+                    }
+                }
 
                 _ => ()
             }
@@ -676,8 +729,9 @@ impl Graphable for SoundBlock {
         let sel_is_empty = LazyCell::new(|| editor.selection().is_empty());
         if cursor.meta && *sel_is_empty && old_selection.map_or(true, |x| x.is_empty()) && *pressed_at == *released_at {
             let [offset, y] = *released_at;
-            let point_id = editor.add_point(SoundBlock{sound: default(), layer: y.into(), offset});
-            Some(AppAction::AddPoint{editor_id: editor.id(), point_id})
+            let layer = y.into();
+            let block_id = editor.add_point(SoundBlock{sound: default(), layer, offset});
+            Some(AppAction::AddSoundBlock{block_id, offset, layer})
         } else {
             ctx.emit_event(AppEvent::Select(sel_is_empty.not().then_some(0)));
             None
@@ -745,6 +799,28 @@ impl Graphable for SoundBlock {
             [m.into(), "Hold & drag to move".into()]
         };
         ctx.emit_event(AppEvent::SetHint(m, a))
+    }
+
+    #[inline] fn on_undo(
+        editor: &mut GraphEditor<Self>,
+        _: &AppContext,
+        action: &AppAction
+    ) {
+        if let AppAction::AddSoundBlock{block_id, ..} = action {
+            editor.force_redraw();
+            _ = editor.remove_points(from_ref(block_id)).add_loc(loc!());
+        }
+    }
+
+    #[inline] fn on_redo(
+        editor: &mut GraphEditor<Self>,
+        _: &AppContext,
+        action: &AppAction
+    ) {
+        if let &AppAction::AddSoundBlock{offset, layer, ..} = action {
+            editor.force_redraw();
+            editor.add_point(SoundBlock{sound: default(), layer, offset});
+        }
     }
 
     #[inline] fn canvas_coords(canvas: &HtmlCanvasElement) -> JsResult<[u32; 2]> {

@@ -1,6 +1,6 @@
 use std::{
     rc::Rc,
-    borrow::Cow};
+    borrow::Cow, slice::from_ref, mem::take, cmp::Ordering};
 use js_sys::Function;
 use wasm_bindgen::{
     closure::Closure,
@@ -18,13 +18,13 @@ use yew::{
     html,
     AttrValue, Callback};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats},
+    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats, Note},
     visual::{HintHandler, SoundVisualiser, GraphEditorCanvas, AnyGraphEditor},
-    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, ResultToJsResult, Point, Tee},
+    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, ResultToJsResult, Point},
     input::{Button, Slider, Switch},
     loc,
     r64,
-    js_try, js_log};
+    js_try};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, PartialEq, Clone)]
@@ -105,8 +105,26 @@ pub enum AppEvent {
     SetHint(Cow<'static, str>, Cow<'static, str>),
     /// similar to `SetHint` but gets the hint from an event's target
     FetchHint(UiEvent),
-    /// emitted when the user has press the key combination for cancelling an action
-    Undo(AppAction)
+    /// emitted by the app context when a cancelable action is done
+    ActionDone,
+    /// epilog version of `ActionDone`
+    AfterActionDone,
+    /// emitted when the user cancels an action, by clicking the necessary key combination or by
+    /// choosing the action to unwind to in the UI
+    Undo(Box<[AppAction]>),
+    /// epilog version of `Undo`
+    AfterUndoing,
+    /// emitted when the user cancels cancelling an action, by clicking the necessary key
+    /// combination or by choosing the action to rewind to in the UI
+    Redo(Box<[AppAction]>),
+    /// epilog version of `Redo`
+    AfterRedoing,
+    /// emitted when the user unwinds action history in the UI.
+    /// The contained number is the number of actions to undo.
+    Unwind(usize),
+    /// emitted when the user rewinds action history in the UI.
+    /// The contained numbr is the number of actions to redo.
+    Rewind(usize)
 }
 
 impl AppEvent {
@@ -120,6 +138,9 @@ impl AppEvent {
             Self::StopPlay         => Some(Self::AfterStopPlay),
             Self::SetBlockType(ty) => Some(Self::AfterSetBlockType(*ty)),
             Self::Remove           => Some(Self::AfterRemove),
+            Self::ActionDone       => Some(Self::AfterActionDone),
+            Self::Undo(..)         => Some(Self::AfterUndoing),
+            Self::Redo(..)         => Some(Self::AfterRedoing),
 
             Self::Frame(..)
             | Self::AfterSetTab(..)
@@ -129,7 +150,11 @@ impl AppEvent {
             | Self::StartPlay
             | Self::AfterRemove
             | Self::AfterSetBlockType(..)
-            | Self::Undo(..)
+            | Self::AfterActionDone
+            | Self::AfterUndoing
+            | Self::AfterRedoing
+            | Self::Unwind(..)
+            | Self::Rewind(..)
             | Self::SetHint(..)
             | Self::FetchHint(..)
             | Self::RedrawEditorPlane
@@ -153,20 +178,50 @@ impl AppEvent {
     }
 }
 
-/// action reversible by Ctrl-Z
+/// a globally registered cancelable action
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
+    /// start the session; added to the action stack by default and is always the first one
+    Start,
+    /// drag the plane of a graph editor
     DragPlane{editor_id: usize,
-        offset: Point, scale: [R64; 2]},
+        offset_delta: Point, scale_delta: [R64; 2]},
+    /// drag a point of a graph editor
     DragPoint{editor_id: usize, point_id: usize,
         delta: [R64; 2],
         meta: bool},
+    /// drag selection in a graph editor
     DragSelection{editor_id: usize,
         delta: [R64; 2],
         meta: bool},
+    /// change selection in a graph editor
     SetSelection{editor_id: usize,
-        ids: Box<[usize]>, src: [R64; 2], size: [R64; 2]},
-    AddPoint{editor_id: usize, point_id: usize}
+        prev_ids: Box<[usize]>, prev_src: [R64; 2], prev_size: [R64; 2],
+        cur_ids: Box<[usize]>,  cur_src: [R64; 2],  cur_size: [R64; 2]},
+    /// add a sound block to the sequencer
+    AddSoundBlock{block_id: usize, offset: R64, layer: i32},
+    /// add a note block to a graph editor
+    AddNoteBlock{note_id: usize, offset: R64, value: Note},
+    /// select a sound block
+    Select{from: Option<usize>, to: Option<usize>},
+    /// set sound block type from the default undefined one
+    SetBlockType(SoundType)
+}
+
+impl AppAction {
+    #[inline] pub fn name(&self) -> &'static str {
+        match self {
+            AppAction::Start => "Start",
+            AppAction::DragPlane{..} => "Drag Plane",
+            AppAction::DragPoint{..} => "Drag Point",
+            AppAction::DragSelection{..} => "Drag Selection",
+            AppAction::SetSelection{..} => "Set Selection",
+            AppAction::AddSoundBlock{..} => "Add Sound Block",
+            AppAction::AddNoteBlock{..} => "Add Note Block",
+            AppAction::Select{..} => "Select",
+            AppAction::SetBlockType(..) => "Set Sound Block Type"
+        }
+    }
 }
 
 /// carries all the app-wide settings that are passed to all the event receivers
@@ -179,7 +234,8 @@ pub struct AppContext {
     snap_step: R64,
     selected_tab: usize,
     event_emitter: Callback<AppEvent>,
-    actions: Vec<AppAction>
+    actions: Vec<AppAction>,
+    undid_actions: usize
 }
 
 impl AppContext {
@@ -190,7 +246,8 @@ impl AppContext {
             audio_ctx: Rc::new(AudioContext::new().add_loc(loc!())?),
             snap_step: r64![1.0],
             selected_tab: 0,
-            actions: vec![],
+            undid_actions: 0,
+            actions: vec![AppAction::Start],
             event_emitter})
     }
 
@@ -200,6 +257,7 @@ impl AppContext {
     #[inline] pub fn audio_ctx(&self) -> &AudioContext {&self.audio_ctx}
     #[inline] pub fn snap_step(&self) -> R64 {self.snap_step}
     #[inline] pub fn selected_tab(&self) -> usize {self.selected_tab}
+    #[inline] pub fn actions(&self) -> &[AppAction] {&self.actions}
 
     /// properties cannot be modified through a mutable reference, this is done to prevent
     /// components from modifying global context while handling an event
@@ -210,29 +268,67 @@ impl AppContext {
 
     #[inline] pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
 
-    #[inline] pub fn register_action(&mut self, action: AppAction) {self.actions.push(action)}
+    #[inline] pub fn register_action(&mut self, action: AppAction) {
+        self.actions.drain(self.actions.len() - take(&mut self.undid_actions) ..);
+        self.actions.push(action);
+        self.emit_event(AppEvent::ActionDone);
+    }
 
-    pub fn handle_event(&mut self, event: &AppEvent) {
-        match event {
+    pub fn handle_event(&mut self, event: &AppEvent) -> JsResult<()> {
+        Ok(match event {
             AppEvent::Bpm(bpm) =>
                 self.bps = *bpm / 60u8,
+
             AppEvent::AudioStarted(at) =>
                 self.play_since = *at,
+
             AppEvent::StopPlay =>
                 self.play_since = R64::NEG_INFINITY,
+
             AppEvent::Frame(now) =>
                 self.now = *now / 1000u16,
+
             AppEvent::SnapStep(value) =>
                 self.snap_step = *value,
+
             AppEvent::Select(_) =>
                 self.selected_tab = 0,
+
             AppEvent::SetTab(id) =>
                 self.selected_tab = *id,
+
             AppEvent::KeyPress(_, e) if &e.code() == "KeyZ" && e.meta_key() && !e.repeat() =>
-                _ = self.actions.pop().map(|a|
-                    self.event_emitter.emit(AppEvent::Undo(a))),
+            if e.shift_key() {
+                if self.undid_actions > 0 {
+                    let a = unsafe{self.actions.get_unchecked(self.actions.len() - self.undid_actions)};
+                    self.emit_event(AppEvent::Redo(from_ref(a).to_box()));
+                    self.undid_actions -= 1;
+                }
+            } else if self.undid_actions < self.actions.len() - 1 {
+                self.undid_actions += 1;
+                let a = unsafe{self.actions.get_unchecked(self.actions.len() - self.undid_actions)};
+                self.emit_event(AppEvent::Undo(from_ref(a).to_box()));
+            }
+
+            &AppEvent::Unwind(n) => {
+                let unwound = self.actions.get(self.actions.len() - n - self.undid_actions ..)
+                    .to_js_result(loc!())?
+                    .iter().rev().cloned().collect();
+                self.undid_actions += n;
+                self.event_emitter.emit(AppEvent::Undo(unwound))
+            }
+
+            &AppEvent::Rewind(n) => {
+                let len = self.actions.len();
+                let rewound = self.actions.get({let x = len - self.undid_actions; x .. x + n})
+                    .to_js_result(loc!())?
+                    .iter().cloned().collect();
+                self.undid_actions -= n;
+                self.event_emitter.emit(AppEvent::Redo(rewound))
+            }
+
             _ => ()
-        }
+        })
     }
 }
 
@@ -272,8 +368,12 @@ impl Component for App {
                 AppEvent::Frame(_) =>
                     _ = window().request_animation_frame(&self.frame_emitter).add_loc(loc!())?,
 
-                AppEvent::Select(id) =>
-                    self.selected_id = id,
+                AppEvent::Select(id) => {
+                    if id != self.selected_id {
+                        self.ctx.register_action(AppAction::Select{from: self.selected_id, to: id});
+                    }
+                    self.selected_id = id
+                }
 
                 AppEvent::Remove => {
                     let mut pattern = self.sequencer.pattern().try_borrow_mut().to_js_result(loc!())?;
@@ -291,7 +391,7 @@ impl Component for App {
                     let cb = ctx.link().callback(move |e| AppEvent::KeyRelease(id, e));
                     let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
                         .into_js_value().unchecked_into();
-                    window.set_onkeyup(Some(&cb));
+                    window.set_onkeyup(Some(&cb))
                 }
 
                 AppEvent::Leave(_) => {
@@ -303,11 +403,21 @@ impl Component for App {
                     let cb = ctx.link().callback(|e| AppEvent::KeyRelease(AnyGraphEditor::INVALID_ID, e));
                     let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
                         .into_js_value().unchecked_into();
-                    window.set_onkeyup(Some(&cb));
+                    window.set_onkeyup(Some(&cb))
                 }
 
+                AppEvent::Undo(ref actions) => for action in actions.iter() {
+                    if let &AppAction::Select{from, ..} = action {
+                        self.selected_id = from;
+                    }
+                }
 
-                AppEvent::Undo(ref a) => js_log!("undoing {a:?}"),
+                AppEvent::Redo(ref actions) => for action in actions.iter() {
+                    if let &AppAction::Select{to, ..} = action {
+                        self.selected_id = to;
+                    }
+                }
+
                 _ => ()
             }
 
@@ -340,9 +450,9 @@ impl Component for App {
                 data-main-hint="Settings" data-aux-hint={block.as_ref().map_or(AttrValue::from("General"), |x| AttrValue::from(x.desc()))}>
                     <div id="hint" class="light-bg"
                     data-main-hint="Hint bar" data-aux-hint="for useful messages about the app's controls">
-                        <span id="main-hint" ref={self.hint_handler.main_bar().clone()}/>
+                        <span id="main-hint" ref={self.hint_handler.main_bar()}/>
                         <br/>
-                        <span id="aux-hint" ref={self.hint_handler.aux_bar().clone()}/>
+                        <span id="aux-hint" ref={self.hint_handler.aux_bar()}/>
                     </div>
                     if let Some((tab_aux_hint, block)) = block.map(|x| (AttrValue::from(x.desc() + ": Settings tab"), x)) {
                         <div id="tab-list">
@@ -375,7 +485,7 @@ impl Component for App {
                                 initial={self.ctx.bps * r64![60.0]}/>
                             <Slider key="gain" name="Master gain level"
                             setter={setter.reform(|x| AppEvent::MasterGain(R32::from(x)))}
-                                initial={R64::from(self.sequencer.gain())}/>
+                            initial={R64::from(self.sequencer.gain())}/>
                         </div>
                     }
                 </div>
@@ -384,10 +494,57 @@ impl Component for App {
                 emitter={setter.clone()}/>
             </div>
             <div id="io-panel" data-main-hint="Editor plane settings">
+                <div class="horizontal-menu" id="actions">
+                    {for self.ctx.actions().iter().rev().enumerate().map(|(i, a)| (a.name(), i)).map(|(name, i)|
+                        match i.cmp(&self.ctx.undid_actions) {
+                            Ordering::Less => {
+                                let i = self.ctx.undid_actions - i;
+                                html!{
+                                    <Button {name} class="undone"
+                                    help={match i {
+                                        1 => AttrValue::Static("Click to redo this action"),
+                                        2 => AttrValue::Static("Click to redo this and the previous action"),
+                                        _ => format!("Click to redo this and {i} previous actions").into()
+                                    }}
+                                    setter={setter.reform(move |_| AppEvent::Rewind(i))}>
+                                        <s>{name}</s>
+                                    </Button>
+                                }
+                            },
+
+                            Ordering::Equal => html!{<>
+                                <div data-main-hint="Present"
+                                data-aux-hint="Below this are done actions, above - undone actions">
+                                    <p>{"Present"}</p>
+                                </div>
+                                <Button {name}
+                                help={"Last action"}
+                                setter={Callback::noop()}>
+                                    <p>{name}</p>
+                                </Button>
+                            </>},
+
+                            Ordering::Greater => {
+                                let i = i - self.ctx.undid_actions;
+                                html!{
+                                    <Button {name}
+                                    help={match i {
+                                        1 => AttrValue::Static("Click to undo the next action"),
+                                        _ => format!("Click to undo {i} subsequent actions").into()
+                                    }}
+                                    setter={setter.reform(move |_| AppEvent::Unwind(i))}>
+                                        <p>{name}</p>
+                                    </Button>
+                                }
+                            }
+                        }
+                    )}
+                </div>
                 <div id="plane-settings" data-main-hint="Editor plane settings">
                     <Switch key="snap" name="Interval for blocks to snap to"
                     setter={setter.reform(|x: usize|
-                        AppEvent::SnapStep(*[r64![0.0], r64![1.0], r64![0.5], r64![0.25], r64![0.125]].get_wrapping(x)))}
+                        AppEvent::SnapStep(*[r64![0.0], r64![1.0], r64![0.5], r64![0.25], r64![0.125]]
+                            .get_wrapping(x)))}
                     options={vec!["None", "1", "1/2", "1/4", "1/8"]}
                     initial={match *self.ctx.snap_step {
                         x if x == 1.0   => 1,
@@ -413,7 +570,7 @@ impl Component for App {
                         </svg>
                     </Button>
                 }
-                <canvas id="sound-visualiser" ref={self.sound_visualiser.canvas().clone()} class="blue-border"
+                <canvas id="sound-visualiser" ref={self.sound_visualiser.canvas()} class="blue-border"
                 data-main-hint="Sound visualiser"/>
             </div>
             <div id="error-sign" hidden={true}
@@ -451,7 +608,7 @@ impl Component for App {
 
 impl App {
     fn forward_event(&mut self, event: AppEvent) -> JsResult<()> {
-        self.ctx.handle_event(&event);
+        self.ctx.handle_event(&event).add_loc(loc!())?;
         self.hint_handler.handle_event(&event, &self.ctx).add_loc(loc!())?;
         self.sound_visualiser.handle_event(&event, &self.ctx).add_loc(loc!())?;
         self.sequencer.handle_event(&event, &mut self.ctx).add_loc(loc!())?;

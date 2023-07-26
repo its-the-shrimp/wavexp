@@ -327,32 +327,36 @@ pub struct ButtonProps {
     #[prop_or(false)]
     pub svg: bool,
     #[prop_or_default]
-    pub class: Classes
+    pub class: Classes,
+    #[prop_or_default]
+    pub help: AttrValue
 }
 
 impl Component for Button {
     type Message = ();
     type Properties = ButtonProps;
 
-    fn create(_: &Context<Self>) -> Self {Self}
+    #[inline] fn create(_: &Context<Self>) -> Self {Self}
 
     #[inline]
     fn update(&mut self, _: &Context<Self>, _: Self::Message) -> bool {false}
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let ButtonProps{name, children, svg, class, setter} = ctx.props();
+        let ButtonProps{name, children, svg, class, setter, help} = ctx.props();
         let mut class = class.clone();
         class.push("input button");
         if *svg {
             html!{
-                <g {class} data-main-hint={name}
+                <g {class}
+                data-main-hint={name} data-aux-hint={help}
                 onpointerup={setter.reform(|_| ())}>
                     {children.clone()}
                 </g>
             }
         } else {
             html!{
-                <button {class} data-main-hint={name}
+                <button {class}
+                data-main-hint={name} data-aux-hint={help}
                 onpointerup={setter.reform(|_| ())}>
                     {children.clone()}
                 </button>
