@@ -1,6 +1,9 @@
 use std::{
     rc::Rc,
-    borrow::Cow, slice::from_ref, mem::take, cmp::Ordering};
+    borrow::Cow,
+    slice::from_ref,
+    mem::{take, MaybeUninit},
+    cmp::Ordering, iter::once};
 use js_sys::Function;
 use wasm_bindgen::{
     closure::Closure,
@@ -18,13 +21,13 @@ use yew::{
     html,
     AttrValue, Callback};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats, Note},
-    visual::{HintHandler, SoundVisualiser, GraphEditorCanvas, AnyGraphEditor},
+    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats, Note, NoteBlock},
+    visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
     utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, ResultToJsResult, Point},
-    input::{Button, Slider, Switch},
+    input::{Button, Slider, Switch, GraphEditorCanvas},
     loc,
     r64,
-    js_try};
+    js_try, js_log};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, PartialEq, Clone)]
@@ -105,20 +108,18 @@ pub enum AppEvent {
     SetHint(Cow<'static, str>, Cow<'static, str>),
     /// similar to `SetHint` but gets the hint from an event's target
     FetchHint(UiEvent),
-    /// emitted by the app context when a cancelable action is done
-    ActionDone,
-    /// epilog version of `ActionDone`
-    AfterActionDone,
+    /// emitted after layout re-render if there's no epilog event scheduled
+    Rendered,
     /// emitted when the user cancels an action, by clicking the necessary key combination or by
     /// choosing the action to unwind to in the UI
-    Undo(Box<[AppAction]>),
+    Undo(Rc<Vec<AppAction>>),
     /// epilog version of `Undo`
-    AfterUndoing,
+    AfterUndoing(Rc<Vec<AppAction>>),
     /// emitted when the user cancels cancelling an action, by clicking the necessary key
     /// combination or by choosing the action to rewind to in the UI
-    Redo(Box<[AppAction]>),
+    Redo(Rc<Vec<AppAction>>),
     /// epilog version of `Redo`
-    AfterRedoing,
+    AfterRedoing(Rc<Vec<AppAction>>),
     /// emitted when the user unwinds action history in the UI.
     /// The contained number is the number of actions to undo.
     Unwind(usize),
@@ -138,43 +139,21 @@ impl AppEvent {
             Self::StopPlay         => Some(Self::AfterStopPlay),
             Self::SetBlockType(ty) => Some(Self::AfterSetBlockType(*ty)),
             Self::Remove           => Some(Self::AfterRemove),
-            Self::ActionDone       => Some(Self::AfterActionDone),
-            Self::Undo(..)         => Some(Self::AfterUndoing),
-            Self::Redo(..)         => Some(Self::AfterRedoing),
+            Self::Undo(actions)    => Some(Self::AfterUndoing(Rc::clone(actions))),
+            Self::Redo(actions)    => Some(Self::AfterRedoing(Rc::clone(actions))),
+            _ => None
+        }
+    }
 
-            Self::Frame(..)
-            | Self::AfterSetTab(..)
+    #[inline] pub fn is_epilog(&self) -> bool {
+        matches!(self, Self::AfterSetTab(..)
             | Self::AfterSelect(..)
             | Self::AfterAudioStarted(..)
             | Self::AfterStopPlay
-            | Self::StartPlay
-            | Self::AfterRemove
             | Self::AfterSetBlockType(..)
-            | Self::AfterActionDone
-            | Self::AfterUndoing
-            | Self::AfterRedoing
-            | Self::Unwind(..)
-            | Self::Rewind(..)
-            | Self::SetHint(..)
-            | Self::FetchHint(..)
-            | Self::RedrawEditorPlane
-            | Self::Duration(..)
-            | Self::Attack(..)
-            | Self::Decay(..)
-            | Self::Sustain(..)
-            | Self::Release(..)
-            | Self::Resize 
-            | Self::Volume(..) 
-            | Self::Bpm(..) 
-            | Self::MasterGain(..) 
-            | Self::SnapStep(..) 
-            | Self::Hover(..) 
-            | Self::Focus(..) 
-            | Self::KeyPress(..)
-            | Self::KeyRelease(..)
-            | Self::Enter(..)
-            | Self::Leave(..) => None
-        }
+            | Self::AfterRemove
+            | Self::AfterUndoing(..)
+            | Self::AfterRedoing(..))
     }
 }
 
@@ -201,11 +180,20 @@ pub enum AppAction {
     /// add a sound block to the sequencer
     AddSoundBlock{block_id: usize, offset: R64, layer: i32},
     /// add a note block to a graph editor
-    AddNoteBlock{note_id: usize, offset: R64, value: Note},
+    AddNoteBlock{block_id: usize, offset: R64, value: Note},
     /// select a sound block
-    Select{from: Option<usize>, to: Option<usize>},
+    Select{from: Option<usize>, to: Option<usize>,
+        prev_selected_tab: usize},
     /// set sound block type from the default undefined one
-    SetBlockType(SoundType)
+    SetBlockType(SoundType),
+    /// switch tabs in the side editor
+    SwitchTab{from: usize, to: usize},
+    /// remove sound blocks
+    RemoveSoundBlock(usize, SoundBlock),
+    /// remove note blocks
+    RemoveNoteBlocks(Rc<Vec<(usize, NoteBlock)>>),
+    /// change the length of note blocks, optionally removing some
+    StretchNoteBlocks{delta_x: R64, delta_y: isize, removed: Rc<Vec<(usize, NoteBlock)>>}
 }
 
 impl AppAction {
@@ -213,13 +201,17 @@ impl AppAction {
         match self {
             AppAction::Start => "Start",
             AppAction::DragPlane{..} => "Drag Plane",
-            AppAction::DragPoint{..} => "Drag Point",
+            AppAction::DragPoint{..} => "Drag Block",
             AppAction::DragSelection{..} => "Drag Selection",
             AppAction::SetSelection{..} => "Set Selection",
             AppAction::AddSoundBlock{..} => "Add Sound Block",
             AppAction::AddNoteBlock{..} => "Add Note Block",
-            AppAction::Select{..} => "Select",
-            AppAction::SetBlockType(..) => "Set Sound Block Type"
+            AppAction::Select{..} => "Open Sound Block Editor",
+            AppAction::SetBlockType(..) => "Set Sound Block Type",
+            AppAction::SwitchTab{..} => "Switch Tabs",
+            AppAction::RemoveSoundBlock(..) => "Remove Sound Block",
+            AppAction::RemoveNoteBlocks(..) => "Remove Note Blocks",
+            AppAction::StretchNoteBlocks{..} => "Drag & Remove Blocks"
         }
     }
 }
@@ -235,7 +227,8 @@ pub struct AppContext {
     selected_tab: usize,
     event_emitter: Callback<AppEvent>,
     actions: Vec<AppAction>,
-    undid_actions: usize
+    undid_actions: usize,
+    action_done: bool
 }
 
 impl AppContext {
@@ -248,6 +241,7 @@ impl AppContext {
             selected_tab: 0,
             undid_actions: 0,
             actions: vec![AppAction::Start],
+            action_done: false,
             event_emitter})
     }
 
@@ -266,48 +260,53 @@ impl AppContext {
         self
     }
 
-    #[inline] pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
+    #[inline] pub fn emit_event(&mut self, event: AppEvent) {self.event_emitter.emit(event)}
 
     #[inline] pub fn register_action(&mut self, action: AppAction) {
+        js_log!("registered {action:?}");
         self.actions.drain(self.actions.len() - take(&mut self.undid_actions) ..);
         self.actions.push(action);
-        self.emit_event(AppEvent::ActionDone);
+        self.action_done = true;
     }
+
+    #[inline] pub fn recent_action_done(&self) -> bool {self.action_done}
 
     pub fn handle_event(&mut self, event: &AppEvent) -> JsResult<()> {
         Ok(match event {
-            AppEvent::Bpm(bpm) =>
-                self.bps = *bpm / 60u8,
+            &AppEvent::Bpm(bpm) =>
+                self.bps = bpm / 60u8,
 
-            AppEvent::AudioStarted(at) =>
-                self.play_since = *at,
+            &AppEvent::AudioStarted(at) =>
+                self.play_since = at,
 
             AppEvent::StopPlay =>
                 self.play_since = R64::NEG_INFINITY,
 
-            AppEvent::Frame(now) =>
-                self.now = *now / 1000u16,
+            &AppEvent::Frame(now) =>
+                self.now = now / 1000u16,
 
-            AppEvent::SnapStep(value) =>
-                self.snap_step = *value,
+            &AppEvent::SnapStep(value) =>
+                self.snap_step = value,
 
             AppEvent::Select(_) =>
                 self.selected_tab = 0,
 
-            AppEvent::SetTab(id) =>
-                self.selected_tab = *id,
+            &AppEvent::SetTab(id) => {
+                self.register_action(AppAction::SwitchTab{from: self.selected_tab, to: id});
+                self.selected_tab = id
+            }
 
             AppEvent::KeyPress(_, e) if &e.code() == "KeyZ" && e.meta_key() && !e.repeat() =>
             if e.shift_key() {
                 if self.undid_actions > 0 {
                     let a = unsafe{self.actions.get_unchecked(self.actions.len() - self.undid_actions)};
-                    self.emit_event(AppEvent::Redo(from_ref(a).to_box()));
+                    self.emit_event(AppEvent::Redo(from_ref(a).to_vec().into()));
                     self.undid_actions -= 1;
                 }
             } else if self.undid_actions < self.actions.len() - 1 {
                 self.undid_actions += 1;
                 let a = unsafe{self.actions.get_unchecked(self.actions.len() - self.undid_actions)};
-                self.emit_event(AppEvent::Undo(from_ref(a).to_box()));
+                self.emit_event(AppEvent::Undo(from_ref(a).to_vec().into()));
             }
 
             &AppEvent::Unwind(n) => {
@@ -315,19 +314,44 @@ impl AppContext {
                     .to_js_result(loc!())?
                     .iter().rev().cloned().collect();
                 self.undid_actions += n;
-                self.event_emitter.emit(AppEvent::Undo(unwound))
+                self.event_emitter.emit(AppEvent::Undo(Rc::new(unwound)))
             }
 
             &AppEvent::Rewind(n) => {
                 let len = self.actions.len();
                 let rewound = self.actions.get({let x = len - self.undid_actions; x .. x + n})
-                    .to_js_result(loc!())?
-                    .iter().cloned().collect();
+                    .to_js_result(loc!())?.to_vec();
                 self.undid_actions -= n;
-                self.event_emitter.emit(AppEvent::Redo(rewound))
+                self.event_emitter.emit(AppEvent::Redo(Rc::new(rewound)))
             }
 
-            _ => ()
+            AppEvent::Undo(actions) => for action in actions.iter() {
+                match *action {
+                    AppAction::SwitchTab{from, ..} =>
+                        self.selected_tab = from,
+
+                    AppAction::Select{prev_selected_tab, ..} =>
+                        self.selected_tab = prev_selected_tab,
+
+                    _ => ()
+                }
+            }
+
+            AppEvent::Redo(actions) => for action in actions.iter() {
+                match *action {
+                    AppAction::SwitchTab{to, ..} =>
+                        self.selected_tab = to,
+
+                    AppAction::Select{..} =>
+                        self.selected_tab = 0,
+
+                    _ => ()
+                }
+            }
+
+            e => if e.is_epilog() {
+                self.action_done = false
+            }
         })
     }
 }
@@ -363,14 +387,16 @@ impl Component for App {
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        _ = js_try!{type = !:
+        js_try!{type = !:
             match msg {
                 AppEvent::Frame(_) =>
                     _ = window().request_animation_frame(&self.frame_emitter).add_loc(loc!())?,
 
                 AppEvent::Select(id) => {
                     if id != self.selected_id {
-                        self.ctx.register_action(AppAction::Select{from: self.selected_id, to: id});
+                        self.ctx.register_action(AppAction::Select{
+                            from: self.selected_id, to: id,
+                            prev_selected_tab: self.ctx.selected_tab});
                     }
                     self.selected_id = id
                 }
@@ -379,7 +405,9 @@ impl Component for App {
                     let mut pattern = self.sequencer.pattern().try_borrow_mut().to_js_result(loc!())?;
                     let id = self.selected_id.take().to_js_result(loc!())?;
                     let id = *unsafe{pattern.selection().get_unchecked(id)};
-                    pattern.remove_points(&[id]).add_loc(loc!())?
+                    let mut removed = MaybeUninit::uninit();
+                    pattern.remove_points(once(id), |(_, x)| _ = removed.write(x)).add_loc(loc!())?;
+                    self.ctx.register_action(AppAction::RemoveSoundBlock(id, unsafe{removed.assume_init()}))
                 }
 
                 AppEvent::Enter(id, _) => {
@@ -423,7 +451,7 @@ impl Component for App {
 
             self.epilog = msg.epilog();
             self.forward_event(msg).add_loc(loc!())?;
-            return self.epilog.is_some()
+            return self.ctx.recent_action_done() || self.epilog.is_some()
         }.report_err(loc!());
         false
     }
@@ -585,9 +613,8 @@ impl Component for App {
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
-        if let Some(event) = self.epilog.take() {
-            _ = self.forward_event(event).report_err(loc!());
-        }
+        let epilog = self.epilog.take().unwrap_or(AppEvent::Rendered);
+        self.forward_event(epilog).report_err(loc!());
 
         if !first_render {return}
         let window = window();

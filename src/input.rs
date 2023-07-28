@@ -19,10 +19,10 @@ use yew::{
     Classes,
     AttrValue,
     NodeRef,
-    Callback};
+    Callback, Properties, scheduler::Shared, function_component};
 use crate::{
-    utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, BoolExt, R64, Point, HtmlElementExt},
-    loc};
+    utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, BoolExt, R64, Point, HtmlElementExt, ResultToJsResult, report_err},
+    loc, visual::{Graphable, GraphEditor}, global::AppEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Buttons {
@@ -128,7 +128,7 @@ impl Component for Slider {
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        _ = js_try!{type = !:
+        js_try!{type = !:
             let SliderProps{setter, min, max, signed, ..} = ctx.props();
             match msg {
                 Cmd::Drag(e) => {
@@ -177,7 +177,7 @@ impl Component for Slider {
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
-        _ = js_try!{type = !:
+        js_try!{type = !:
             let SliderProps{min, max, precision, postfix, ..} = ctx.props();
             let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
             if first_render {canvas.sync()}
@@ -241,7 +241,7 @@ impl Component for Switch {
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        _ = js_try!{type = !:
+        js_try!{type = !:
             let SwitchProps{options, setter, ..} = ctx.props();
             match msg {
                 Cmd::Drag(e) => {
@@ -287,7 +287,7 @@ impl Component for Switch {
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
-        _ = js_try!{
+        js_try!{
             let options = &ctx.props().options;
             let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
             if first_render {canvas.sync()}
@@ -361,6 +361,34 @@ impl Component for Button {
                     {children.clone()}
                 </button>
             }
+        }
+    }
+}
+
+// TODO: make this not need `<T>` somehow
+#[derive(Debug, PartialEq, Properties)]
+pub struct GraphEditorCanvasProps<T: Graphable> {
+    pub emitter: Callback<AppEvent>,
+    pub editor: Shared<GraphEditor<T>>,
+    pub id: Option<&'static str>
+}
+
+#[function_component(GraphEditorCanvas)]
+pub fn f<T: Graphable>(props: &GraphEditorCanvasProps<T>) -> Html {
+    let GraphEditorCanvasProps{emitter, editor, id} = props;
+    match editor.try_borrow().to_js_result(loc!()) {
+        Ok(editor) => {
+            let (canvas_id, id) = (*id, editor.id());
+            html!{<canvas ref={editor.canvas().clone()} id={canvas_id}
+                onpointerdown={emitter.reform(move  |e| AppEvent::Focus(id, e))}
+                onpointerup={emitter.reform(move    |e| AppEvent::Hover(id, MouseEvent::from(e)))}
+                onpointermove={emitter.reform(move  |e| AppEvent::Hover(id, MouseEvent::from(e)))}
+                onpointerenter={emitter.reform(move |e| AppEvent::Enter(id, MouseEvent::from(e)))}
+                onpointerout={emitter.reform(move   |_| AppEvent::Leave(id))}/>}
+        }
+        Err(err) => {
+            report_err(err);
+            html!{"Error"}
         }
     }
 }

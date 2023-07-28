@@ -25,6 +25,122 @@ use web_sys::{
     console::warn_1,
     HtmlElement};
 
+// TODO: RcVec
+
+pub struct EveryNth<'a, T> {
+    iter: &'a [T],
+    n: usize,
+    state: usize,
+    off: usize
+}
+
+impl<'a, T> Iterator for EveryNth<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
+		if let res @Some(_) = self.iter.get(self.state) {
+            self.state += self.n;
+            res
+        } else {
+            self.off += 1;
+            if self.off == self.n {
+                None
+            } else {
+                self.state = self.off + self.n;
+                self.iter.get(self.state - self.n)
+            }
+        }
+    }
+}
+
+pub struct EveryNthMut<'a, T> {
+    iter: &'a mut [T],
+    n: usize,
+    state: usize,
+    off: usize
+}
+
+impl<'a, T> Iterator for EveryNthMut<'a, T> {
+    type Item = &'a mut T;
+    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
+		if let Some(res) = self.iter.get_mut(self.state) {
+            self.state += self.n;
+            Some(unsafe{(res as *mut T).as_mut().unwrap_unchecked()})
+        } else {
+            self.off += 1;
+            if self.off == self.n {
+                None
+            } else {
+                self.state = self.off + self.n;
+                self.iter.get_mut(self.state - self.n)
+                    .map(|x| unsafe{(x as *mut T).as_mut().unwrap_unchecked()})
+            }
+        }
+    }
+}
+
+pub trait ToEveryNth<T> {
+    fn every_nth(&self, n: usize) -> EveryNth<'_, T>;
+    fn every_nth_mut(&mut self, n: usize) -> EveryNthMut<'_, T>;
+}
+
+impl<T> ToEveryNth<T> for [T] {
+    #[inline] fn every_nth(&self, n: usize) -> EveryNth<'_, T> {
+        EveryNth {iter: self, n, state: 0, off: 0}
+    }
+    #[inline] fn every_nth_mut(&mut self, n: usize) -> EveryNthMut<'_, T> {
+        EveryNthMut {iter: self, n, state: 0, off: 0}
+    }
+}
+
+#[test]
+fn test_every_nth_mut() {
+    let mut data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let transposed: Vec<u8>     = data.every_nth(3).copied().collect();
+    let transposed_mut: Vec<u8> = data.every_nth_mut(3).map(|x| *x).collect();
+    assert_eq!(transposed,     [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8]);
+    assert_eq!(transposed_mut, [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8]);
+}
+
+pub struct IterIndicesMut<'data, 'ids, T> {
+    data: &'data mut [T],
+    /// all indices are valid, trust me bro
+    ids: &'ids [usize],
+    state: usize
+}
+
+impl<'data, 'ids, T> Iterator for IterIndicesMut<'data, 'ids, T> {
+    type Item = &'data mut T;
+    #[inline] fn next(&mut self) -> Option<Self::Item> {
+        if let Some(&id) = self.ids.get(self.state) {
+            self.state += 1;
+            unsafe {
+                (self.data.get_unchecked_mut(id) as *mut T).as_mut()
+            }
+        } else {None}
+    }
+}
+
+pub trait ToIterIndicesMut<'data, 'ids, T> {
+    unsafe fn iter_indices_unchecked_mut(&'data mut self, ids: &'ids [usize])
+    -> IterIndicesMut<'data, 'ids, T>;
+    fn iter_indices_mut(&'data mut self, ids: &'ids [usize])
+    -> Option<IterIndicesMut<'data, 'ids, T>>;
+}
+
+impl<'data, 'ids, T> ToIterIndicesMut<'data, 'ids, T> for [T] {
+    #[inline] unsafe fn iter_indices_unchecked_mut(&'data mut self, ids: &'ids [usize])
+    -> IterIndicesMut<'data, 'ids, T> {
+        IterIndicesMut{data: self, ids, state: 0}
+    }
+    
+    #[inline] fn iter_indices_mut(&'data mut self, ids: &'ids [usize])
+    -> Option<IterIndicesMut<'data, 'ids, T>> {
+        let len = self.len();
+        if ids.iter().any(|&i| i >= len) {return None}
+        Some(IterIndicesMut{data: self, ids, state: 0})
+    }
+}
+
 pub fn modify<T>(src: &mut T, f: impl FnOnce(T) -> T) {
     let src = src as *mut T;
     unsafe{src.write(f(src.read()))}
@@ -116,10 +232,8 @@ impl BoolExt for bool {
 }
 
 pub trait ArrayExt<T, const N: usize>: Sized {
-    fn zip<O, R, F>(self, other: [O; N], f: F) -> [R; N]
-    where F: FnMut(T, O) -> R;
-    fn zip_fold<O, R, F>(self, init: R, other: [O; N], f: F) -> R
-    where F: FnMut(R, T, O) -> R;
+    fn zip<O, R>(self, other: [O; N], f: impl FnMut(T, O) -> R) -> [R; N];
+    fn zip_fold<O, R>(self, init: R, other: [O; N], f: impl FnMut(R, T, O) -> R) -> R;
     fn add<'a, O>(self, other: &'a [O; N]) -> Self
     where T: AddAssign<&'a O>;
     fn sub<'a, O>(self, other: &'a [O; N]) -> Self
@@ -143,13 +257,12 @@ pub trait ArrayExt<T, const N: usize>: Sized {
 }
 
 impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
-    #[inline] fn zip<O, R, F>(self, other: [O; N], mut f: F) -> [R; N] where F: FnMut(T, O) -> R {
+    #[inline] fn zip<O, R>(self, other: [O; N], mut f: impl FnMut(T, O) -> R) -> [R; N] {
         let (mut d, mut s) = (self.into_iter(), other.into_iter());
         from_fn(|_| unsafe{f(d.next().unwrap_unchecked(), s.next().unwrap_unchecked())})
     }
 
-    #[inline] fn zip_fold<O, R, F>(self, init: R, other: [O; N], mut f: F) -> R
-    where F: FnMut(R, T, O) -> R {
+    #[inline] fn zip_fold<O, R>(self, init: R, other: [O; N], mut f: impl FnMut(R, T, O) -> R) -> R {
         self.into_iter().zip(other).fold(init, |r, (x, y)| f(r, x, y))
     }
 
@@ -419,7 +532,7 @@ pub trait JsResultUtils<T>: Sized {
     fn expect_throw_with(self, f: impl FnOnce() -> String) -> T;
 	fn expect_throw(self, msg: &str) -> T;
     fn unwrap_throw(self, loc: (&str, u32, u32)) -> T;
-	fn report_err(self, loc: (&str, u32, u32)) -> Self;
+	fn report_err(self, loc: (&str, u32, u32)) -> Option<T>;
     /// best used with the `loc!` macro
     fn add_loc(self, loc: (&str, u32, u32)) -> Self;
 }
@@ -503,12 +616,12 @@ impl<T> JsResultUtils<T> for JsResult<T> {
     }
 
     #[inline]
-    fn report_err(mut self, loc: (&str, u32, u32)) -> Self {
+    fn report_err(mut self, loc: (&str, u32, u32)) -> Option<T> {
         self = self.add_loc(loc);
-        if let Err(err) = &self {
-            report_err(err.clone())
+        match self {
+            Ok(x) => Some(x),
+            Err(err) => {report_err(err.clone()); None},
         }
-        self
     }
 
     #[inline] fn add_loc(self, loc: (&str, u32, u32)) -> Self {
@@ -665,6 +778,8 @@ impl<'a, T: 'a + Copy> IterMutWithCtx<'a, T> {
 }
 
 pub trait SliceExt<T> {
+    fn any(&self, f: impl FnMut(&T) -> bool) -> bool;
+    fn all(&self, f: impl FnMut(&T) -> bool) -> bool;
     fn to_box(&self) -> Box<Self> where T: Clone;
     fn get_saturating(&self, id: usize) -> &T;
     fn get_saturating_mut(&mut self, id: usize) -> &mut T;
@@ -696,6 +811,18 @@ pub trait SliceExt<T> {
 }
 
 impl<T> SliceExt<T> for [T] {
+    #[inline] fn any(&self, mut f: impl FnMut(&T) -> bool) -> bool {
+        let mut res = false;
+        for i in self {res |= f(i)}
+        res
+    }
+
+    #[inline] fn all(&self, mut f: impl FnMut(&T) -> bool) -> bool {
+        let mut res = true;
+        for i in self {res &= f(i)}
+        res
+    }
+
     #[inline] fn to_box(&self) -> Box<Self> where T: Clone {self.into()}
 
     #[inline] fn get_saturating(&self, id: usize) -> &T {
@@ -1108,6 +1235,10 @@ impl RoundTo for Point {
 
 impl Point {
     pub const ZERO: Self = Self{x:0, y:0};
+
+    #[inline] pub fn is_zero(&self) -> bool {self.x == 0 && self.y == 0}
+    #[inline] pub fn nonzero(self) -> Option<Self> {if self.is_zero() {None} else {Some(self)}}
+
     #[inline] pub fn normalise(mut self, old_space: Rect, new_space: Rect) -> Self {
         self.y = (((self.y - old_space.bottom()) as f32 / old_space.height() as f32)
             * new_space.height() as f32) as i32 + new_space.bottom();
@@ -1506,16 +1637,18 @@ real_impl!(R64{f64}, R32{f32});
 
 #[macro_export]
 macro_rules! r32 {
-    ($x:literal) => {
+    ($x:literal) => {{
+        #[allow(unused_unsafe)]
         unsafe{$crate::utils::R32::new_unchecked($x)}
-    };
+    }};
 }
 
 #[macro_export]
 macro_rules! r64 {
-    ($x:literal) => {
+    ($x:literal) => {{
+        #[allow(unused_unsafe)]
         unsafe{$crate::utils::R64::new_unchecked($x)}
-    };
+    }};
 }
 
 #[test]

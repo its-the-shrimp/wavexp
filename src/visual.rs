@@ -15,14 +15,17 @@ use web_sys::{
     Path2d,
     AudioContext, 
     SvgElement, 
-    Element, MouseEvent};
+    Element};
 use wasm_bindgen::{Clamped, JsValue, JsCast};
-use yew::{TargetCast, NodeRef, function_component, Callback, Properties, scheduler::Shared, html, Html};
+use yew::{TargetCast, NodeRef};
 use crate::{
     utils::{SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, OptionExt,
         HtmlElementExt, 
-        Pipe, BoolExt, RangeExt, VecExt, R64, ArrayExt, ArrayFrom, IntoArray, SliceRef, ResultToJsResult, SliceMove, RoundTo, FlippedArray, default, report_err, WasmCell, Alias},
+        Pipe, BoolExt, RangeExt, VecExt, R64, ArrayExt,
+        ArrayFrom, IntoArray, SliceRef, ResultToJsResult,
+        SliceMove, RoundTo, FlippedArray, default, WasmCell,
+        Alias, ToEveryNth, ToIterIndicesMut},
     sound::{FromBeats, Secs},
     global::{AppEvent, AppContext, AppAction},
     input::{Buttons, Cursor},
@@ -32,81 +35,6 @@ use crate::{
     eval_once,
     js_array
 };
-
-pub struct EveryNth<'a, T> {
-    iter: &'a [T],
-    n: usize,
-    state: usize,
-    off: usize
-}
-
-impl<'a, T> Iterator for EveryNth<'a, T> {
-    type Item = &'a T;
-    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
-		if let res @Some(_) = self.iter.get(self.state) {
-            self.state += self.n;
-            res
-        } else {
-            self.off += 1;
-            if self.off == self.n {
-                None
-            } else {
-                self.state = self.off + self.n;
-                self.iter.get(self.state - self.n)
-            }
-        }
-    }
-}
-
-pub struct EveryNthMut<'a, T> {
-    iter: &'a mut [T],
-    n: usize,
-    state: usize,
-    off: usize
-}
-
-impl<'a, T> Iterator for EveryNthMut<'a, T> {
-    type Item = &'a mut T;
-    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
-		if let Some(res) = self.iter.get_mut(self.state) {
-            self.state += self.n;
-            Some(unsafe{(res as *mut T).as_mut().unwrap_unchecked()})
-        } else {
-            self.off += 1;
-            if self.off == self.n {
-                None
-            } else {
-                self.state = self.off + self.n;
-                self.iter.get_mut(self.state - self.n)
-                    .map(|x| unsafe{(x as *mut T).as_mut().unwrap_unchecked()})
-            }
-        }
-    }
-}
-
-pub trait ToEveryNth<T> {
-    fn every_nth(&self, n: usize) -> EveryNth<'_, T>;
-    fn every_nth_mut(&mut self, n: usize) -> EveryNthMut<'_, T>;
-}
-
-impl<T> ToEveryNth<T> for [T] {
-    #[inline] fn every_nth(&self, n: usize) -> EveryNth<'_, T> {
-        EveryNth {iter: self, n, state: 0, off: 0}
-    }
-    #[inline] fn every_nth_mut(&mut self, n: usize) -> EveryNthMut<'_, T> {
-        EveryNthMut {iter: self, n, state: 0, off: 0}
-    }
-}
-
-#[test]
-fn test_every_nth_mut() {
-    let mut data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    let transposed: Vec<u8>     = data.every_nth(3).copied().collect();
-    let transposed_mut: Vec<u8> = data.every_nth_mut(3).map(|x| *x).collect();
-    assert_eq!(transposed,     [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8]);
-    assert_eq!(transposed_mut, [0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8]);
-}
-
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Rgba {
@@ -265,6 +193,8 @@ impl HintHandler {
     #[inline] pub fn aux_bar(&self) -> &NodeRef {&self.aux_bar}
 }
 
+// make the trait aware of the types of stored coordinates and allow modifying the Y axis without
+// unsafe code or additional checks
 /// data that can be edited with a generic graph editor defined below
 pub trait Graphable: Sized + Ord {
     /// the name of the plane that will be displayed as a hint when hovered over it
@@ -286,11 +216,18 @@ pub trait Graphable: Sized + Ord {
     /// type of the inner data of the point, can be whatever and,
     /// unlike the coordinates, can be freely mutated
     type Inner;
+    /// type of the Y coordinate, used to allow modifying points' Y axis without unsafe code or
+    /// additional checks, which would be needed to modify the points' X axis
+    type Y;
 
     /// inner data of the point
     fn inner(&self) -> &Self::Inner;
     /// mutable inner data of the point
     fn inner_mut(&mut self) -> &mut Self::Inner;
+    /// Y axis of the point
+    fn y(&self) -> &Self::Y;
+    /// mutable Y axis of the point
+    fn y_mut(&mut self) -> &mut Self::Y;
     /// location of the point in user coordinates
     fn loc(&self) -> [R64; 2];
     /// change the location of the point in user coordinates when moved in the UI
@@ -303,7 +240,7 @@ pub trait Graphable: Sized + Ord {
     /// Handle points being moved in the UI.
     #[allow(unused_variables)] #[inline] fn on_move(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         delta: [R64; 2]
     ) {} 
@@ -316,7 +253,7 @@ pub trait Graphable: Sized + Ord {
     /// will be chosen by the graph editor itself.
     #[allow(unused_variables)] #[inline] fn on_click(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         pressed_at:    impl Deref<Target = [R64; 2]>,
         released_at:   impl Deref<Target = [R64; 2]>,
@@ -329,7 +266,7 @@ pub trait Graphable: Sized + Ord {
     /// Handler will still be called instead of `on_(point/selection)_hover`.
     #[allow(unused_variables)] #[inline] fn on_plane_hover(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         loc: impl Deref<Target = [R64; 2]>,
         first: bool
@@ -339,7 +276,7 @@ pub trait Graphable: Sized + Ord {
     /// `first` signifies whether this call is the first consecutive one.
     #[allow(unused_variables)] #[inline] fn on_point_hover(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         point_id: usize,
         first: bool
@@ -349,7 +286,7 @@ pub trait Graphable: Sized + Ord {
     /// `first` signifies whether this call is the first consecutive one.
     #[allow(unused_variables)] #[inline] fn on_selection_hover(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         first: bool
     ) {}
@@ -357,14 +294,14 @@ pub trait Graphable: Sized + Ord {
     /// The handler is only called if the graph editor doesn't know how to handle the action.
     #[allow(unused_variables)] #[inline] fn on_undo(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         action: &AppAction
     ) {}
     /// Handle the user canceling cancellation of an action.
     /// The handler is only called if the graph editor doesn't know how to handle the action.
     #[allow(unused_variables)] #[inline] fn on_redo(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         action: &AppAction
     ) {}
 
@@ -392,9 +329,11 @@ impl<'a, T: Graphable> Deref for GraphPointView<'a, T> {
 }
 
 impl<'a, T: Graphable> GraphPointView<'a, T> {
-    #[inline] pub fn inner(&mut self) -> &mut T::Inner {
-        self.0.inner_mut()
-    }
+    #[inline] pub fn inner(&mut self) -> &mut T::Inner {self.0.inner_mut()}
+    #[inline] pub fn y(&mut self) -> &mut T::Y {self.0.y_mut()}
+
+    // /// the caller must ensure that the point retains its sorted placement
+    // #[inline] pub unsafe fn unlock(self) -> &'a mut T {self.0}
 }
 
 // types as coordinate space hints:
@@ -450,6 +389,7 @@ impl AnyGraphEditor {
     #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
 
     #[inline] pub fn selection(&self) -> &[usize] {&self.selection}
+
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -510,6 +450,27 @@ impl<T: Graphable> GraphEditor<T> {
         self.data.iter_mut().map(GraphPointView)
     }
 
+    #[inline] pub fn iter_selection_mut(&mut self) -> impl Iterator<Item=GraphPointView<'_, T>> {
+        unsafe{self.data.iter_indices_unchecked_mut(&self.inner.selection)}
+            .map(GraphPointView)
+    }
+
+    #[inline] pub fn expand_selection(&mut self, ids: impl Iterator<Item = usize>) -> JsResult<()> {
+        let len = self.data.len();
+        for id in ids {
+            js_assert!(id < len)?;
+            self.selection.push_sorted(id);
+        }
+        Ok(())
+    }
+
+    /// The function is unsafe because maintaining sorted order of the points is on the caller.
+    #[inline] pub unsafe fn insert_point(&mut self, at: usize, point: T) {
+        self.redraw = true;
+        self.data.insert(at, point);
+        SliceMove{from: self.data.len(), to: at}.apply(&mut self.selection)
+    }
+
     /// returns the index at which the new point will be available
     #[inline] pub fn add_point(&mut self, point: T) -> usize {
         self.redraw = true;
@@ -518,13 +479,20 @@ impl<T: Graphable> GraphEditor<T> {
         to
     }
 
-    #[inline] pub fn remove_points(&mut self, to_remove: &[usize]) -> JsResult<()> {
+    /// `sink` is the function that will be called on every removed point.
+    /// If there's nothing to do with the points, standard library's `drop` function can be passed.
+    #[inline] pub fn remove_points(
+        &mut self,
+        to_remove: impl Iterator<Item = usize> + DoubleEndedIterator,
+        mut sink: impl FnMut((usize, T))
+    ) -> JsResult<()> {
         self.redraw = true;
-        js_assert!(to_remove.is_sorted())?;
         let GraphEditor{inner, data} = self;
         let mut ids_iter = inner.selection.iter_mut().rev();
-        for &id in to_remove.iter().rev() {
-            data.try_remove(id).to_js_result(loc!())?;
+        let mut prev_id = data.len();
+        for id in to_remove.rev() {
+            js_assert!(id < replace(&mut prev_id, id))?;
+            sink((id, data.try_remove(id).to_js_result(loc!())?));
             let rem = loop {
                 let Some(x) = ids_iter.next() else {break 0};
                 match id.cmp(x) {
@@ -572,7 +540,7 @@ impl<T: Graphable> GraphEditor<T> {
         loc.sub(&self.selection_src).zip_fold(true, self.selection_size, |r, x, y| r && 0.0 <= *x && x <= y)
     }
 
-    #[inline] fn set_zoom_focus(&mut self, ctx: &AppContext, cursor: Cursor, loc: impl Deref<Target = [R64; 2]>) {
+    #[inline] fn set_zoom_focus(&mut self, ctx: &mut AppContext, cursor: Cursor, loc: impl Deref<Target = [R64; 2]>) {
         let first = !matches!(self.focus, Focus::Plane{..});
         self.focus = Focus::Zoom{init_offset: self.offset,
             pivot: cursor.point + self.offset,
@@ -581,19 +549,19 @@ impl<T: Graphable> GraphEditor<T> {
         T::on_plane_hover(self, ctx, cursor, loc, first)
     }
 
-    #[inline] fn set_plane_focus(&mut self, ctx: &AppContext, cursor: Cursor, loc: impl Deref<Target = [R64; 2]>) {
+    #[inline] fn set_plane_focus(&mut self, ctx: &mut AppContext, cursor: Cursor, loc: impl Deref<Target = [R64; 2]>) {
         self.focus = Focus::Plane{origin: default(), init_offset: default(), press_time: default()};
         self.changed_focus = true;
         T::on_plane_hover(self, ctx, cursor, loc, true);
     }
 
-    #[inline] fn set_point_focus(&mut self, ctx: &AppContext, cursor: Cursor, id: usize) {
+    #[inline] fn set_point_focus(&mut self, ctx: &mut AppContext, cursor: Cursor, id: usize) {
         self.focus = Focus::Point{id, last_loc: default(), origin: default(), meta: false};
         self.changed_focus = true;
         T::on_point_hover(self, ctx, cursor, id, true)
     }
 
-    #[inline] fn set_selection_focus(&mut self, ctx: &AppContext, cursor: Cursor) {
+    #[inline] fn set_selection_focus(&mut self, ctx: &mut AppContext, cursor: Cursor) {
         self.focus = Focus::Selection{origin: default(), end: default(), meta: false};
         self.changed_focus = true;
         T::on_selection_hover(self, ctx, cursor, true)
@@ -640,10 +608,13 @@ impl<T: Graphable> GraphEditor<T> {
                 }
             } else {
                 if self.inner.last_cursor.left {
-                    ctx.register_action(AppAction::DragPlane{
-                        editor_id: self.inner.id,
-                        offset_delta: self.inner.offset - *init_offset,
-                        scale_delta: self.inner.scale.sub(init_scale)})
+                    let offset_delta = self.inner.offset - *init_offset;
+                    let scale_delta  = self.inner.scale.sub(init_scale);
+                    if !offset_delta.is_zero() || scale_delta.any(|x| **x != 0.0) {
+                        ctx.register_action(AppAction::DragPlane{
+                            editor_id: self.inner.id,
+                            offset_delta, scale_delta})
+                    }
                 }
                 if cursor.shift {
                     *pivot = cursor.point;
@@ -688,10 +659,11 @@ impl<T: Graphable> GraphEditor<T> {
                             Alias(&cursor_point_user_aligned_confined), Alias(&cursor_point_user_aligned_confined),
                             None);
 
-                        ctx.register_action(action.unwrap_or_else(|| AppAction::DragPlane{
-                            editor_id: self.inner.id,
-                            offset_delta: self.inner.offset - init_offset,
-                            scale_delta: default()}));
+                        if let Some(offset_delta) = (self.inner.offset - init_offset).nonzero() {
+                            ctx.register_action(action.unwrap_or(AppAction::DragPlane{
+                                editor_id: self.inner.id,
+                                offset_delta, scale_delta: default()}))
+                        }
                     } else {
                         let init_offset = *init_offset;
                         let prev_ids = take(&mut self.selection).into_boxed_slice();
@@ -700,22 +672,19 @@ impl<T: Graphable> GraphEditor<T> {
                             Alias(&cursor_point_user_aligned_confined), Alias(&cursor_point_user_aligned_confined),
                             Some(&prev_ids));
 
-                        if let Some(action) = action {
-                            ctx.register_action(action)
-                        } else {
-                            let offset_delta = self.offset - init_offset;
-                            if offset_delta != Point::ZERO {
-                                ctx.register_action(AppAction::DragPlane{
-                                    editor_id: self.id,
-                                    offset_delta,
-                                    scale_delta: default()});
-                            }
-                        }
                         if !prev_ids.is_empty() {
                             ctx.register_action(AppAction::SetSelection{
                                 editor_id: self.id,
                                 prev_ids, prev_size, prev_src: self.selection_src,
                                 cur_ids: self.selection.to_box(), cur_size: default(), cur_src: self.selection_src})
+                        }
+                        if let Some(action) = action {
+                            ctx.register_action(action)
+                        } else if let Some(offset_delta) = (self.offset - init_offset).nonzero() {
+                            ctx.register_action(AppAction::DragPlane{
+                                editor_id: self.id,
+                                offset_delta,
+                                scale_delta: default()});
                         }
                     }
                 } else if self.point_in_selection(*cursor_point_user) {
@@ -765,31 +734,25 @@ impl<T: Graphable> GraphEditor<T> {
                 }
             } else if self.inner.last_cursor.left {
                 let (meta, src, point_id) = (*meta, *origin, *id);
-                let prev_ids = if unsafe{self.get_unchecked(point_id)}.in_hitbox(*cursor_point_user) {
-                    self.set_selection_focus(ctx, cursor);
-                    replace(&mut self.selection, vec![point_id])
-                } else {
-                    self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined));
-                    take(&mut self.selection)
-                }.into_boxed_slice();
+                let prev_ids = replace(&mut self.selection, vec![point_id]).into_boxed_slice();
                 let action = T::on_click(self, ctx, cursor,
                     &src, Alias(&cursor_point_user_aligned_confined),
                     Some(&prev_ids));
 
-                if let Some(action) = action {
-                    ctx.register_action(action)
-                } else {
-                    let delta = cursor_point_user_aligned_confined.sub(&src);
-                    if *delta.sum::<R64>() > 0.0 {
-                        ctx.register_action(AppAction::DragPoint{
-                            editor_id: self.id, point_id, delta, meta});
-                    }
-                }
                 if self.selection[..] != prev_ids[..] {
                     ctx.register_action(AppAction::SetSelection{
                         editor_id: self.id,
                         prev_ids, prev_src: self.selection_src, prev_size: take(&mut self.selection_size),
                         cur_ids: self.selection.to_box(), cur_src: self.selection_src, cur_size: default()});
+                }
+                if let Some(action) = action {
+                    ctx.register_action(action)
+                } else {
+                    let delta = cursor_point_user_aligned_confined.sub(&src);
+                    if delta.any(|x| **x != 0.0) {
+                        ctx.register_action(AppAction::DragPoint{
+                            editor_id: self.id, point_id, delta, meta});
+                    }
                 }
             } else if cursor.shift {
                 self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))
@@ -1074,33 +1037,5 @@ impl<T: Graphable> GraphEditor<T> {
 
             _ => (),
         })
-    }
-}
-
-// TODO: make this not need `<T>` somehow
-#[derive(Debug, PartialEq, Properties)]
-pub struct GraphEditorCanvasProps<T: Graphable> {
-    pub emitter: Callback<AppEvent>,
-    pub editor: Shared<GraphEditor<T>>,
-    pub id: Option<&'static str>
-}
-
-#[function_component(GraphEditorCanvas)]
-pub fn f<T: Graphable>(props: &GraphEditorCanvasProps<T>) -> Html {
-    let GraphEditorCanvasProps{emitter, editor, id} = props;
-    match editor.try_borrow().to_js_result(loc!()) {
-        Ok(editor) => {
-            let (canvas_id, id) = (*id, editor.id());
-            html!{<canvas ref={editor.canvas().clone()} id={canvas_id}
-                onpointerdown={emitter.reform(move  |e| AppEvent::Focus(id, e))}
-                onpointerup={emitter.reform(move    |e| AppEvent::Hover(id, MouseEvent::from(e)))}
-                onpointermove={emitter.reform(move  |e| AppEvent::Hover(id, MouseEvent::from(e)))}
-                onpointerenter={emitter.reform(move |e| AppEvent::Enter(id, MouseEvent::from(e)))}
-                onpointerout={emitter.reform(move   |_| AppEvent::Leave(id))}/>}
-        }
-        Err(err) => {
-            report_err(err);
-            html!{"Error"}
-        }
     }
 }

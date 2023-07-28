@@ -3,7 +3,9 @@ use std::{
     fmt::{self, Display, Formatter, Debug},
     cmp::Ordering,
     rc::Rc,
-    borrow::Cow, cell::{RefCell, LazyCell}, slice::from_ref};
+    borrow::Cow,
+    cell::{RefCell, LazyCell},
+    iter::once};
 use js_sys::Math::random;
 use web_sys::{
     AudioNode,
@@ -22,9 +24,9 @@ use crate::{
         JsResult,
         JsResultUtils,
         R64, R32,
-        LooseEq, OptionExt, Pipe, document, VecExt, js_error, Take, default, ResultToJsResult, report_err},
-    input::{Slider, Button, Buttons, Cursor},
-    visual::{GraphEditor, Graphable, GraphEditorCanvas},
+        LooseEq, OptionExt, Pipe, document, VecExt, js_error, Take, default, ResultToJsResult, report_err, ArrayExt},
+    input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas},
+    visual::{GraphEditor, Graphable},
     global::{AppContext, AppEvent, AppAction},
     loc,
     r32,
@@ -174,7 +176,7 @@ impl SoundType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoteBlock {
     pub offset: Beats,
     pub value: Note,
@@ -201,9 +203,13 @@ impl Graphable for NoteBlock {
     const OFFSET_Y_BOUND: Range<R64> = r64![-2.0] .. r64![-2.0];
     const Y_SNAP: R64 = r64![1.0];
     type Inner = Beats;
+    type Y = Note;
 
     #[inline] fn inner(&self) -> &Self::Inner {&self.len}
     #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.len}
+
+    #[inline] fn y(&self) -> &Self::Y {&self.value}
+    #[inline] fn y_mut(&mut self) -> &mut Self::Y {&mut self.value}
 
     #[inline] fn loc(&self) -> [R64; 2] {
         [self.offset, self.value.recip().index().into()]
@@ -227,6 +233,7 @@ impl Graphable for NoteBlock {
             }
         }
     }
+
     fn draw(&self, _next: Option<&Self>, mapper: impl Fn([R64; 2]) -> [R64; 2]) -> JsResult<Path2d> {
         let res = Path2d::new().add_loc(loc!())?;
         let y: R64 = self.value.recip().index().into();
@@ -245,7 +252,7 @@ impl Graphable for NoteBlock {
         format!("{:.3}, {}", loc[0], Note::from_index(loc[1].into()).recip())
     }
 
-    #[inline] fn on_move(editor: &mut GraphEditor<Self>, ctx: &AppContext, _: Cursor, _: [R64; 2]) {
+    #[inline] fn on_move(editor: &mut GraphEditor<Self>, ctx: &mut AppContext, _: Cursor, _: [R64; 2]) {
         if editor.selection().contains(&(editor.len() - 1)) {
             ctx.emit_event(AppEvent::RedrawEditorPlane)
         }
@@ -253,7 +260,7 @@ impl Graphable for NoteBlock {
 
     #[inline] fn on_click(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         pressed_at:    impl Deref<Target = [R64; 2]>,
         released_at:   impl Deref<Target = [R64; 2]>,
@@ -262,23 +269,37 @@ impl Graphable for NoteBlock {
         if cursor.meta && editor.selection().is_empty() && old_selection.map_or(true, |x| x.is_empty()) && *pressed_at == *released_at {
             let [offset, y] = *released_at;
             let value = Note::from_index(y.into()).recip();
-            let note_id = editor.add_point(Self{offset, value, len: r64![1.0]});
+            let block_id = editor.add_point(Self{offset, value, len: r64![1.0]});
             ctx.emit_event(AppEvent::RedrawEditorPlane);
-            Some(AppAction::AddNoteBlock{note_id, offset, value})
+            Some(AppAction::AddNoteBlock{block_id, offset, value})
         } else {
-            let mut sel = editor.selection().to_owned();
-            sel.retain(|i| *unsafe{editor.get_unchecked(*i)}.len > 0.0);
-            if !sel.is_empty() {
-                _ = editor.remove_points(&sel).report_err(loc!());
-                ctx.emit_event(AppEvent::RedrawEditorPlane)
-            }
-            None
+            let mut to_remove = editor.selection().to_owned();
+            let sel_len = to_remove.len();
+            to_remove.retain(|i| *unsafe{editor.get_unchecked(*i)}.len <= 0.0);
+            let n_to_remove = to_remove.len();
+            if  n_to_remove > 0 {
+                let mut removed = Vec::with_capacity(n_to_remove);
+                let delta = released_at.sub(&pressed_at);
+                let (delta_x, delta_y) = (delta[0], isize::from(delta[1]));
+                ctx.emit_event(AppEvent::RedrawEditorPlane);
+                editor.remove_points(to_remove.iter().copied(), |mut x| {
+                    x.1.len -= delta_x;
+                    x.1.value -= delta_y;
+                    removed.push(x)
+                }).report_err(loc!());
+                let removed = Rc::new(removed);
+                Some(if sel_len == n_to_remove {
+                    AppAction::RemoveNoteBlocks(removed)
+                } else {
+                    AppAction::StretchNoteBlocks{delta_x, delta_y, removed}
+                })
+            } else {None}
         }
     }
 
     #[inline] fn on_plane_hover(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         _: impl Deref<Target = [R64; 2]>,
         first: bool
@@ -309,7 +330,7 @@ impl Graphable for NoteBlock {
 
     #[inline] fn on_point_hover(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         point_id: usize,
         first: bool
@@ -331,7 +352,7 @@ impl Graphable for NoteBlock {
 
     #[inline] fn on_selection_hover(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         first: bool
     ) {
@@ -352,25 +373,63 @@ impl Graphable for NoteBlock {
 
     #[inline] fn on_undo(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         action: &AppAction
     ) {
-        if let AppAction::AddNoteBlock{note_id, ..} = action {
-            editor.force_redraw();
-            _ = editor.remove_points(from_ref(note_id)).report_err(loc!());
-            ctx.emit_event(AppEvent::RedrawEditorPlane)
+        match action {
+            AppAction::AddNoteBlock{block_id, ..} => {
+                editor.remove_points(once(*block_id), drop).report_err(loc!());
+                ctx.emit_event(AppEvent::RedrawEditorPlane)
+            }
+
+            AppAction::RemoveNoteBlocks(blocks) => {
+                for &(at, b) in blocks.iter() {
+                    unsafe{editor.insert_point(at, b)}
+                }
+                ctx.emit_event(AppEvent::RedrawEditorPlane)
+            }
+
+            &AppAction::StretchNoteBlocks{delta_x, delta_y, ref removed} => {
+                for mut b in editor.iter_selection_mut() {
+                    *b.inner() -= delta_x;
+                    *b.y() -= delta_y;
+                }
+                for &(id, b) in removed.iter() {
+                    unsafe{editor.insert_point(id, b)}
+                }
+                editor.expand_selection(removed.iter().map(|(id, _)| *id))
+                    .report_err(loc!());
+            }
+
+            _ => (),
         }
     }
 
     #[inline] fn on_redo(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         action: &AppAction
     ) {
-        if let &AppAction::AddNoteBlock{offset, value, ..} = action {
-            editor.force_redraw();
-            _ = editor.add_point(NoteBlock{offset, value, len: r64![1.0]});
-            ctx.emit_event(AppEvent::RedrawEditorPlane)
+        match action {
+            &AppAction::AddNoteBlock{offset, value, block_id} => {
+                unsafe{editor.insert_point(block_id, NoteBlock{offset, value, len: r64![1.0]})};
+                ctx.emit_event(AppEvent::RedrawEditorPlane)
+            }
+
+            AppAction::RemoveNoteBlocks(blocks) => {
+                editor.remove_points(blocks.iter().map(|(id, _)| *id), drop).report_err(loc!());
+                ctx.emit_event(AppEvent::RedrawEditorPlane)
+            }
+
+            &AppAction::StretchNoteBlocks{delta_x, delta_y, ref removed} => {
+                editor.remove_points(removed.iter().map(|(id, _)| *id), drop)
+                    .report_err(loc!());
+                for mut b in editor.iter_selection_mut() {
+                    *b.inner() += delta_x;
+                    *b.y() += delta_y;
+                }
+            }
+            _ => (),
         }
     }
 }
@@ -616,12 +675,29 @@ impl Sound {
                         pattern.try_borrow_mut().to_js_result(loc!())?
                             .handle_event(e, ctx).add_loc(loc!())?
                     }
-                    if let AppEvent::Undo(actions) = e {
-                        for action in actions.iter() {
+
+                    match e {
+                        AppEvent::Undo(actions) => for action in actions.iter() {
                             if let AppAction::SetBlockType(_) = action {
                                 *self = default()
                             }
                         }
+
+                        AppEvent::AfterUndoing(actions) => for action in actions.iter() {
+                            if let AppAction::SwitchTab{from: 1, ..} = action {
+                                pattern.try_borrow_mut().to_js_result(loc!())?
+                                    .init().add_loc(loc!())?
+                            }
+                        }
+
+                        AppEvent::AfterRedoing(actions) => for action in actions.iter() {
+                            if let AppAction::SwitchTab{to: 1, ..} = action {
+                                pattern.try_borrow_mut().to_js_result(loc!())?
+                                    .init().add_loc(loc!())?
+                            }
+                        }
+
+                        _ => (),
                     }
                 }
             }
@@ -647,7 +723,7 @@ impl Sound {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SoundBlock {
     pub sound: Sound,
     pub layer: i32,
@@ -681,9 +757,13 @@ impl Graphable for SoundBlock {
     const OFFSET_Y_BOUND: Range<R64> = r64![-1.0] .. R64::INFINITY;
     const Y_SNAP: R64 = r64![1.0];
     type Inner = Sound;
+    type Y = i32;
 
     #[inline] fn inner(&self) -> &Self::Inner {&self.sound}
     #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.sound}
+
+    #[inline] fn y(&self) -> &Self::Y {&self.layer}
+    #[inline] fn y_mut(&mut self) -> &mut Self::Y {&mut self.layer}
 
     #[inline] fn loc(&self) -> [R64; 2] {[self.offset, self.layer.into()]}
 
@@ -720,7 +800,7 @@ impl Graphable for SoundBlock {
 
     #[inline] fn on_click(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         pressed_at:    impl Deref<Target = [R64; 2]>,
         released_at:   impl Deref<Target = [R64; 2]>,
@@ -740,7 +820,7 @@ impl Graphable for SoundBlock {
 
     #[inline] fn on_plane_hover(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         _: impl Deref<Target = [R64; 2]>,
         first: bool
@@ -771,7 +851,7 @@ impl Graphable for SoundBlock {
 
     #[inline] fn on_point_hover(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         point_id: usize,
         first: bool
@@ -787,7 +867,7 @@ impl Graphable for SoundBlock {
 
     #[inline] fn on_selection_hover(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: &mut AppContext,
         cursor: Cursor,
         first: bool
     ) {
@@ -803,23 +883,23 @@ impl Graphable for SoundBlock {
 
     #[inline] fn on_undo(
         editor: &mut GraphEditor<Self>,
-        _: &AppContext,
+        _: &mut AppContext,
         action: &AppAction
     ) {
         if let AppAction::AddSoundBlock{block_id, ..} = action {
             editor.force_redraw();
-            _ = editor.remove_points(from_ref(block_id)).add_loc(loc!());
+            editor.remove_points(once(*block_id), drop).report_err(loc!());
         }
     }
 
     #[inline] fn on_redo(
         editor: &mut GraphEditor<Self>,
-        _: &AppContext,
+        _: &mut AppContext,
         action: &AppAction
     ) {
-        if let &AppAction::AddSoundBlock{offset, layer, ..} = action {
+        if let &AppAction::AddSoundBlock{offset, layer, block_id} = action {
             editor.force_redraw();
-            editor.add_point(SoundBlock{sound: default(), layer, offset});
+            unsafe{editor.insert_point(block_id, SoundBlock{sound: default(), layer, offset})}
         }
     }
 
