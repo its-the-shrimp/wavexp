@@ -27,7 +27,7 @@ use crate::{
     input::{Button, Slider, Switch, GraphEditorCanvas},
     loc,
     r64,
-    js_try, js_log};
+    js_try};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, PartialEq, Clone)]
@@ -193,25 +193,49 @@ pub enum AppAction {
     /// remove note blocks
     RemoveNoteBlocks(Rc<Vec<(usize, NoteBlock)>>),
     /// change the length of note blocks, optionally removing some
-    StretchNoteBlocks{delta_x: R64, delta_y: isize, removed: Rc<Vec<(usize, NoteBlock)>>}
+    StretchNoteBlocks{delta_x: R64, delta_y: isize, removed: Rc<Vec<(usize, NoteBlock)>>},
+    /// change sound's volume
+    SetVolume{from: R32, to: R32},
+    /// change sound's attack time
+    SetAttack{from: R64, to: R64},
+    /// change sound'ss decay time
+    SetDecay{from: R64, to: R64},
+    /// change sound's sustain level
+    SetSustain{from: R32, to: R32},
+    /// change sound's release time
+    SetRelease{from: R64, to: R64},
+    /// change global tempo
+    SetTempo{from: R64, to: R64},
+    /// set global snap step for all graph editors
+    SetSnapStep{from: R64, to: R64},
+    /// set master gain level for the composition
+    SetMasterGain{from: R32, to: R32},
 }
 
 impl AppAction {
     #[inline] pub fn name(&self) -> &'static str {
         match self {
-            AppAction::Start => "Start",
-            AppAction::DragPlane{..} => "Drag Plane",
-            AppAction::DragPoint{..} => "Drag Block",
-            AppAction::DragSelection{..} => "Drag Selection",
-            AppAction::SetSelection{..} => "Set Selection",
-            AppAction::AddSoundBlock{..} => "Add Sound Block",
-            AppAction::AddNoteBlock{..} => "Add Note Block",
-            AppAction::Select{..} => "Open Sound Block Editor",
-            AppAction::SetBlockType(..) => "Set Sound Block Type",
-            AppAction::SwitchTab{..} => "Switch Tabs",
-            AppAction::RemoveSoundBlock(..) => "Remove Sound Block",
-            AppAction::RemoveNoteBlocks(..) => "Remove Note Blocks",
-            AppAction::StretchNoteBlocks{..} => "Drag & Remove Blocks"
+            Self::Start => "Start",
+            Self::DragPlane{..} => "Drag Plane",
+            Self::DragPoint{..} => "Drag Block",
+            Self::DragSelection{..} => "Drag Selection",
+            Self::SetSelection{..} => "Set Selection",
+            Self::AddSoundBlock{..} => "Add Sound Block",
+            Self::AddNoteBlock{..} => "Add Note Block",
+            Self::Select{..} => "Open Sound Block Editor",
+            Self::SetBlockType(..) => "Set Sound Block Type",
+            Self::SwitchTab{..} => "Switch Tabs",
+            Self::RemoveSoundBlock(..) => "Remove Sound Block",
+            Self::RemoveNoteBlocks(..) => "Remove Note Blocks",
+            Self::StretchNoteBlocks{..} => "Drag & Remove Blocks",
+            Self::SetVolume{..} => "Set Volume",
+            Self::SetAttack{..} => "Set Attack Time",
+            Self::SetDecay{..} => "Set Decay Time",
+            Self::SetSustain{..} => "Set Sustain Level",
+            Self::SetRelease{..} => "Set Release Time",
+            Self::SetTempo{..} => "Set Tempo",
+            Self::SetSnapStep{..} => "Set Snap Step",
+            Self::SetMasterGain{..} => "Set Master Gain Level"
         }
     }
 }
@@ -263,7 +287,6 @@ impl AppContext {
     #[inline] pub fn emit_event(&mut self, event: AppEvent) {self.event_emitter.emit(event)}
 
     #[inline] pub fn register_action(&mut self, action: AppAction) {
-        js_log!("registered {action:?}");
         self.actions.drain(self.actions.len() - take(&mut self.undid_actions) ..);
         self.actions.push(action);
         self.action_done = true;
@@ -273,8 +296,11 @@ impl AppContext {
 
     pub fn handle_event(&mut self, event: &AppEvent) -> JsResult<()> {
         Ok(match event {
-            &AppEvent::Bpm(bpm) =>
-                self.bps = bpm / 60u8,
+            &AppEvent::Bpm(bpm) => {
+                let to = bpm / 60;
+                self.register_action(AppAction::SetTempo{from: self.bps, to}); 
+                self.bps = to
+            }
 
             &AppEvent::AudioStarted(at) =>
                 self.play_since = at,
@@ -285,8 +311,10 @@ impl AppContext {
             &AppEvent::Frame(now) =>
                 self.now = now / 1000u16,
 
-            &AppEvent::SnapStep(value) =>
-                self.snap_step = value,
+            &AppEvent::SnapStep(to) => {
+                self.register_action(AppAction::SetSnapStep{from: self.snap_step, to});
+                self.snap_step = to
+            }
 
             AppEvent::Select(_) =>
                 self.selected_tab = 0,
@@ -333,6 +361,12 @@ impl AppContext {
                     AppAction::Select{prev_selected_tab, ..} =>
                         self.selected_tab = prev_selected_tab,
 
+                    AppAction::SetTempo{from, ..} =>
+                        self.bps = from,
+
+                    AppAction::SetSnapStep{from, ..} =>
+                        self.snap_step = from,
+
                     _ => ()
                 }
             }
@@ -344,6 +378,12 @@ impl AppContext {
 
                     AppAction::Select{..} =>
                         self.selected_tab = 0,
+
+                    AppAction::SetTempo{to, ..} =>
+                        self.bps = to,
+
+                    AppAction::SetSnapStep{to, ..} =>
+                        self.snap_step = to,
 
                     _ => ()
                 }

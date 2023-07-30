@@ -193,10 +193,8 @@ impl HintHandler {
     #[inline] pub fn aux_bar(&self) -> &NodeRef {&self.aux_bar}
 }
 
-// make the trait aware of the types of stored coordinates and allow modifying the Y axis without
-// unsafe code or additional checks
 /// data that can be edited with a generic graph editor defined below
-pub trait Graphable: Sized + Ord {
+pub trait GraphPoint: Sized + Ord {
     /// the name of the plane that will be displayed as a hint when hovered over it
     const EDITOR_NAME: &'static str;
     /// bounds for the points along the X axis
@@ -321,14 +319,14 @@ pub trait Graphable: Sized + Ord {
 
 /// a special reference wrapper: access to everything is immutable,
 /// except for the inner value, which is mutable
-pub struct GraphPointView<'a, T: Graphable>(&'a mut T);
+pub struct GraphPointView<'a, T: GraphPoint>(&'a mut T);
 
-impl<'a, T: Graphable> Deref for GraphPointView<'a, T> {
+impl<'a, T: GraphPoint> Deref for GraphPointView<'a, T> {
     type Target = T;
     #[inline] fn deref(&self) -> &Self::Target {self.0}
 }
 
-impl<'a, T: Graphable> GraphPointView<'a, T> {
+impl<'a, T: GraphPoint> GraphPointView<'a, T> {
     #[inline] pub fn inner(&mut self) -> &mut T::Inner {self.0.inner_mut()}
     #[inline] pub fn y(&mut self) -> &mut T::Y {self.0.y_mut()}
 
@@ -339,7 +337,7 @@ impl<'a, T: Graphable> GraphPointView<'a, T> {
 // types as coordinate space hints:
 /// in canvas coordinates with plane offset
 type OffsetCanvasPoint = Point;
-/// in user coordinates, aligned to snap step and limited to bounds specified by `Graphable::(X/Y)_BOUND`
+/// in user coordinates, aligned to snap step and limited to bounds specified by `GraphPoint::(X/Y)_BOUND`
 type ConfinedAlignedUserPoint = [R64; 2];
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -393,21 +391,21 @@ impl AnyGraphEditor {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GraphEditor<T: Graphable> {
+pub struct GraphEditor<T: GraphPoint> {
     inner: AnyGraphEditor,
     data: Vec<T>
 }
 
-impl<T: Graphable> Deref for GraphEditor<T> {
+impl<T: GraphPoint> Deref for GraphEditor<T> {
     type Target = AnyGraphEditor;
     #[inline] fn deref(&self) -> &Self::Target {&self.inner}
 }
 
-impl<T: Graphable> DerefMut for GraphEditor<T> {
+impl<T: GraphPoint> DerefMut for GraphEditor<T> {
     #[inline] fn deref_mut(&mut self) -> &mut Self::Target {&mut self.inner}
 }
 
-impl<T: Graphable> GraphEditor<T> {
+impl<T: GraphPoint> GraphEditor<T> {
     #[inline] pub fn new(data: Vec<T>) -> Self {
         let res = Self{data,
             inner: AnyGraphEditor{

@@ -5,8 +5,6 @@
 #![feature(const_float_classify)]
 #![feature(array_windows)]
 #![feature(const_range_bounds)]
-#![feature(is_sorted)]
-#![feature(iter_advance_by)]
 #![feature(lazy_cell)]
 #![allow(clippy::unit_arg)]
 #![allow(clippy::option_map_unit_fn)]

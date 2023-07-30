@@ -5,7 +5,7 @@ use std::{
     rc::Rc,
     borrow::Cow,
     cell::{RefCell, LazyCell},
-    iter::once};
+    iter::once, mem::replace};
 use js_sys::Math::random;
 use web_sys::{
     AudioNode,
@@ -26,7 +26,7 @@ use crate::{
         R64, R32,
         LooseEq, OptionExt, Pipe, document, VecExt, js_error, Take, default, ResultToJsResult, report_err, ArrayExt},
     input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas},
-    visual::{GraphEditor, Graphable},
+    visual::{GraphEditor, GraphPoint},
     global::{AppContext, AppEvent, AppAction},
     loc,
     r32,
@@ -195,7 +195,7 @@ impl Ord for NoteBlock {
     }
 }
 
-impl Graphable for NoteBlock {
+impl GraphPoint for NoteBlock {
     const EDITOR_NAME: &'static str = "Note Editor";
     // TODO: make this generic over the number of defined notes
     const Y_BOUND: Range<R64> = r64![0.0] .. r64![36.0];
@@ -664,11 +664,11 @@ impl Sound {
                 AppEvent::AfterSetTab(1) => pattern.try_borrow_mut().to_js_result(loc!())?
                     .init().add_loc(loc!())?,
 
-                AppEvent::Volume(value)  =>  *volume = *value,
-                AppEvent::Attack(value)  =>  *attack = *value,
-                AppEvent::Decay(value)   =>   *decay = *value,
-                AppEvent::Sustain(value) => *sustain = *value,
-                AppEvent::Release(value) => *release = *value,
+                &AppEvent::Volume(to)  => ctx.register_action(AppAction::SetVolume {from: replace(volume,   to), to}),
+                &AppEvent::Attack(to)  => ctx.register_action(AppAction::SetAttack {from: replace(attack,   to), to}),
+                &AppEvent::Decay(to)   => ctx.register_action(AppAction::SetDecay  {from: replace(decay,    to), to}),
+                &AppEvent::Sustain(to) => ctx.register_action(AppAction::SetSustain{from: replace(sustain,  to), to}),
+                &AppEvent::Release(to) => ctx.register_action(AppAction::SetRelease{from: replace(release,  to), to}),
 
                 e => {
                     if ctx.selected_tab() == 1 {
@@ -678,8 +678,28 @@ impl Sound {
 
                     match e {
                         AppEvent::Undo(actions) => for action in actions.iter() {
-                            if let AppAction::SetBlockType(_) = action {
-                                *self = default()
+                            match *action {
+                                AppAction::SetBlockType(_) => {
+                                    *self = default();
+                                    break
+                                }
+                                AppAction::SetVolume {from, ..} => *volume   = from,
+                                AppAction::SetAttack {from, ..} => *attack   = from,
+                                AppAction::SetDecay  {from, ..} => *decay    = from,
+                                AppAction::SetSustain{from, ..} => *sustain  = from,
+                                AppAction::SetRelease{from, ..} => *release  = from,
+                                _ => (),
+                            }
+                        }
+
+                        AppEvent::Redo(actions) => for action in actions.iter() {
+                            match *action {
+                                AppAction::SetVolume {to, ..} => *volume   = to,
+                                AppAction::SetAttack {to, ..} => *attack   = to,
+                                AppAction::SetDecay  {to, ..} => *decay    = to,
+                                AppAction::SetSustain{to, ..} => *sustain  = to,
+                                AppAction::SetRelease{to, ..} => *release  = to,
+                                _ => (),
                             }
                         }
 
@@ -750,7 +770,7 @@ impl Ord for SoundBlock {
     }
 }
 
-impl Graphable for SoundBlock {
+impl GraphPoint for SoundBlock {
     const EDITOR_NAME: &'static str = "Editor plane";
     const Y_BOUND: Range<R64> = r64![0.0] .. R64::INFINITY;
     const SCALE_Y_BOUND: Range<R64> = r64![5.0] .. r64![30.0];
@@ -1021,8 +1041,22 @@ impl Sequencer {
                 .try_borrow_mut().to_js_result(loc!())?
                 .force_redraw(),
 
-            AppEvent::MasterGain(value) => self.gain
-                .gain().set_value(**value),
+            &AppEvent::MasterGain(to) => {
+                ctx.register_action(AppAction::SetMasterGain{from: self.gain(), to});
+                self.gain.gain().set_value(*to)
+            }
+
+            AppEvent::Undo(actions) => for action in actions.iter() {
+                if let AppAction::SetMasterGain{from, ..} = *action {
+                    self.gain.gain().set_value(*from)
+                }
+            }
+
+            AppEvent::Redo(actions) => for action in actions.iter() {
+                if let AppAction::SetMasterGain{to, ..} = *action {
+                    self.gain.gain().set_value(*to)
+                }
+            }
 
             AppEvent::Frame(_) => {
                 let mut pattern = self.pattern.try_borrow_mut().to_js_result(loc!())?;

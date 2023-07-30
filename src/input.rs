@@ -22,7 +22,7 @@ use yew::{
     Callback, Properties, scheduler::Shared, function_component};
 use crate::{
     utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, BoolExt, R64, Point, HtmlElementExt, ResultToJsResult, report_err},
-    loc, visual::{Graphable, GraphEditor}, global::AppEvent};
+    loc, visual::{GraphPoint, GraphEditor}, global::AppEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Buttons {
@@ -165,6 +165,12 @@ impl Component for Slider {
         false
     }
 
+    fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
+        let new_initial = ctx.props().initial;
+        if old_props.initial != new_initial {self.value = new_initial}
+        true
+    }
+
 	fn view(&self, ctx: &Context<Self>) -> Html {
         html! {
             <canvas ref={self.canvas.clone()} class="input"
@@ -237,7 +243,7 @@ impl Component for Switch {
 
     fn create(ctx: &Context<Self>) -> Self {
         Self {focused: false, hovered: false,
-            value: R64::from(ctx.props().initial), canvas: NodeRef::default()}
+            value: ctx.props().initial.into(), canvas: NodeRef::default()}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -273,6 +279,12 @@ impl Component for Switch {
             return true
         }.report_err(loc!());
         false
+    }
+
+    fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
+        let new_initial = ctx.props().initial;
+        if old_props.initial != new_initial {self.value = new_initial.into()}
+        true
     }
 
 	fn view(&self, ctx: &Context<Self>) -> Html {
@@ -367,14 +379,14 @@ impl Component for Button {
 
 // TODO: make this not need `<T>` somehow
 #[derive(Debug, PartialEq, Properties)]
-pub struct GraphEditorCanvasProps<T: Graphable> {
+pub struct GraphEditorCanvasProps<T: GraphPoint> {
     pub emitter: Callback<AppEvent>,
     pub editor: Shared<GraphEditor<T>>,
     pub id: Option<&'static str>
 }
 
 #[function_component(GraphEditorCanvas)]
-pub fn f<T: Graphable>(props: &GraphEditorCanvasProps<T>) -> Html {
+pub fn f<T: GraphPoint>(props: &GraphEditorCanvasProps<T>) -> Html {
     let GraphEditorCanvasProps{emitter, editor, id} = props;
     match editor.try_borrow().to_js_result(loc!()) {
         Ok(editor) => {
