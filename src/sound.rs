@@ -10,7 +10,6 @@ use js_sys::Math::random;
 use web_sys::{
     AudioNode,
     AudioContext,
-    AudioBufferSourceNode,
     AudioBuffer,
     GainNode,
     Path2d, DynamicsCompressorNode, AnalyserNode, HtmlCanvasElement};
@@ -24,7 +23,7 @@ use crate::{
         JsResult,
         JsResultUtils,
         R64, R32,
-        LooseEq, OptionExt, Pipe, document, VecExt, js_error, Take, default, ResultToJsResult, report_err, ArrayExt},
+        LooseEq, OptionExt, Pipe, document, VecExt, Take, default, ResultToJsResult, report_err, ArrayExt},
     input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas},
     visual::{GraphEditor, GraphPoint},
     global::{AppContext, AppEvent, AppAction},
@@ -437,10 +436,10 @@ impl GraphPoint for NoteBlock {
 #[derive(Default, Debug, Clone)]
 pub enum Sound {
     #[default] None,
-    Note{volume: R32, pattern: Shared<GraphEditor<NoteBlock>>,
-        attack: Beats, decay: Beats, sustain: R32, release: Beats},
-    Noise{gen: AudioBufferSourceNode, src: AudioBuffer,
-        gain: GainNode, len: Beats}
+    Note{pattern: Shared<GraphEditor<NoteBlock>>,
+        volume: R32, attack: Beats, decay: Beats, sustain: R32, release: Beats},
+    Noise{pattern: Shared<GraphEditor<NoteBlock>>, src: AudioBuffer,
+        volume: R32, attack: Beats, decay: Beats, sustain: R32, release: Beats}
 }
 
 impl Sound {
@@ -452,8 +451,8 @@ impl Sound {
     #[inline] pub fn new(sound_type: SoundType, ctx: &AudioContext) -> JsResult<Self> {
         Ok(match sound_type {
             SoundType::Note =>
-                Self::Note{volume: r32![1.0], pattern: Rc::new(RefCell::new(GraphEditor::new(vec![]))),
-                    attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2]},
+                Self::Note{pattern: default(),
+                    volume: r32![1.0], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2]},
 
             SoundType::Noise => {
                 let len = ctx.sample_rate();
@@ -462,75 +461,65 @@ impl Sound {
                 let src = ctx.create_buffer(2, len as u32, len).add_loc(loc!())?;
                 src.copy_to_channel(&src_buf, 0).add_loc(loc!())?;
                 src.copy_to_channel(&src_buf, 1).add_loc(loc!())?;
-                let gain = ctx.create_gain().add_loc(loc!())?;
-                gain.gain().set_value(0.2);
-                Self::Noise{gen: ctx.create_buffer_source().add_loc(loc!())?,
-                    src, gain, len: r64![1.0]}
+                Self::Noise{pattern: default(), src,
+                    volume: r32![0.2], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2]}
             }
         })
     }
 
     #[inline] pub fn name(&self) -> &'static str {
         match self {
-            Sound::None => "Undefined",
-            Sound::Note{..} => "Note",
-            Sound::Noise{..} => "White Noise"
+            Self::None => "Undefined",
+            Self::Note{..} => "Note",
+            Self::Noise{..} => "White Noise"
         }
     }
 
     /// called before starting to play the sounds to reset their state and allow them to schedule
     /// their starting events
-    pub fn reset(&mut self, ctx: &AppContext, self_id: usize, self_offset: Beats, mut scheduler: impl FnMut(SoundEvent))
+    pub fn reset(&mut self, _: &AppContext, self_id: usize, self_offset: Beats, mut scheduler: impl FnMut(SoundEvent))
     -> JsResult<()> {
         Ok(match self {
-            Sound::None => (),
+            Self::None => (),
 
-            Sound::Note{pattern, ..} =>
+            Self::Note{pattern, ..} | Self::Noise{pattern, ..} =>
                 scheduler(SoundEvent::BlockStart{id: self_id, state: 0,
                     when: self_offset
                         + unsafe{pattern.try_borrow().to_js_result(loc!())?.first_unchecked()}.offset}),
-
-            Sound::Noise{gen, src, gain, ..} => {
-                gen.disconnect().add_loc(loc!())?;
-                *gen = ctx.audio_ctx().create_buffer_source().add_loc(loc!())?;
-                gen.set_loop(true);
-                gen.set_buffer(Some(src));
-                gen.start().add_loc(loc!())?;
-                gen.connect_with_audio_node(gain).add_loc(loc!())?;
-                scheduler(SoundEvent::Start{id: self_id, when: self_offset})
-            }
         })
     }
 
-    pub fn poll(&mut self, plug: &AudioNode, ctx: &AppContext, src: SoundEvent, mut scheduler: impl FnMut(SoundEvent)) -> JsResult<()> {
-        Ok(match self {
-            Sound::None => (),
+    pub fn poll(&mut self, plug: &AudioNode, ctx: &AppContext, event: SoundEvent, mut scheduler: impl FnMut(SoundEvent)) -> JsResult<()> {
+        Ok(match *self {
+            Self::None => (),
 
-            Sound::Note{volume, pattern, attack, decay, mut sustain, release} => match src {
+            Self::Note{volume, ref pattern, attack, decay, mut sustain, release} => match event {
                 SoundEvent::BlockStart{id, when, mut state} => {
                     let pattern = pattern.try_borrow().to_js_result(loc!())?;
                     let cur = unsafe{pattern.get_unchecked(state)};
                     let block_core = ctx.audio_ctx().create_oscillator().add_loc(loc!())?;
+                    let block = ctx.audio_ctx().create_gain().add_loc(loc!())?;
                     block_core.frequency().set_value(*cur.value.freq());
                     block_core.start().add_loc(loc!())?;
-                    let block = ctx.audio_ctx().create_gain().add_loc(loc!())?;
-                    {
-                        let mut at = ctx.now();
-                        let gain = block.gain();
-                        gain.set_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
-                        at += attack.to_secs(ctx.bps());
-                        gain.linear_ramp_to_value_at_time(**volume, *at).add_loc(loc!())?;
-                        at += decay.to_secs(ctx.bps());
-                        sustain *= *volume;
-                        gain.linear_ramp_to_value_at_time(*sustain, *at).add_loc(loc!())?;
-                        at = ctx.now() + cur.len.to_secs(ctx.bps());
-                        gain.set_value_at_time(*sustain, *at).add_loc(loc!())?;
-                        at += release.to_secs(ctx.bps());
-                        gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
-                    }
                     block_core.connect_with_audio_node(&block).add_loc(loc!())?
                         .connect_with_audio_node(plug).add_loc(loc!())?;
-                    scheduler(SoundEvent::BlockEnd{id, when: when + cur.len + *release + r64![0.1].secs_to_beats(ctx.bps()), block});
+
+                    let now = ctx.now();
+                    let mut at = now;
+                    let gain = block.gain();
+                    let bps = ctx.bps();
+                    gain.set_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
+                    at += attack.to_secs(bps);
+                    gain.linear_ramp_to_value_at_time(*volume, *at).add_loc(loc!())?;
+                    at += decay.to_secs(bps);
+                    sustain *= volume;
+                    gain.linear_ramp_to_value_at_time(*sustain, *at).add_loc(loc!())?;
+                    at = now + cur.len.to_secs(bps);
+                    gain.set_value_at_time(*sustain, *at).add_loc(loc!())?;
+                    at += release.to_secs(bps);
+                    gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
+
+                    scheduler(SoundEvent::BlockEnd{id, when: when + cur.len + *release + r64![0.1].secs_to_beats(bps), block});
 
                     state += 1;
                     if let Some(next) = pattern.get(state) {
@@ -539,48 +528,71 @@ impl Sound {
                 }
 
                 SoundEvent::BlockEnd{block, ..} => block.disconnect().add_loc(loc!())?,
-
-                src => js_error(format!("invalid event: {src:?}"), loc!())?,
             }
 
-            Sound::Noise{gain, len, ..} => match src {
-                SoundEvent::Start{id, when} => {
-                    gain.connect_with_audio_node(plug).add_loc(loc!())?;
-                    scheduler(SoundEvent::Stop{id, when: when + *len});
+            Self::Noise{ref pattern, ref src, volume, attack, decay, mut sustain, release} => match event {
+                SoundEvent::BlockStart{id, when, mut state} => {
+                    let pattern = pattern.try_borrow().to_js_result(loc!())?;
+                    let cur = unsafe{pattern.get_unchecked(state)};
+                    let block_core = ctx.audio_ctx().create_buffer_source().add_loc(loc!())?;
+                    let block = ctx.audio_ctx().create_gain().add_loc(loc!())?;
+                    block_core.set_buffer(Some(src));
+                    block_core.set_loop(true);
+                    block_core.start().add_loc(loc!())?;
+                    block_core.connect_with_audio_node(&block).add_loc(loc!())?
+                        .connect_with_audio_node(plug).add_loc(loc!())?;
+
+                    let now = ctx.now();
+                    let mut at = now;
+                    let gain = block.gain();
+                    let bps = ctx.bps();
+                    gain.set_value(0.0);
+                    gain.set_value_at_time(0.0, *at).add_loc(loc!())?;
+                    at += attack.to_secs(bps);
+                    gain.linear_ramp_to_value_at_time(*volume, *at).add_loc(loc!())?;
+                    at += decay.to_secs(bps);
+                    sustain *= volume;
+                    gain.linear_ramp_to_value_at_time(*sustain, *at).add_loc(loc!())?;
+                    at = now + cur.len.to_secs(bps);
+                    gain.set_value_at_time(*sustain, *at).add_loc(loc!())?;
+                    at += release.to_secs(bps);
+                    gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at).add_loc(loc!())?;
+
+                    scheduler(SoundEvent::BlockEnd{id, when: when + cur.len + *release + r64![0.1].secs_to_beats(bps), block});
+
+                    state += 1;
+                    if let Some(next) = pattern.get(state) {
+                        scheduler(SoundEvent::BlockStart{id, when: when + next.offset - cur.offset, state})
+                    }
                 }
 
-                SoundEvent::Stop{..} => gain.disconnect().add_loc(loc!())?,
-
-                src => js_error(format!("invalid event: {src:?}"), loc!())?,
+                SoundEvent::BlockEnd{block, ..} => block.disconnect().add_loc(loc!())?,
             }
         })
     }
 
     #[inline] pub fn len(&self) -> Beats {
         match self {
-            Sound::None => r64![1.0],
-            Sound::Note{pattern, ..} => match pattern.try_borrow().to_js_result(loc!()) {
+            Self::None => r64![1.0],
+            Self::Note{pattern, ..} | Self::Noise{pattern, ..} => match pattern.try_borrow().to_js_result(loc!()) {
                 Ok(p) => unsafe{p.last_unchecked()}.pipe(|x| x.offset + x.len),
                 Err(err) => {report_err(err); default()}
             }
-            Sound::Noise{len, ..} => *len
         }
     }
 
     #[inline] pub fn tabs(&self) -> &'static [TabInfo] {
         match self {
-            Sound::None =>
+            Self::None =>
                 &[TabInfo{name: "Choose Sound Type"}],
-            Sound::Note{..} =>
-                &[TabInfo{name: "General"}, TabInfo{name: "Pattern"}],
-            Sound::Noise{..} =>
-                &[TabInfo{name: "General"}, TabInfo{name: "Volume"}]
+            Self::Note{..} | Self::Noise{..} =>
+                &[TabInfo{name: "General"}, TabInfo{name: "Pattern"}]
         }
     }
 
     pub fn params(&self, ctx: &AppContext, setter: Callback<AppEvent>) -> Html {
         match self {
-            Sound::None => html!{<div class="horizontal-menu">
+            Self::None => html!{<div class="horizontal-menu">
                 {for Sound::TYPES.iter().map(|x| html!{
                     <Button name={x.name()}
                         setter={setter.reform(|_| AppEvent::SetBlockType(*x))}>
@@ -589,7 +601,7 @@ impl Sound {
                 })}
             </div>},
 
-            Sound::Note{volume, pattern, attack, decay, sustain, release} => match ctx.selected_tab() {
+            Self::Note{pattern, volume, attack, decay, sustain, release} => match ctx.selected_tab() {
                 0 /* General */ => html!{<div id="inputs">
                     <Slider key="note-att"
                     setter={setter.reform(AppEvent::Attack)}
@@ -622,20 +634,35 @@ impl Sound {
                 tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
             }
 
-            Sound::Noise{len, gain, ..} => match ctx.selected_tab() {
+            Self::Noise{pattern, volume, attack, decay, sustain, release, ..} => match ctx.selected_tab() {
                 0 /* General */ => html!{<div id="inputs">
-                    <Slider key="noise-dur"
-                    setter={setter.reform(AppEvent::Duration)}
-                    max={r64![100.0]}
-                    name="Noise Duration" postfix="Beats"
-                    initial={*len}/>
-                </div>},
-                1 /* Volume */ => html!{<div id="inputs">
-                    <Slider key={format!("{self:p}-noise-vol")}
+                    <Slider key="noise-att"
+                    setter={setter.reform(AppEvent::Attack)}
+                    name="Noise Attack Time" postfix="Beats"
+                    max={r64![3.0]}
+                    initial={*attack}/>
+                    <Slider key="noise-dec"
+                    setter={setter.reform(AppEvent::Decay)}
+                    name="Noise Decay Time" postfix="Beats"
+                    max={r64![3.0]}
+                    initial={*decay}/>
+                    <Slider key="noise-sus"
+                    setter={setter.reform(|x| AppEvent::Sustain(R32::from(x)))}
+                    name="Noise Sustain Level"
+                    initial={*sustain}/>
+                    <Slider key="noise-rel"
+                    setter={setter.reform(AppEvent::Release)}
+                    name="Noise Release Time" postfix="Beats"
+                    max={r64![3.0]}
+                    initial={*release}/>
+                    <Slider key="noise-vol"
                     setter={setter.reform(|x| AppEvent::Volume(R32::from(x)))}
                     name="Noise Volume"
-                    initial={R64::new_or(R64::ZERO, gain.gain().value() as f64)}/>
+                    initial={*volume}/>
                 </div>},
+                1 /* Pattern */ => html!{
+                    <GraphEditorCanvas<NoteBlock> editor={pattern} emitter={setter}/>
+                },
                 tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
             }
         }
@@ -660,29 +687,33 @@ impl Sound {
                 _ => (),
             }
 
-            Sound::Note{volume, pattern, attack, decay, sustain, release} => match event {
+            Sound::Note {volume, pattern, attack, decay, sustain, release} |
+            Sound::Noise{volume, pattern, attack, decay, sustain, release, ..} => match event {
                 AppEvent::AfterSetTab(1) => pattern.try_borrow_mut().to_js_result(loc!())?
                     .init().add_loc(loc!())?,
 
-                &AppEvent::Volume(to)  => ctx.register_action(AppAction::SetVolume {from: replace(volume,   to), to}),
-                &AppEvent::Attack(to)  => ctx.register_action(AppAction::SetAttack {from: replace(attack,   to), to}),
-                &AppEvent::Decay(to)   => ctx.register_action(AppAction::SetDecay  {from: replace(decay,    to), to}),
+                &AppEvent::Volume (to) => ctx.register_action(AppAction::SetVolume {from: replace(volume,   to), to}),
+                &AppEvent::Attack (to) => ctx.register_action(AppAction::SetAttack {from: replace(attack,   to), to}),
+                &AppEvent::Decay  (to) => ctx.register_action(AppAction::SetDecay  {from: replace(decay,    to), to}),
                 &AppEvent::Sustain(to) => ctx.register_action(AppAction::SetSustain{from: replace(sustain,  to), to}),
                 &AppEvent::Release(to) => ctx.register_action(AppAction::SetRelease{from: replace(release,  to), to}),
 
                 e => {
-                    if ctx.selected_tab() == 1 {
-                        pattern.try_borrow_mut().to_js_result(loc!())?
-                            .handle_event(e, ctx).add_loc(loc!())?
-                    }
+                    let mut pattern = if ctx.selected_tab() == 1 {
+                        let mut res = pattern.try_borrow_mut().to_js_result(loc!())?;
+                        res.handle_event(e, ctx).add_loc(loc!())?;
+                        Some(res)
+                    } else {None};
 
                     match e {
                         AppEvent::Undo(actions) => for action in actions.iter() {
                             match *action {
                                 AppAction::SetBlockType(_) => {
+                                    drop(pattern);
                                     *self = default();
                                     break
                                 }
+
                                 AppAction::SetVolume {from, ..} => *volume   = from,
                                 AppAction::SetAttack {from, ..} => *attack   = from,
                                 AppAction::SetDecay  {from, ..} => *decay    = from,
@@ -705,39 +736,19 @@ impl Sound {
 
                         AppEvent::AfterUndoing(actions) => for action in actions.iter() {
                             if let AppAction::SwitchTab{from: 1, ..} = action {
-                                pattern.try_borrow_mut().to_js_result(loc!())?
-                                    .init().add_loc(loc!())?
+                                pattern.as_mut().to_js_result(loc!())?.init().add_loc(loc!())?
                             }
                         }
 
                         AppEvent::AfterRedoing(actions) => for action in actions.iter() {
                             if let AppAction::SwitchTab{to: 1, ..} = action {
-                                pattern.try_borrow_mut().to_js_result(loc!())?
-                                    .init().add_loc(loc!())?
+                                pattern.as_mut().to_js_result(loc!())?.init().add_loc(loc!())?
                             }
                         }
 
                         _ => (),
                     }
                 }
-            }
-
-            Sound::Noise{len, gain, ..} => match event {
-                AppEvent::Duration(value) => {
-                    *len = *value;
-                    ctx.emit_event(AppEvent::RedrawEditorPlane)
-                }
-
-                AppEvent::Volume(value) => gain.gain().set_value(**value),
-
-                AppEvent::Undo(actions) => for action in actions.iter() {
-                    if let AppAction::SetBlockType(_) = action {
-                        *self = default();
-                        ctx.emit_event(AppEvent::RedrawEditorPlane)
-                    }
-                }
-
-                _ => ()
             }
         })
     }
@@ -943,9 +954,7 @@ impl SoundBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SoundEvent {
     BlockStart{id: usize, when: Beats, state: usize},
-    BlockEnd{id: usize, when: Beats, block: GainNode},
-    Start {id: usize, when: Beats},
-    Stop  {id: usize, when: Beats}
+    BlockEnd{id: usize, when: Beats, block: GainNode}
 }
 
 impl PartialOrd for SoundEvent {
@@ -963,18 +972,14 @@ impl Ord for SoundEvent {
 impl SoundEvent {
     #[inline] fn target(&self) -> usize {
         match self {
-            SoundEvent::Start{id, ..}
-            | SoundEvent::Stop{id, ..}
-            | SoundEvent::BlockStart{id, ..}
+            SoundEvent::BlockStart{id, ..}
             | SoundEvent::BlockEnd{id, ..} => *id
         }
     }
 
     #[inline] fn when(&self) -> Secs {
         match self {
-            SoundEvent::Start{when, ..}
-            | SoundEvent::Stop{when, ..}
-            | SoundEvent::BlockStart{when, ..} 
+            SoundEvent::BlockStart{when, ..} 
             | SoundEvent::BlockEnd{when, ..} => *when,
         }
     }

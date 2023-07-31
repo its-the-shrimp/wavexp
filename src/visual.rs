@@ -405,6 +405,10 @@ impl<T: GraphPoint> DerefMut for GraphEditor<T> {
     #[inline] fn deref_mut(&mut self) -> &mut Self::Target {&mut self.inner}
 }
 
+impl<T: GraphPoint> Default for GraphEditor<T> {
+    #[inline] fn default() -> Self {Self::new(vec![])}
+}
+
 impl<T: GraphPoint> GraphEditor<T> {
     #[inline] pub fn new(data: Vec<T>) -> Self {
         let res = Self{data,

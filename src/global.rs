@@ -63,8 +63,6 @@ pub enum AppEvent {
     Remove,
     /// epilog version of `Remove`
     AfterRemove,
-    /// emitted when a `Noise` sound block's duration has been changed
-    Duration(R64),
     /// emitted when a `Noise` sound block's volume has been changed
     Volume(R32),
     /// emitted when a sound block's attack time has been changed
@@ -209,7 +207,7 @@ pub enum AppAction {
     /// set global snap step for all graph editors
     SetSnapStep{from: R64, to: R64},
     /// set master gain level for the composition
-    SetMasterGain{from: R32, to: R32},
+    SetMasterGain{from: R32, to: R32}
 }
 
 impl AppAction {
@@ -535,7 +533,7 @@ impl Component for App {
                                     <polygon points="20,60 50,20 80,60 70,60 70,80 30,80 30,60"/>
                                 </svg>
                             </Button>
-                            <Button name="Remove component"
+                            <Button name="Remove sound block"
                             setter={setter.reform(|_| AppEvent::Remove)}>
                                 <svg viewBox="0 0 100 100">
                                     <polygon points="27,35 35,27 50,42 65,27 73,35 58,50 73,65 65,73 50,58 35,73 27,65 42,50"/>
