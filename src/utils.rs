@@ -24,6 +24,7 @@ use web_sys::{
     Element,
     console::warn_1,
     HtmlElement};
+use yew::html::IntoPropValue;
 
 // TODO: RcVec
 
@@ -1294,12 +1295,20 @@ macro_rules! real_from_ints_impl {
                 #[inline] fn from(x: $int) -> Self {Self(x as $float)}
             }
 
+            impl IntoPropValue<$real> for $int {
+                #[inline] fn into_prop_value(self) -> $real {self.into()}
+            }
+
             impl From<$real> for $int {
                 #[inline] fn from(x: $real) -> Self {
                     if      *x >= <$int>::MAX as $float {<$int>::MAX}
                     else if *x <= <$int>::MIN as $float {<$int>::MIN}
                     else {*x as $int}
                 }
+            }
+
+            impl IntoPropValue<$int> for $real {
+                #[inline] fn into_prop_value(self) -> $int {self.into()}
             }
 
             impl PartialEq<$int> for $real {
@@ -1486,7 +1495,7 @@ macro_rules! real_impl {
             fn from(x: $other_real) -> Self {Self(x.0 as $float)}
         }
 
-        impl yew::html::IntoPropValue<$other_real> for $real {
+        impl IntoPropValue<$other_real> for $real {
             #[inline]
             fn into_prop_value(self) -> $other_real {self.into()}
         }

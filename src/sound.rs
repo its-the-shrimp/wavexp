@@ -1,5 +1,5 @@
 use std::{
-    ops::{Add, Sub, Range, AddAssign, SubAssign, Deref, Not},
+    ops::{Add, Sub, Range, AddAssign, SubAssign, Deref, Not, DerefMut},
     fmt::{self, Display, Formatter, Debug},
     cmp::Ordering,
     rc::Rc,
@@ -24,7 +24,7 @@ use crate::{
         JsResultUtils,
         R64, R32,
         LooseEq, OptionExt, Pipe, document, VecExt, Take, default, ResultToJsResult, report_err, ArrayExt},
-    input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas},
+    input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas, Counter},
     visual::{GraphEditor, GraphPoint},
     global::{AppContext, AppEvent, AppAction},
     loc,
@@ -437,9 +437,11 @@ impl GraphPoint for NoteBlock {
 pub enum Sound {
     #[default] None,
     Note{pattern: Shared<GraphEditor<NoteBlock>>,
-        volume: R32, attack: Beats, decay: Beats, sustain: R32, release: Beats},
+        volume: R32, attack: Beats, decay: Beats, sustain: R32, release: Beats,
+        rep_count: usize},
     Noise{pattern: Shared<GraphEditor<NoteBlock>>, src: AudioBuffer,
-        volume: R32, attack: Beats, decay: Beats, sustain: R32, release: Beats}
+        volume: R32, attack: Beats, decay: Beats, sustain: R32, release: Beats,
+        rep_count: usize},
 }
 
 impl Sound {
@@ -452,7 +454,8 @@ impl Sound {
         Ok(match sound_type {
             SoundType::Note =>
                 Self::Note{pattern: default(),
-                    volume: r32![1.0], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2]},
+                    volume: r32![1.0], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2],
+                    rep_count: 1},
 
             SoundType::Noise => {
                 let len = ctx.sample_rate();
@@ -462,7 +465,8 @@ impl Sound {
                 src.copy_to_channel(&src_buf, 0).add_loc(loc!())?;
                 src.copy_to_channel(&src_buf, 1).add_loc(loc!())?;
                 Self::Noise{pattern: default(), src,
-                    volume: r32![0.2], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2]}
+                    volume: r32![0.2], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2],
+                    rep_count: 1}
             }
         })
     }
@@ -479,13 +483,16 @@ impl Sound {
     /// their starting events
     pub fn reset(&mut self, _: &AppContext, self_id: usize, self_offset: Beats, mut scheduler: impl FnMut(SoundEvent))
     -> JsResult<()> {
-        Ok(match self {
+        Ok(match *self {
             Self::None => (),
 
-            Self::Note{pattern, ..} | Self::Noise{pattern, ..} =>
-                scheduler(SoundEvent::BlockStart{id: self_id, state: 0,
-                    when: self_offset
-                        + unsafe{pattern.try_borrow().to_js_result(loc!())?.first_unchecked()}.offset}),
+            Self::Note{ref pattern, rep_count, ..} | Self::Noise{ref pattern, rep_count, ..} => {
+                let base = self_offset + unsafe{pattern.try_borrow().to_js_result(loc!())?.first_unchecked()}.offset;
+                let len = self.len();
+                for i in 0 .. rep_count {
+                    scheduler(SoundEvent::BlockStart{id: self_id, state: 0, when: base + len * i})
+                }
+            }
         })
     }
 
@@ -493,7 +500,7 @@ impl Sound {
         Ok(match *self {
             Self::None => (),
 
-            Self::Note{volume, ref pattern, attack, decay, mut sustain, release} => match event {
+            Self::Note{volume, ref pattern, attack, decay, mut sustain, release, ..} => match event {
                 SoundEvent::BlockStart{id, when, mut state} => {
                     let pattern = pattern.try_borrow().to_js_result(loc!())?;
                     let cur = unsafe{pattern.get_unchecked(state)};
@@ -530,7 +537,7 @@ impl Sound {
                 SoundEvent::BlockEnd{block, ..} => block.disconnect().add_loc(loc!())?,
             }
 
-            Self::Noise{ref pattern, ref src, volume, attack, decay, mut sustain, release} => match event {
+            Self::Noise{ref pattern, ref src, volume, attack, decay, mut sustain, release, ..} => match event {
                 SoundEvent::BlockStart{id, when, mut state} => {
                     let pattern = pattern.try_borrow().to_js_result(loc!())?;
                     let cur = unsafe{pattern.get_unchecked(state)};
@@ -581,12 +588,19 @@ impl Sound {
         }
     }
 
+    #[inline] pub fn rep_count(&self) -> usize {
+        match *self {
+            Self::None => 1,
+            Self::Note{rep_count, ..} | Self::Noise{rep_count, ..} => rep_count
+        }
+    }
+
     #[inline] pub fn tabs(&self) -> &'static [TabInfo] {
         match self {
             Self::None =>
                 &[TabInfo{name: "Choose Sound Type"}],
             Self::Note{..} | Self::Noise{..} =>
-                &[TabInfo{name: "General"}, TabInfo{name: "Pattern"}]
+                &[TabInfo{name: "General"}, TabInfo{name: "Envelope"}, TabInfo{name: "Pattern"}]
         }
     }
 
@@ -601,41 +615,20 @@ impl Sound {
                 })}
             </div>},
 
-            Self::Note{pattern, volume, attack, decay, sustain, release} => match ctx.selected_tab() {
+            Self::Note {pattern, volume, attack, decay, sustain, release, rep_count, ..} |
+            Self::Noise{pattern, volume, attack, decay, sustain, release, rep_count, ..} => match ctx.selected_tab() {
                 0 /* General */ => html!{<div id="inputs">
-                    <Slider key="note-att"
-                    setter={setter.reform(AppEvent::Attack)}
-                    name="Note Attack Time" postfix="Beats"
-                    max={r64![3.0]}
-                    initial={*attack}/>
-                    <Slider key="note-dec"
-                    setter={setter.reform(AppEvent::Decay)}
-                    name="Note Decay Time" postfix="Beats"
-                    max={r64![3.0]}
-                    initial={*decay}/>
-                    <Slider key="note-sus"
-                    setter={setter.reform(|x| AppEvent::Sustain(R32::from(x)))}
-                    name="Note Sustain Level"
-                    initial={*sustain}/>
-                    <Slider key="note-rel"
-                    setter={setter.reform(AppEvent::Release)}
-                    name="Note Release Time" postfix="Beats"
-                    min={r64![0.1].secs_to_beats(ctx.bps())}
-                    max={r64![3.0]}
-                    initial={*release}/>
-                    <Slider key="note-vol"
+                    <Slider key="noise-vol"
                     setter={setter.reform(|x| AppEvent::Volume(R32::from(x)))}
-                    name="Note Volume"
+                    name="Noise Volume"
                     initial={*volume}/>
+                    <Counter<usize> key="note-repcnt"
+                    setter={setter.reform(AppEvent::RepCount)}
+                    name="Number Of Pattern Repetitions"
+                    min={r64![1.0]}
+                    initial={*rep_count}/>
                 </div>},
-                1 /* Pattern */ => html!{
-                    <GraphEditorCanvas<NoteBlock> editor={pattern} emitter={setter}/>
-                },
-                tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
-            }
-
-            Self::Noise{pattern, volume, attack, decay, sustain, release, ..} => match ctx.selected_tab() {
-                0 /* General */ => html!{<div id="inputs">
+                1 /* Envelope */ => html!{<div id="inputs">
                     <Slider key="noise-att"
                     setter={setter.reform(AppEvent::Attack)}
                     name="Noise Attack Time" postfix="Beats"
@@ -655,12 +648,8 @@ impl Sound {
                     name="Noise Release Time" postfix="Beats"
                     max={r64![3.0]}
                     initial={*release}/>
-                    <Slider key="noise-vol"
-                    setter={setter.reform(|x| AppEvent::Volume(R32::from(x)))}
-                    name="Noise Volume"
-                    initial={*volume}/>
                 </div>},
-                1 /* Pattern */ => html!{
+                2 /* Pattern */ => html!{
                     <GraphEditorCanvas<NoteBlock> editor={pattern} emitter={setter}/>
                 },
                 tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
@@ -687,19 +676,23 @@ impl Sound {
                 _ => (),
             }
 
-            Sound::Note {volume, pattern, attack, decay, sustain, release} |
-            Sound::Noise{volume, pattern, attack, decay, sustain, release, ..} => match event {
-                AppEvent::AfterSetTab(1) => pattern.try_borrow_mut().to_js_result(loc!())?
+            Sound::Note {volume, pattern, attack, decay, sustain, release, rep_count} |
+            Sound::Noise{volume, pattern, attack, decay, sustain, release, rep_count, ..} => match event {
+                AppEvent::AfterSetTab(2) => pattern.try_borrow_mut().to_js_result(loc!())?
                     .init().add_loc(loc!())?,
 
-                &AppEvent::Volume (to) => ctx.register_action(AppAction::SetVolume {from: replace(volume,   to), to}),
-                &AppEvent::Attack (to) => ctx.register_action(AppAction::SetAttack {from: replace(attack,   to), to}),
-                &AppEvent::Decay  (to) => ctx.register_action(AppAction::SetDecay  {from: replace(decay,    to), to}),
-                &AppEvent::Sustain(to) => ctx.register_action(AppAction::SetSustain{from: replace(sustain,  to), to}),
-                &AppEvent::Release(to) => ctx.register_action(AppAction::SetRelease{from: replace(release,  to), to}),
+                &AppEvent::Volume  (to) => ctx.register_action(AppAction::SetVolume  {from: replace(volume,    to), to}),
+                &AppEvent::Attack  (to) => ctx.register_action(AppAction::SetAttack  {from: replace(attack,    to), to}),
+                &AppEvent::Decay   (to) => ctx.register_action(AppAction::SetDecay   {from: replace(decay,     to), to}),
+                &AppEvent::Sustain (to) => ctx.register_action(AppAction::SetSustain {from: replace(sustain,   to), to}),
+                &AppEvent::Release (to) => ctx.register_action(AppAction::SetRelease {from: replace(release,   to), to}),
+                &AppEvent::RepCount(to) => {
+                    ctx.register_action(AppAction::SetRepCount{from: replace(rep_count, to), to});
+                    ctx.emit_event(AppEvent::RedrawEditorPlane)
+                }
 
                 e => {
-                    let mut pattern = if ctx.selected_tab() == 1 {
+                    let pattern = if ctx.selected_tab() == 2 {
                         let mut res = pattern.try_borrow_mut().to_js_result(loc!())?;
                         res.handle_event(e, ctx).add_loc(loc!())?;
                         Some(res)
@@ -714,35 +707,45 @@ impl Sound {
                                     break
                                 }
 
-                                AppAction::SetVolume {from, ..} => *volume   = from,
-                                AppAction::SetAttack {from, ..} => *attack   = from,
-                                AppAction::SetDecay  {from, ..} => *decay    = from,
-                                AppAction::SetSustain{from, ..} => *sustain  = from,
-                                AppAction::SetRelease{from, ..} => *release  = from,
+                                AppAction::SetVolume  {from, ..} => *volume    = from,
+                                AppAction::SetAttack  {from, ..} => *attack    = from,
+                                AppAction::SetDecay   {from, ..} => *decay     = from,
+                                AppAction::SetSustain {from, ..} => *sustain   = from,
+                                AppAction::SetRelease {from, ..} => *release   = from,
+                                AppAction::SetRepCount{from, ..} => {
+                                    *rep_count = from;
+                                    ctx.emit_event(AppEvent::RedrawEditorPlane)
+                                }
                                 _ => (),
                             }
                         }
 
                         AppEvent::Redo(actions) => for action in actions.iter() {
                             match *action {
-                                AppAction::SetVolume {to, ..} => *volume   = to,
-                                AppAction::SetAttack {to, ..} => *attack   = to,
-                                AppAction::SetDecay  {to, ..} => *decay    = to,
-                                AppAction::SetSustain{to, ..} => *sustain  = to,
-                                AppAction::SetRelease{to, ..} => *release  = to,
+                                AppAction::SetVolume  {to, ..} => *volume    = to,
+                                AppAction::SetAttack  {to, ..} => *attack    = to,
+                                AppAction::SetDecay   {to, ..} => *decay     = to,
+                                AppAction::SetSustain {to, ..} => *sustain   = to,
+                                AppAction::SetRelease {to, ..} => *release   = to,
+                                AppAction::SetRepCount{to, ..} => {
+                                    *rep_count = to;
+                                    ctx.emit_event(AppEvent::RedrawEditorPlane)
+                                }
                                 _ => (),
                             }
                         }
 
                         AppEvent::AfterUndoing(actions) => for action in actions.iter() {
-                            if let AppAction::SwitchTab{from: 1, ..} = action {
-                                pattern.as_mut().to_js_result(loc!())?.init().add_loc(loc!())?
+                            if let AppAction::SwitchTab{from: 2, ..} = action {
+                                pattern.to_js_result(loc!())?.init().add_loc(loc!())?;
+                                break
                             }
                         }
 
                         AppEvent::AfterRedoing(actions) => for action in actions.iter() {
-                            if let AppAction::SwitchTab{to: 1, ..} = action {
-                                pattern.as_mut().to_js_result(loc!())?.init().add_loc(loc!())?
+                            if let AppAction::SwitchTab{to: 2, ..} = action {
+                                pattern.to_js_result(loc!())?.init().add_loc(loc!())?;
+                                break
                             }
                         }
 
@@ -759,6 +762,15 @@ pub struct SoundBlock {
     pub sound: Sound,
     pub layer: i32,
     pub offset: Beats
+}
+
+impl Deref for SoundBlock {
+    type Target = Sound;
+    #[inline] fn deref(&self) -> &Self::Target {&self.sound}
+}
+
+impl DerefMut for SoundBlock {
+    #[inline] fn deref_mut(&mut self) -> &mut Self::Target {&mut self.sound}
 }
 
 impl PartialEq for SoundBlock {
@@ -815,7 +827,14 @@ impl GraphPoint for SoundBlock {
         let res = Path2d::new().add_loc(loc!())?;
         let src = mapper([self.offset, self.layer.into()]);
         let dst = mapper([self.offset + self.sound.len(), (self.layer + 1).into()]);
-        res.rect(*src[0], *src[1], *dst[0] - *src[0], *dst[1] - *src[1]);
+        let [w, h] = dst.sub(&src);
+        let rep_count = self.rep_count();
+        res.rect(*src[0], *src[1], *w * rep_count as f64, *h);
+        for i in 1 .. rep_count {
+            let x = *src[0] + *w * i as f64;
+            res.move_to(x, *src[1]);
+            res.line_to(x, *dst[1]);
+        }
         Ok(res)
     }
 

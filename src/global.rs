@@ -122,8 +122,10 @@ pub enum AppEvent {
     /// The contained number is the number of actions to undo.
     Unwind(usize),
     /// emitted when the user rewinds action history in the UI.
-    /// The contained numbr is the number of actions to redo.
-    Rewind(usize)
+    /// The contained number is the number of actions to redo.
+    Rewind(usize),
+    /// set the repetition count of a sound block
+    RepCount(usize)
 }
 
 impl AppEvent {
@@ -207,7 +209,9 @@ pub enum AppAction {
     /// set global snap step for all graph editors
     SetSnapStep{from: R64, to: R64},
     /// set master gain level for the composition
-    SetMasterGain{from: R32, to: R32}
+    SetMasterGain{from: R32, to: R32},
+    /// set repetition count of a sound block
+    SetRepCount{from: usize, to: usize},
 }
 
 impl AppAction {
@@ -233,7 +237,8 @@ impl AppAction {
             Self::SetRelease{..} => "Set Release Time",
             Self::SetTempo{..} => "Set Tempo",
             Self::SetSnapStep{..} => "Set Snap Step",
-            Self::SetMasterGain{..} => "Set Master Gain Level"
+            Self::SetMasterGain{..} => "Set Master Gain Level",
+            Self::SetRepCount{..} => "Set Sound Block Rep Count"
         }
     }
 }
