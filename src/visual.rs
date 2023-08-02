@@ -236,11 +236,14 @@ pub trait GraphPoint: Sized + Ord {
 
     ////// HANDLERS
     /// Handle points being moved in the UI.
+    /// `point` is the ID of the point that's being moved or `None` if a selection or plane is
+    /// moved instead of 1 point.
     #[allow(unused_variables)] #[inline] fn on_move(
         editor: &mut GraphEditor<Self>,
         ctx: &mut AppContext,
         cursor: Cursor,
-        delta: [R64; 2]
+        delta: [R64; 2],
+        point: Option<usize>
     ) {} 
     /// Handle the editor space being clicked, i.e. pressed & released.
     /// The current selection will be available in the `editor` itself.
@@ -728,11 +731,12 @@ impl<T: GraphPoint> GraphEditor<T> {
                     let new = *cursor_point_user_aligned_confined;
                     new.sub(&replace(last_loc, new))
                 };
-                if *delta.sum::<R64>() != 0.0 {
+                if delta.any(|x| *x != 0) {
                     T::move_point(Ok(unsafe{self.data.get_unchecked_mut(*id)}), delta, *meta);
                     unsafe{self.data.reorder_unchecked(*id)}.apply(from_mut(id));
+                    let point = Some(*id);
                     self.redraw = true;
-                    T::on_move(self, ctx, cursor, delta)
+                    T::on_move(self, ctx, cursor, delta, point)
                 }
             } else if self.inner.last_cursor.left {
                 let (meta, src, point_id) = (*meta, *origin, *id);
@@ -751,7 +755,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     ctx.register_action(action)
                 } else {
                     let delta = cursor_point_user_aligned_confined.sub(&src);
-                    if delta.any(|x| **x != 0.0) {
+                    if delta.any(|x| *x != 0) {
                         ctx.register_action(AppAction::DragPoint{
                             editor_id: self.id, point_id, delta, meta});
                     }
@@ -772,7 +776,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     let new = *cursor_point_user_aligned_confined;
                     new.sub(&replace(end, new))
                 };
-                if *delta.sum::<R64>() != 0.0 {
+                if delta.any(|x| *x != 0) {
                     self.inner.redraw = true;
                     for (ids, id) in self.inner.selection.iter_mut_with_ctx() {
                         T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, *meta);
@@ -780,7 +784,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     }
                     T::move_point(Err(&mut self.inner.selection_src), delta, *meta);
                     self.selection.sort_unstable();
-                    T::on_move(self, ctx, cursor, delta)
+                    T::on_move(self, ctx, cursor, delta, None)
                 }
             } else if self.inner.last_cursor.left {
                 let (meta, src) = (*meta, take(origin));

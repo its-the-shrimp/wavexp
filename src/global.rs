@@ -76,7 +76,7 @@ pub enum AppEvent {
     /// emitted when the global BPM has been changed
     Bpm(R64),
     /// emitted when the global volume has been changed
-    MasterGain(R32),
+    MasterVolume(R32),
     /// emitted when the global editor snap step has been changed
     SnapStep(R64),
     /// emitted when the user selects the type of sound block for the selected sound block
@@ -209,7 +209,7 @@ pub enum AppAction {
     /// set global snap step for all graph editors
     SetSnapStep{from: R64, to: R64},
     /// set master gain level for the composition
-    SetMasterGain{from: R32, to: R32},
+    SetMasterVolume{from: R32, to: R32},
     /// set repetition count of a sound block
     SetRepCount{from: usize, to: usize},
 }
@@ -217,28 +217,50 @@ pub enum AppAction {
 impl AppAction {
     #[inline] pub fn name(&self) -> &'static str {
         match self {
-            Self::Start => "Start",
-            Self::DragPlane{..} => "Drag Plane",
-            Self::DragPoint{..} => "Drag Block",
-            Self::DragSelection{..} => "Drag Selection",
-            Self::SetSelection{..} => "Set Selection",
-            Self::AddSoundBlock{..} => "Add Sound Block",
-            Self::AddNoteBlock{..} => "Add Note Block",
-            Self::Select{..} => "Open Sound Block Editor",
-            Self::SetBlockType(..) => "Set Sound Block Type",
-            Self::SwitchTab{..} => "Switch Tabs",
-            Self::RemoveSoundBlock(..) => "Remove Sound Block",
-            Self::RemoveNoteBlocks(..) => "Remove Note Blocks",
-            Self::StretchNoteBlocks{..} => "Drag & Remove Blocks",
-            Self::SetVolume{..} => "Set Volume",
-            Self::SetAttack{..} => "Set Attack Time",
-            Self::SetDecay{..} => "Set Decay Time",
-            Self::SetSustain{..} => "Set Sustain Level",
-            Self::SetRelease{..} => "Set Release Time",
-            Self::SetTempo{..} => "Set Tempo",
-            Self::SetSnapStep{..} => "Set Snap Step",
-            Self::SetMasterGain{..} => "Set Master Gain Level",
-            Self::SetRepCount{..} => "Set Sound Block Rep Count"
+            Self::Start =>
+                "Start",
+            Self::DragPlane{..} =>
+                "Drag Plane",
+            Self::DragPoint{..} =>
+                "Drag Block",
+            Self::DragSelection{..} =>
+                "Drag Selection",
+            Self::SetSelection{..} =>
+                "Set Selection",
+            Self::AddSoundBlock{..} =>
+                "Add Sound Block",
+            Self::AddNoteBlock{..} =>
+                "Add Note Block",
+            Self::Select{to, ..} =>
+                to.choose("Open Sound Block Editor", "Close Sound Block Editor"),
+            Self::SetBlockType(..) =>
+                "Set Sound Block Type",
+            Self::SwitchTab{..} =>
+                "Switch Tabs",
+            Self::RemoveSoundBlock(..) =>
+                "Remove Sound Block",
+            Self::RemoveNoteBlocks(..) =>
+                "Remove Note Blocks",
+            Self::StretchNoteBlocks{..} =>
+                "Drag & Remove Blocks",
+            Self::SetVolume{..} =>
+                "Set Volume",
+            Self::SetAttack{..} =>
+                "Set Attack Time",
+            Self::SetDecay{..} =>
+                "Set Decay Time",
+            Self::SetSustain{..} =>
+                "Set Sustain Level",
+            Self::SetRelease{..} =>
+                "Set Release Time",
+            Self::SetTempo{..} =>
+                "Set Tempo",
+            Self::SetSnapStep{..} =>
+                "Set Snap Step",
+            Self::SetMasterVolume{..} =>
+                "Set Master Volume",
+            Self::SetRepCount{..} =>
+                "Set Sound Block Rep Count"
         }
     }
 }
@@ -555,7 +577,7 @@ impl Component for App {
                                 postfix="BPM"
                                 initial={self.ctx.bps * r64![60.0]}/>
                             <Slider key="gain" name="Master gain level"
-                            setter={setter.reform(|x| AppEvent::MasterGain(R32::from(x)))}
+                            setter={setter.reform(|x| AppEvent::MasterVolume(R32::from(x)))}
                             initial={R64::from(self.sequencer.gain())}/>
                         </div>
                     }
@@ -671,6 +693,16 @@ impl Component for App {
         let cb = Closure::<dyn Fn(UiEvent)>::new(move |e| cb.emit(e))
             .into_js_value().unchecked_into();
         window.set_onpointerover(Some(&cb));
+
+        let cb = ctx.link().callback(|e| AppEvent::KeyPress(AnyGraphEditor::INVALID_ID, e));
+        let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
+            .into_js_value().unchecked_into();
+        window.set_onkeydown(Some(&cb));
+
+        let cb = ctx.link().callback(|e| AppEvent::KeyRelease(AnyGraphEditor::INVALID_ID, e));
+        let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
+            .into_js_value().unchecked_into();
+        window.set_onkeyup(Some(&cb));
 
         ctx.link().send_message(AppEvent::Resize);
     }

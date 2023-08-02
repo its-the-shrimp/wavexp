@@ -17,14 +17,22 @@
 				display: flex;
 				flex-direction: column;
 			}
-			.dark-bg {background-color: #181818}
-			.light-bg {background-color: #232328}
-			.blue-border {border: 3px solid #0069E1}
-			.blue-border[height="0"] {border-width: 0}
+			.dark-bg {
+				background-color: #181818;
+			}
+			.light-bg {
+				background-color: #232328;
+			}
+			.blue-border {
+				border: 3px solid #0069E1;
+			}
+			.blue-border[height="0"] {
+				border-width: 0;
+			}
 			#main-panel {
 				display: flex;
 				flex: 1;
-				justify-content: space-between
+				justify-content: space-between;
 			}
 			#ctrl-panel {
 				padding: 1em;
@@ -34,38 +42,42 @@
 				justify-content: flex-start;
 				overflow-y: scroll;
 				gap: 1em;
-				flex-direction: column
+				flex-direction: column;
 			}
-			#ctrl-panel canvas {flex: 1}
+			#ctrl-panel canvas {
+				flex: 1;
+			}
 			#hint {
 				position: sticky;
 				top: 0;
 				flex: none;
 				height: 4em;
 				min-height: 1em;
-				user-select: none
+				user-select: none;
 			}
-			#aux-hint {font-size: small}
+			#aux-hint {
+				font-size: small;
+			}
 			#inputs {
 				display: grid;
-				grid-template-columns: repeat(2, 1fr)
+				grid-template-columns: repeat(2, 1fr);
 			}
 			#io-panel {
 				height: 10em;
 				background-color: #181818;
 				display: flex;
-				justify-content: space-evenly
+				justify-content: space-evenly;
 			}
 			#io-panel > div {
 				align-self: center;
 			}
 			#piano {
 				flex-grow: 3;
-				margin: 1em
+				margin: 1em;
 			}
 			#sound-visualiser {
 				margin: 1em;
-				flex: 1
+				flex: 1;
 			}
 			.input {
 				width: 6em;
@@ -75,44 +87,52 @@
 				width: auto;
 				font: 1em consolas;
 				color: #0069E1;
-				border: solid 3px transparent;
+				border: 0 solid #0069E1;
+				padding: 3px;
 				align-self: center;
-				background: #181818
+				background: #181818;
+				transition: padding.05s, border-width.05s;
 			}
-			.button:hover {border: solid 3px #0069E1}
+			.button:hover {
+				border-width: 3px;
+				padding: 0;
+			}
 			.button > svg {
 				stroke: #0069E1;
-				stroke-width: 4px;
+				stroke-width: 4;
 				fill: none;
-				height: 100%
+				height: 100%;
+				transition: fill.05s;
 			}
-			.button:hover > svg {fill: #0069E1}
+			.button:hover > svg {
+				fill: #0069E1;
+			}
 			.button > div {
 				margin-top: 12.5%;
-				user-select: none
+				user-select: none;
 			}
 			.piano-note {
 				position: relative;
 				stroke: #0069E1;
 				stroke-width: 3;
-				fill: #232328
+				fill: #232328;
 			}
 			.piano-note:hover {
 				fill: #0069E1;
-				stroke: #0069E1
+				stroke: #0069E1;
 			}
 			.sharp-note {
 				fill: #0069E1;
-				stroke: #232328
+				stroke: #232328;
 			}
 			.component {
 				fill: #232328;
 				stroke: #0069E1;
-				stroke-width: 2
+				stroke-width: 2;
 			}
 			.add-wave-button {
 				grid-column: 1 / -1;
-				width: auto
+				width: auto;
 			}
 			#error-sign {
 				position: fixed;
@@ -123,60 +143,64 @@
 				width: 5em;
 				stroke: #E10000;
 				stroke-width: 4;
-				fill: none
+				fill: none;
 			}
 			#general-ctrl {
 				display: flex;
-				margin-top: auto
+				margin-top: auto;
 			}
 			#general-ctrl > * {
 				width: auto;
 				height: 4em;
-				flex: 1
+				flex: 1;
 			}
 			#general-ctrl > .button:nth-child(2):hover {border-color: #E10000}
 			#general-ctrl > .button:nth-child(2):hover > svg {
 				fill: #E10000;
-				stroke: #E10000
+				stroke: #E10000;
 			}
 			#wave-options {
 				display: flex;
-				flex-direction: column
+				flex-direction: column;
 			}
 			#wave-options > .button {
 				height: auto;
-				flex: 1
+				flex: 1;
 			}
 			#tab-list {
 				user-select: none;
 				display: flex;
 				height: 3em;
-				justify-content: space-evenly
+				justify-content: space-evenly;
 			}
-			#tab-list :empty {display: none}
+			#tab-list:empty {
+				display: none;
+			}
 			#tab-list > * {
 				flex: 1;
-				border-inline: none;
-				border: 3px solid transparent;
-				border-bottom: 3px solid #0069E1
+				border: 0 solid #0069E1;
+				padding: 3px;
+				border-bottom-width: 3px;
+				padding-bottom: 0;
+				transition-property: border-width.05s, padding.05s;
 			}
-			#tab-list div:not(#selected-tab):hover {
-				border-style: dashed;
-				border-color: #0069E1;
-				border-bottom-color: #0069E1
+			#tab-list div:not(#selected-tab):hover, #selected-tab {
+				border-width: 3px;
+				padding: 0;
+				border-bottom-width: 0;
+				padding-bottom: 3px;
 			}
-			#selected-tab {
-				border-color: #0069E1;
-				border-bottom-color: transparent
+			#selected-tab + div:not(#selected-tab):hover, div:not(#selected-tab):hover + #selected-tab {
+				border-left-width: 0;
+				padding-left: 3px;
 			}
 			.undone {
-				border-top-style: dashed;
-				border-bottom-style: dashed;
+				border-style: dashed;
 			}
 			.horizontal-menu {
 				display: flex;
 				flex-direction: column;
-				justify-content: start
+				justify-content: start;
 			}
 			.horizontal-menu > * {
 				flex: 1;
@@ -188,19 +212,17 @@
 				display: flex;
 			}
 			.horizontal-menu > button {
-				border-top-color: #0069E1;
-				border-bottom-color: #0069E1;
-			}
-			.horizontal-menu > button:hover {
-				border-style: dashed;
-				border-color: #0069E1
+				padding-top: 0;
+				padding-bottom: 0;
+				border-top-width: 3px;
+				border-bottom-width: 3px;
 			}
 			.horizontal-menu * p {
 				margin: auto;
 			}
 			#plane-settings {
 				display: flex;
-				align-content: center
+				align-content: center;
 			}
 			#actions {
 				height: inherit;
@@ -210,13 +232,97 @@
 				overflow-y: scroll;
 			}
 			.counter {
-				fill: #0069E1;
+				fill: none;
+				stroke: #0069E1;
+				stroke-width: 4;
 				text-anchor: middle;
 				cursor: move;
 			}
-			.counter text {
-				font-size: larger;
+			.counter > text {
+				stroke: none;
+				fill: #0069E1;
 				user-select: none;
+				font-size: larger;
+			}
+			.counter > text:first-of-type:last-of-type {
+				alignment-baseline: central;
+			}
+			.counter > text:first-of-type {
+				alignment-baseline: after-edge;
+			}
+			.counter > text:last-of-type {
+				alignment-baseline: before-edge;
+			}
+			.counter > polygon {
+				transition: transform.05s;
+			}
+			.counter:hover > .upper {
+				transform: translate(0, 5%);
+			}
+			.counter:hover > .lower {
+				transform: translate(0, -5%);
+			}
+			.slider {
+				fill: none;
+				stroke-width: 4;
+				stroke: #0069E1;
+				text-anchor: middle;
+				cursor: move;
+			}
+			.slider > path {
+				stroke-width: 8;
+			}
+			.slider > .inner {
+				stroke: none;
+				fill: #181818;
+				transition: r.05s;
+			}
+			.slider:hover > .inner {
+				r: 0;
+			}
+			.slider > .outer {
+				transition: stroke-width.05s;
+			}
+			.slider:not(:hover) > .outer {
+				stroke-width: 0;
+			}
+			.slider text {
+				stroke: none;
+				fill: #0069E1;
+				user-select: none;
+				font-size: larger;
+				alignment-baseline: central;
+			}
+			.switch {
+				fill: none;
+				stroke-width: 4;
+				stroke: #0069E1;
+				text-anchor: middle;
+				cursor: move;
+			}
+			.switch > path {
+				stroke-width: 8;
+			}
+			.switch > .inner {
+				stroke: none;
+				fill: #181818;
+				transition: r.05s;
+			}
+			.switch:hover > .inner {
+				r: 0;
+			}
+			.switch > .outer {
+				transition: stroke-width.05s;
+			}
+			.switch:not(:hover) > .outer {
+				stroke-width: 0;
+			}
+			.switch text {
+				stroke: none;
+				fill: #0069E1;
+				user-select: none;
+				font-size: larger;
+				alignment-baseline: central;
 			}
 		</style>
 	</head>

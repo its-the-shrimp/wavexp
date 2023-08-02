@@ -251,8 +251,15 @@ impl GraphPoint for NoteBlock {
         format!("{:.3}, {}", loc[0], Note::from_index(loc[1].into()).recip())
     }
 
-    #[inline] fn on_move(editor: &mut GraphEditor<Self>, ctx: &mut AppContext, _: Cursor, _: [R64; 2]) {
-        if editor.selection().contains(&(editor.len() - 1)) {
+    #[inline] fn on_move(
+        editor: &mut GraphEditor<Self>,
+        ctx: &mut AppContext,
+        _: Cursor,
+        _: [R64; 2],
+        point: Option<usize>
+    ) {
+        let last = editor.len() - 1;
+        if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
             ctx.emit_event(AppEvent::RedrawEditorPlane)
         }
     }
@@ -622,31 +629,29 @@ impl Sound {
                     setter={setter.reform(|x| AppEvent::Volume(R32::from(x)))}
                     name="Noise Volume"
                     initial={*volume}/>
-                    <Counter<usize> key="note-repcnt"
-                    setter={setter.reform(AppEvent::RepCount)}
+                    <Counter key="note-repcnt"
+                    setter={setter.reform(|x| AppEvent::RepCount(usize::from(x)))}
+                    fmt={|x| format!("{x:.0}")}
                     name="Number Of Pattern Repetitions"
                     min={r64![1.0]}
                     initial={*rep_count}/>
                 </div>},
                 1 /* Envelope */ => html!{<div id="inputs">
-                    <Slider key="noise-att"
+                    <Counter key="noise-att"
                     setter={setter.reform(AppEvent::Attack)}
                     name="Noise Attack Time" postfix="Beats"
-                    max={r64![3.0]}
                     initial={*attack}/>
-                    <Slider key="noise-dec"
+                    <Counter key="noise-dec"
                     setter={setter.reform(AppEvent::Decay)}
                     name="Noise Decay Time" postfix="Beats"
-                    max={r64![3.0]}
                     initial={*decay}/>
                     <Slider key="noise-sus"
                     setter={setter.reform(|x| AppEvent::Sustain(R32::from(x)))}
                     name="Noise Sustain Level"
                     initial={*sustain}/>
-                    <Slider key="noise-rel"
+                    <Counter key="noise-rel"
                     setter={setter.reform(AppEvent::Release)}
                     name="Noise Release Time" postfix="Beats"
-                    max={r64![3.0]}
                     initial={*release}/>
                 </div>},
                 2 /* Pattern */ => html!{
@@ -936,9 +941,8 @@ impl GraphPoint for SoundBlock {
         _: &mut AppContext,
         action: &AppAction
     ) {
-        if let AppAction::AddSoundBlock{block_id, ..} = action {
-            editor.force_redraw();
-            editor.remove_points(once(*block_id), drop).report_err(loc!());
+        if let &AppAction::AddSoundBlock{block_id, ..} = action {
+            editor.remove_points(once(block_id), drop).report_err(loc!());
         }
     }
 
@@ -948,7 +952,6 @@ impl GraphPoint for SoundBlock {
         action: &AppAction
     ) {
         if let &AppAction::AddSoundBlock{offset, layer, block_id} = action {
-            editor.force_redraw();
             unsafe{editor.insert_point(block_id, SoundBlock{sound: default(), layer, offset})}
         }
     }
@@ -1065,21 +1068,9 @@ impl Sequencer {
                 .try_borrow_mut().to_js_result(loc!())?
                 .force_redraw(),
 
-            &AppEvent::MasterGain(to) => {
-                ctx.register_action(AppAction::SetMasterGain{from: self.gain(), to});
+            &AppEvent::MasterVolume(to) => {
+                ctx.register_action(AppAction::SetMasterVolume{from: self.gain(), to});
                 self.gain.gain().set_value(*to)
-            }
-
-            AppEvent::Undo(actions) => for action in actions.iter() {
-                if let AppAction::SetMasterGain{from, ..} = *action {
-                    self.gain.gain().set_value(*from)
-                }
-            }
-
-            AppEvent::Redo(actions) => for action in actions.iter() {
-                if let AppAction::SetMasterGain{to, ..} = *action {
-                    self.gain.gain().set_value(*to)
-                }
             }
 
             AppEvent::Frame(_) => {
@@ -1113,8 +1104,26 @@ impl Sequencer {
                 pattern.handle_event(event, ctx).add_loc(loc!())?
             }
 
-            e => self.pattern().try_borrow_mut().to_js_result(loc!())?
-                .handle_event(e, ctx).add_loc(loc!())?
+            e => {
+                self.pattern.try_borrow_mut().to_js_result(loc!())?
+                    .handle_event(e, ctx).add_loc(loc!())?;
+
+                match e {
+                    AppEvent::Undo(actions) => for action in actions.iter() {
+                        if let AppAction::SetMasterVolume{from, ..} = *action {
+                            self.gain.gain().set_value(*from)
+                        }
+                    }
+
+                    AppEvent::Redo(actions) => for action in actions.iter() {
+                        if let AppAction::SetMasterVolume{to, ..} = *action {
+                            self.gain.gain().set_value(*to)
+                        }
+                    }
+
+                    _ => ()
+                }
+            }
         }
         Ok(())
     }

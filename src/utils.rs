@@ -1418,9 +1418,7 @@ macro_rules! real_real_operator_impl {
             impl $op<$other_real> for $real {
                 type Output = Self;
                 #[inline] fn $method(self, rhs: $other_real) -> Self {
-                    let res = self.0.$method(rhs.0 as $float);
-                    assert!(!res.is_nan());
-                    Self(res)
+                    Self::new(self.0.$method(rhs.0 as $float)).unwrap()
                 }
             }
 
@@ -1468,6 +1466,18 @@ macro_rules! real_impl {
             #[inline] fn deref(&self) -> &Self::Target {&self.0}
         }
 
+        impl PartialEq<$float> for $real {
+            #[inline] fn eq(&self, other: &$float) -> bool {
+                self.0.eq(other)
+            }
+        }
+
+        impl PartialOrd<$float> for $real {
+            #[inline] fn partial_cmp(&self, other: &$float) -> Option<Ordering> {
+                self.0.partial_cmp(&other)
+            }
+        }
+
         impl PartialOrd for $real {
             #[inline] fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
                 self.0.partial_cmp(&other.0)
@@ -1485,8 +1495,7 @@ macro_rules! real_impl {
         impl TryFrom<$float> for $real {
             type Error = NanError;
             #[inline] fn try_from(x: $float) -> Result<Self, Self::Error> {
-                if x.is_nan() {return Err(NanError)}
-                Ok(Self(x))
+                Self::new(x).ok_or(NanError)
             }
         }
 
@@ -1597,46 +1606,55 @@ macro_rules! real_impl {
             pub const PI: $real = $real(std::$float::consts::PI);
             pub const TAU: $real = $real(std::$float::consts::TAU);
 
-            #[inline]
-            pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
+            #[inline] pub const fn new(x: $float) -> Option<Self> {
+                if x.is_nan() {None} else {Some(Self(x))}
+            }
 
-            #[inline]
-            pub const fn new_or(default: Self, x: $float) -> Self {
+            #[inline] pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
+
+            #[inline] pub const fn new_or(default: Self, x: $float) -> Self {
                 if x.is_nan() {default} else {Self(x)}
             }
 
-            #[inline]
-            pub fn rem_euclid(self, rhs: Self) -> Option<Self> {
+            #[inline] pub fn rem_euclid(self, rhs: Self) -> Option<Self> {
                 let res = self.0.rem_euclid(rhs.0);
                 if res.is_nan() {return None}
                 Some(Self(res))
             }
 
-            #[inline]
-            pub fn copysign(self, sign: Self) -> Self {
+            #[inline] pub fn copysign(self, sign: Self) -> Self {
                 Self(self.0.copysign(*sign))
             }
 
-            #[inline]
-            pub fn recip(self) -> Self {Self(self.0.recip())}
+            #[inline] pub fn recip(self) -> Self {Self(self.0.recip())}
 
-            #[inline]
-            pub fn exp2(self) -> Self {Self(self.0.exp2())}
+            #[inline] pub fn exp2(self) -> Self {Self(self.0.exp2())}
 
-            #[inline]
-            pub fn floor(self) -> Self {Self(self.0.floor())}
+            #[inline] pub fn floor(self) -> Self {Self(self.0.floor())}
 
-            #[inline]
-            pub fn ceil(self) -> Self {Self(self.0.ceil())}
+            #[inline] pub fn ceil(self) -> Self {Self(self.0.ceil())}
 
-            #[inline]
-            pub fn round(self) -> Self {Self(self.0.round())}
+            #[inline] pub fn round(self) -> Self {Self(self.0.round())}
 
-            #[inline]
-            pub fn is_finite(&self) -> bool {self.0.is_finite()}
+            #[inline] pub fn is_finite(&self) -> bool {self.0.is_finite()}
 
-            #[inline]
-            pub fn abs(self) -> Self {Self(self.0.abs())}
+            #[inline] pub fn abs(self) -> Self {Self(self.0.abs())}
+
+            #[inline] pub fn sin(self) -> Option<Self> {Self::new(self.0.sin())}
+
+            #[inline] pub unsafe fn sin_unchecked(self) -> Self {Self(self.0.sin())}
+
+            #[inline] pub fn sin_or(self, default: Self) -> Self {
+                Self::new(self.0.sin()).unwrap_or(default)
+            }
+
+            #[inline] pub fn cos(self) -> Option<Self> {Self::new(self.0.cos())}
+
+            #[inline] pub unsafe fn cos_unchecked(self) -> Self {Self(self.0.cos())}
+
+            #[inline] pub fn cos_or(self, default: Self) -> Self {
+                Self::new(self.0.cos()).unwrap_or(default)
+            }
         }
     };
 }

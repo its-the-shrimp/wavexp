@@ -1,12 +1,9 @@
-use std::{
-    f64::consts::{PI, TAU},
-    ops::{Div, Mul, Add, Deref, DerefMut}, fmt::Display};
+use std::ops::{Div, Mul, Add, Deref, DerefMut};
 use wasm_bindgen::JsValue;
 use web_sys::{
     Element,
     HtmlCanvasElement,
     PointerEvent,
-    HtmlElement,
     MouseEvent,
     KeyboardEvent};
 use yew::{
@@ -18,11 +15,16 @@ use yew::{
     html::Children,
     Classes,
     AttrValue,
-    NodeRef,
-    Callback, Properties, scheduler::Shared, function_component};
+    Callback,
+    Properties,
+    scheduler::Shared,
+    function_component};
 use crate::{
-    utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, BoolExt, R64, Point, HtmlElementExt, ResultToJsResult, report_err, Pipe, default},
-    loc, visual::{GraphPoint, GraphEditor}, global::AppEvent};
+    utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, R64, Point, HtmlElementExt, ResultToJsResult, report_err, Pipe, BoolExt},
+    visual::{GraphPoint, GraphEditor},
+    global::AppEvent,
+    loc,
+    r64};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Buttons {
@@ -85,18 +87,12 @@ impl TryFrom<&PointerEvent> for Cursor {
 pub enum Cmd {
     Drag(PointerEvent),
     Focus(PointerEvent),
-    Unfocus(PointerEvent),
-    HoverIn(PointerEvent),
-    HoverOut(PointerEvent)
+    Unfocus(PointerEvent)
 }
 
 pub struct Slider {
-    old_value: R64,
-    value: R64,
-    canvas: NodeRef,
-    focused: bool,
-    hovered: bool,
-    floored: bool
+    old_value: f64,
+    value: R64
 }
 
 #[derive(PartialEq, yew::Properties)]
@@ -108,62 +104,45 @@ pub struct SliderProps {
     pub max: R64,
     #[prop_or(R64::ZERO)]
     pub min: R64,
-    #[prop_or(2)]
-    pub precision: usize,
+    #[prop_or(Callback::from(|x| format!("{x:.2}")))]
+    pub fmt: Callback<R64, String>,
     #[prop_or("")]
     pub postfix: &'static str,
     pub setter: Callback<R64>,
     pub initial: R64
 }
 
-const LINE_WIDTH: f64 = 10.0;
-const FONT: &str = "4em consolas";
-
 impl Component for Slider {
     type Message = Cmd;
     type Properties = SliderProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        let value = ctx.props().initial;
-        Self {focused: false, hovered: false, floored: false,
-            value, old_value: value, canvas: default()}
+        Self{value: ctx.props().initial, old_value: f64::NAN}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         js_try!{type = !:
             let SliderProps{setter, min, max, signed, ..} = ctx.props();
             match msg {
-                Cmd::Drag(e) => {
-                    self.value = R64::from(e.movement_y())
-                        .div(e.target_dyn_into::<HtmlElement>().to_js_result(loc!())?.client_height())
-                        .div(-2i8)
-                        .mul(max - min)
-                        .add(self.value)
-                        .clamp(signed.choose(-*max, *min), *max);
-                    self.floored = e.shift_key();
-                }
+                Cmd::Drag(e) => self.value = R64::from(e.movement_y())
+                    .div(-e.target_dyn_into::<Element>().to_js_result(loc!())?.client_height())
+                    .div(e.shift_key().choose(400u16, 2))
+                    .mul(max - min)
+                    .add(self.value)
+                    .clamp(signed.choose(-*max, *min), *max),
 
                 Cmd::Focus(e) => {
-                    e.target_dyn_into::<HtmlElement>().to_js_result(loc!())?
+                    e.target_dyn_into::<Element>().to_js_result(loc!())?
                         .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    self.focused = true;
-                    self.floored = e.shift_key();
-                    self.old_value = self.value;
+                    self.old_value = *self.value;
                 }
 
                 Cmd::Unfocus(e) => {
-                    e.target_dyn_into::<HtmlElement>().to_js_result(loc!())?
+                    e.target_dyn_into::<Element>().to_js_result(loc!())?
                         .release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    self.focused = false;
-                    self.floored = e.shift_key();
-                    if self.old_value != self.value {
-                        setter.emit(self.value.pipe_if(self.floored, R64::floor))
-                    }
+                    if self.old_value != *self.value {setter.emit(self.value)}
+                    self.old_value = f64::NAN;
                 }
-
-                Cmd::HoverIn(_) => self.hovered = true,
-
-                Cmd::HoverOut(_) => self.hovered = false,
             }
             return true
         }.report_err(loc!());
@@ -172,67 +151,40 @@ impl Component for Slider {
 
     fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
         let new_initial = ctx.props().initial;
-        if old_props.initial != new_initial {self.value = new_initial}
-        true
+        if old_props.initial != new_initial {
+            self.value = new_initial;
+            true
+        } else {false}
     }
 
 	fn view(&self, ctx: &Context<Self>) -> Html {
-        html! {
-            <canvas ref={self.canvas.clone()} class="input"
-            data-main-hint={&ctx.props().name}
-            onpointerdown={ctx.link().callback(Cmd::Focus)}
-            onpointerup={ctx.link().callback(Cmd::Unfocus)}
-            onpointerover={ctx.link().callback(Cmd::HoverIn)}
-            onpointerleave={ctx.link().callback(Cmd::HoverOut)}
-            onpointermove={self.focused.then(|| ctx.link().callback(Cmd::Drag))}/>}
-    }
-
-    fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
-        js_try!{type = !:
-            let SliderProps{min, max, precision, postfix, ..} = ctx.props();
-            let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
-            if first_render {canvas.sync()}
-            let ctx = canvas.get_2d_context(loc!())?;
-            let (w, h) = (canvas.width() as f64 / 2.0, canvas.height() as f64 / 2.0);
-            const CORRECTION_COEF: f64 = 1.5;
-            let r = w.min(h) - LINE_WIDTH * CORRECTION_COEF; 
-            if first_render {
-                ctx.set_fill_style(&"#0069E1".into());
-                ctx.set_stroke_style(&"#0069E1".into());
-                ctx.set_font(FONT);
-                ctx.set_line_width(LINE_WIDTH);
-                ctx.set_text_align("center")}
-            ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
-            ctx.begin_path();
-            if self.hovered {
-                ctx.arc(w, h + LINE_WIDTH, r, 0.0, PI * 2.0).add_loc(loc!())?;
-                ctx.stroke();
-                ctx.begin_path()}
-            let value = if self.floored {self.value.floor()} else {self.value};
-            if value != *min {
-                ctx.arc_with_anticlockwise(w, h + LINE_WIDTH, r - LINE_WIDTH,
-                    PI * 1.5,
-                    ((*value - **min) / (**max - **min) * 2.0 + 1.5) * PI,
-                    self.value < *min).add_loc(loc!())?;
-                ctx.stroke();
-            }
-            ctx.set_text_baseline("middle");
-            ctx.fill_text_with_max_width(&format!("{:.*}", precision, *value),
-                w, h + LINE_WIDTH / 2.0, r).add_loc(loc!())?;
-            ctx.set_text_baseline("top");
-            return ctx.fill_text_with_max_width(postfix, 
-                w, h + LINE_WIDTH * 2.0 + ctx.measure_text("0").add_loc(loc!())?
-                    .font_bounding_box_ascent() * 2.0, r * 1.5).add_loc(loc!())?
-        }.report_err(loc!());
+        let SliderProps{name, postfix, max, min, fmt, ..} = ctx.props();
+        let scope = ctx.link();
+        html!{
+            <svg viewBox="0 0 100 100" class="input slider" data-main-hint={name}
+            onpointerdown={scope.callback(Cmd::Focus)}
+            onpointerup={scope.callback(Cmd::Unfocus)}
+            onpointermove={(!self.old_value.is_nan()).then(|| scope.callback(Cmd::Drag))}>
+                <circle class="outer" cx="50" cy="50" r="40"/>
+                <path d={if self.value.abs() == *max {
+                    AttrValue::from("M 50 12 A 38 38 0 0 0 50 88 A 38 38 0 1 0 50 12")
+                } else {
+                    let p = ((self.value - min) / (max - min) - 0.5f32) * R64::TAU;
+                    format!("M 50 12 A 38 38 0 {} 0 {} {}",
+                        (p > 0) as u8, p.sin_or(r64![0.0]) * 38 + 50, p.cos_or(r64![0.0]) * 38 + 50).into()
+                }}/>
+                <circle class="inner" cx="50" cy="50" r="38"/>
+                <text x="50" y="50">{fmt.emit(self.value)}</text>
+                <text x="50" y="65">{postfix}</text>
+            </svg>
+        }
     }
 }
 
 pub struct Switch {
     value: R64,
     old_value: usize,
-    canvas: NodeRef,
     focused: bool,
-    hovered: bool
 }
 
 #[derive(PartialEq, yew::Properties)]
@@ -247,10 +199,8 @@ impl Component for Switch {
     type Message = Cmd;
     type Properties = SwitchProps;
 
-    fn create(ctx: &Context<Self>) -> Self {
-        let old_value = ctx.props().initial;
-        Self {focused: false, hovered: false,
-            old_value, value: old_value.into(), canvas: default()}
+    #[inline] fn create(ctx: &Context<Self>) -> Self {
+        Self{value: ctx.props().initial.into(), old_value: 0, focused: false}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -265,75 +215,57 @@ impl Component for Switch {
                     .rem_euclid(options.len().into()).to_js_result(loc!())?,
 
                 Cmd::Focus(e) => {
-                    e.target_dyn_into::<HtmlElement>().to_js_result(loc!())?
+                    e.target_dyn_into::<Element>().to_js_result(loc!())?
                         .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
                     self.focused = true;
+                    self.old_value = self.value.into();
                 }
 
                 Cmd::Unfocus(e) => {
-                    e.target_dyn_into::<HtmlElement>().to_js_result(loc!())?
+                    e.target_dyn_into::<Element>().to_js_result(loc!())?
                         .release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    self.focused = false;
                     let value = self.value.into();
                     if self.old_value != value {
                         setter.emit(value)
                     }
+                    self.focused = false;
                 }
-
-                Cmd::HoverIn(_) => self.hovered = true,
-
-                Cmd::HoverOut(_) => self.hovered = false,
             }
             return true
         }.report_err(loc!());
         false
     }
 
-    fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
+    #[inline] fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
         let new_initial = ctx.props().initial;
-        if old_props.initial != new_initial {self.value = new_initial.into()}
-        true
+        if old_props.initial != new_initial {
+            self.value = new_initial.into();
+            true
+        } else {false}
     }
 
 	fn view(&self, ctx: &Context<Self>) -> Html {
-        html! {
-            <canvas ref={self.canvas.clone()} class="input"
-            data-main-hint={&ctx.props().name}
-            onpointerdown={ctx.link().callback(Cmd::Focus)}
-            onpointerup={ctx.link().callback(Cmd::Unfocus)}
-            onpointerenter={ctx.link().callback(Cmd::HoverIn)}
-            onpointerleave={ctx.link().callback(Cmd::HoverOut)}
-            onpointermove={self.focused.then(|| ctx.link().callback(Cmd::Drag))}/>}
-    }
-
-    fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
-        js_try!{
-            let options = &ctx.props().options;
-            let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
-            if first_render {canvas.sync()}
-            let ctx = canvas.get_2d_context(loc!())?;
-            let (w, h) = (canvas.width() as f64 / 2.0, canvas.height() as f64 / 2.0);
-            const CORRECTION_COEF: f64 = 1.5;
-            let r = w.min(h) - LINE_WIDTH * CORRECTION_COEF;
-            if first_render {
-                ctx.set_fill_style(&"#0069E1".into());
-                ctx.set_stroke_style(&"#0069E1".into());
-                ctx.set_line_width(LINE_WIDTH);
-                ctx.set_font(FONT);
-                ctx.set_text_align("center");
-                ctx.set_text_baseline("middle")}
-            ctx.clear_rect(0.0, 0.0, w * 2.0, h * 2.0);
-            ctx.begin_path();
-            if self.hovered {
-                ctx.arc(w, h + LINE_WIDTH, r, 0.0, PI * 2.0).add_loc(loc!())?;
-                ctx.stroke();
-                ctx.begin_path()}
-            let (factor, index) = (options.len() as f64 / TAU, *self.value.floor());
-            ctx.arc(w, h + LINE_WIDTH, r - LINE_WIDTH, index / factor, (index + 1.0) / factor).add_loc(loc!())?;
-            ctx.stroke();
-            return ctx.fill_text_with_max_width(unsafe{options.get_unchecked(index as usize)},
-                w, h + LINE_WIDTH, w).add_loc(loc!())?;
-        }.report_err(loc!());
+        let SwitchProps{name, options, ..} = ctx.props();
+        let scope = ctx.link();
+        html!{
+            <svg viewBox="0 0 100 100" class="input switch" data-main-hint={name}
+            onpointerdown={scope.callback(Cmd::Focus)}
+            onpointerup={scope.callback(Cmd::Unfocus)}
+            onpointermove={self.focused.then(|| scope.callback(Cmd::Drag))}>
+                <circle class="outer" cx="50" cy="50" r="40"/>
+                <path d={{
+                    let v = self.value.floor();
+                    let n_opts = options.len();
+                    let src = (v / n_opts - 0.5f32) * R64::TAU;
+                    let dst = ((v + 1u8) / n_opts - 0.5f32) * R64::TAU;
+                    format!("M {} {} A 38 38 0 0 0 {} {}",
+                        src.sin_or(r64![0.0]) * 38 + 50, src.cos_or(r64![0.0]) * 38 + 50,
+                        dst.sin_or(r64![0.0]) * 38 + 50, dst.cos_or(r64![0.0]) * 38 + 50)
+                }}/>
+                <circle class="inner" cx="50" cy="50" r="38"/>
+                <text x="50" y="50">{unsafe{options.get_unchecked(usize::from(self.value))}}</text>
+            </svg>
+        }
     }
 }
 
@@ -358,8 +290,7 @@ impl Component for Button {
 
     #[inline] fn create(_: &Context<Self>) -> Self {Self}
 
-    #[inline]
-    fn update(&mut self, _: &Context<Self>, _: Self::Message) -> bool {false}
+    #[inline] fn update(&mut self, _: &Context<Self>, _: Self::Message) -> bool {false}
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         let ButtonProps{name, children, svg, class, setter, help} = ctx.props();
@@ -413,34 +344,32 @@ pub fn f<T: GraphPoint>(props: &GraphEditorCanvasProps<T>) -> Html {
     }
 }
 
-pub struct Counter<T> {
+pub struct Counter {
     value: R64,
-    old_value: T,
-    focused: bool
+    old_value: f64
 }
 
 #[derive(PartialEq, yew::Properties)]
-pub struct CounterProps<T: Display + Eq> {
+pub struct CounterProps {
     pub name: AttrValue,
     #[prop_or(R64::ONE)]
     pub coef: R64,
     #[prop_or(R64::ZERO)]
     pub min: R64,
-    #[prop_or(2)]
-    pub precision: usize,
+    #[prop_or(Callback::from(|x| format!("{x:.2}")))]
+    pub fmt: Callback<R64, String>,
     #[prop_or("")]
     pub postfix: &'static str,
-    pub setter: Callback<T>,
-    pub initial: T
+    pub setter: Callback<R64>,
+    pub initial: R64
 }
 
-impl<T: 'static + Copy + Display + From<R64> + Into<R64> + Eq> Component for Counter<T> {
+impl Component for Counter {
     type Message = Cmd;
-    type Properties = CounterProps<T>;
+    type Properties = CounterProps;
 
     #[inline] fn create(ctx: &Context<Self>) -> Self {
-        let old_value = ctx.props().initial;
-        Self{old_value, value: old_value.into(), focused: false}
+        Self{value: ctx.props().initial, old_value: f64::NAN}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -450,27 +379,22 @@ impl<T: 'static + Copy + Display + From<R64> + Into<R64> + Eq> Component for Cou
                 Cmd::Drag(e) => self.value = R64::from(e.movement_y())
                     .div(-e.target_dyn_into::<Element>().to_js_result(loc!())?.client_height())
                     .mul(coef)
+                    .pipe_if(e.shift_key(), |x| x / 2)
                     .add(self.value)
                     .max(*min),
 
                 Cmd::Focus(e) => {
                     e.target_dyn_into::<Element>().to_js_result(loc!())?
                         .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    self.focused = true;
+                    self.old_value = *self.value;
                 }
 
                 Cmd::Unfocus(e) => {
                     e.target_dyn_into::<Element>().to_js_result(loc!())?
                         .release_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                    let value = self.value.into();
-                    if self.old_value != value {
-                        self.old_value = value;
-                        setter.emit(value)
-                    }
-                    self.focused = false;
+                    if self.old_value != *self.value {setter.emit(self.value)}
+                    self.old_value = f64::NAN;
                 }
-
-                _ => ()
             }
             return true
         }.report_err(loc!());
@@ -478,30 +402,20 @@ impl<T: 'static + Copy + Display + From<R64> + Into<R64> + Eq> Component for Cou
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let CounterProps{name, precision, postfix, min, ..} = ctx.props();
+        let CounterProps{name, fmt, postfix, min, ..} = ctx.props();
         let scope = ctx.link();
         html!{
             <svg viewBox="0 0 100 100" class="input counter" data-main-hint={name}
             onpointerdown={scope.callback(Cmd::Focus)}
             onpointerup={scope.callback(Cmd::Unfocus)}
-            onpointerover={scope.callback(Cmd::HoverIn)}
-            onpointerleave={scope.callback(Cmd::HoverOut)}
-            onpointermove={self.focused.then(|| scope.callback(Cmd::Drag))}>
-                <polygon points="5,15 40,15 50,5 60,15 95,15 95,20 5,20"/>
-                if postfix.is_empty() {
-                    <text x="50" y="50" style="alignment-baseline: central">
-                        {format!("{:.*}", *precision, T::from(self.value))}
-                    </text>
-                } else {
-                    <text x="50" y="45" style="alignment-baseline: baseline">
-                        {format!("{:.*}", *precision, T::from(self.value))}
-                    </text>
-                    <text x="50" y="55" style="alignment-baseline: hanging">
-                        {postfix}
-                    </text>
+            onpointermove={(!self.old_value.is_nan()).then(|| scope.callback(Cmd::Drag))}>
+                <polygon class="upper" points="6,16 40,16 50,6 60,16 94,16"/>
+                <text x="50" y="50">{fmt.emit(self.value)}</text>
+                if !postfix.is_empty() {
+                    <text x="50" y="50">{postfix}</text>
                 }
-                if T::from(self.value) != T::from(*min) {
-                    <polygon points="5,85 40,85 50,95 60,85 95,85 95,80 5,80"/>
+                if self.value != *min {
+                    <polygon class="lower" points="6,84 40,84 50,94 60,84 94,84"/>
                 }
             </svg>
         }
