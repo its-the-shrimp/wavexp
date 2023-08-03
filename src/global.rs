@@ -3,7 +3,7 @@ use std::{
     borrow::Cow,
     slice::from_ref,
     mem::{take, MaybeUninit},
-    cmp::Ordering, iter::once};
+    cmp::Ordering, iter::once, num::NonZeroUsize};
 use js_sys::Function;
 use wasm_bindgen::{
     closure::Closure,
@@ -23,7 +23,7 @@ use yew::{
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats, Note, NoteBlock},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
-    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, ResultToJsResult, Point},
+    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, ResultToJsResult, Point, Take, default},
     input::{Button, Slider, Switch, GraphEditorCanvas},
     loc,
     r64,
@@ -40,29 +40,19 @@ pub enum AppEvent {
     RedrawEditorPlane,
     /// emitted when the user switches tabs in the side editor
     SetTab(usize),
-    /// epilog variant of `SetTab`
-    AfterSetTab(usize),
     /// emitted when the viewport of the app changes its dimensions
     Resize,
     /// emitted when the user starts playing by clicking the `Play` button
     StartPlay,
     /// emitted when the user stops playing by clicking the `Play` button
     StopPlay,
-    /// epilog version of `StopPlay`
-    AfterStopPlay,
     /// emitted when the audio has actually started playing
     AudioStarted(Secs),
-    /// epllog version of `AudioStarted`
-    AfterAudioStarted(Secs),
     /// emitted when the user selects a sound block to edit in the side editor
     /// the contained value is index into the selected indices, not into the points directly
     Select(Option<usize>),
-    /// epliog version of `Select`
-    AfterSelect(Option<usize>),
     /// emitted when the user deletes the selected sound block
     Remove,
-    /// epilog version of `Remove`
-    AfterRemove,
     /// emitted when a `Noise` sound block's volume has been changed
     Volume(R32),
     /// emitted when a sound block's attack time has been changed
@@ -81,8 +71,6 @@ pub enum AppEvent {
     SnapStep(R64),
     /// emitted when the user selects the type of sound block for the selected sound block
     SetBlockType(SoundType),
-    /// epilog version of `SetBlockType`
-    AfterSetBlockType(SoundType),
     /// emitted when the user focuses an editor plane i.e. by holding left click
     /// the 1st field is the `GraphEditor::id` of the recipient
     Focus(usize, PointerEvent),
@@ -106,18 +94,12 @@ pub enum AppEvent {
     SetHint(Cow<'static, str>, Cow<'static, str>),
     /// similar to `SetHint` but gets the hint from an event's target
     FetchHint(UiEvent),
-    /// emitted after layout re-render if there's no epilog event scheduled
-    Rendered,
     /// emitted when the user cancels an action, by clicking the necessary key combination or by
     /// choosing the action to unwind to in the UI
     Undo(Rc<Vec<AppAction>>),
-    /// epilog version of `Undo`
-    AfterUndoing(Rc<Vec<AppAction>>),
     /// emitted when the user cancels cancelling an action, by clicking the necessary key
     /// combination or by choosing the action to rewind to in the UI
     Redo(Rc<Vec<AppAction>>),
-    /// epilog version of `Redo`
-    AfterRedoing(Rc<Vec<AppAction>>),
     /// emitted when the user unwinds action history in the UI.
     /// The contained number is the number of actions to undo.
     Unwind(usize),
@@ -125,35 +107,19 @@ pub enum AppEvent {
     /// The contained number is the number of actions to redo.
     Rewind(usize),
     /// set the repetition count of a sound block
-    RepCount(usize)
+    RepCount(NonZeroUsize)
 }
 
 impl AppEvent {
-    /// returns an event that should be returned after re-rendering the page layout
-    /// if page layout re-render is not needed, `None` is returned
-    #[inline] pub fn epilog(&self) -> Option<Self> {
-        match self {
-            Self::SetTab(id)       => Some(Self::AfterSetTab(*id)),
-            Self::Select(id)       => Some(Self::AfterSelect(*id)),
-            Self::AudioStarted(at) => Some(Self::AfterAudioStarted(*at)),
-            Self::StopPlay         => Some(Self::AfterStopPlay),
-            Self::SetBlockType(ty) => Some(Self::AfterSetBlockType(*ty)),
-            Self::Remove           => Some(Self::AfterRemove),
-            Self::Undo(actions)    => Some(Self::AfterUndoing(Rc::clone(actions))),
-            Self::Redo(actions)    => Some(Self::AfterRedoing(Rc::clone(actions))),
-            _ => None
-        }
-    }
-
-    #[inline] pub fn is_epilog(&self) -> bool {
-        matches!(self, Self::AfterSetTab(..)
-            | Self::AfterSelect(..)
-            | Self::AfterAudioStarted(..)
-            | Self::AfterStopPlay
-            | Self::AfterSetBlockType(..)
-            | Self::AfterRemove
-            | Self::AfterUndoing(..)
-            | Self::AfterRedoing(..))
+    #[inline] pub fn needs_layout_rerender(&self) -> bool {
+        matches!(self, Self::SetTab(..)
+            | Self::Select(..)
+            | Self::AudioStarted(..)
+            | Self::StopPlay
+            | Self::SetBlockType(..)
+            | Self::Remove
+            | Self::Undo(..)
+            | Self::Redo(..))
     }
 }
 
@@ -211,7 +177,7 @@ pub enum AppAction {
     /// set master gain level for the composition
     SetMasterVolume{from: R32, to: R32},
     /// set repetition count of a sound block
-    SetRepCount{from: usize, to: usize},
+    SetRepCount{from: NonZeroUsize, to: NonZeroUsize},
 }
 
 impl AppAction {
@@ -295,6 +261,7 @@ impl AppContext {
     }
 
     #[inline] pub fn bps(&self) -> R64 {self.bps}
+    /// If audio's not currently playing, positive infinity is returned.
     #[inline] pub fn play_since(&self) -> R64 {self.play_since}
     #[inline] pub fn now(&self) -> R64 {self.now}
     #[inline] pub fn audio_ctx(&self) -> &AudioContext {&self.audio_ctx}
@@ -317,7 +284,7 @@ impl AppContext {
         self.action_done = true;
     }
 
-    #[inline] pub fn recent_action_done(&self) -> bool {self.action_done}
+    #[inline] pub fn recent_action_done(&mut self) -> bool {self.action_done.take()}
 
     pub fn handle_event(&mut self, event: &AppEvent) -> JsResult<()> {
         Ok(match event {
@@ -331,7 +298,7 @@ impl AppContext {
                 self.play_since = at,
 
             AppEvent::StopPlay =>
-                self.play_since = R64::NEG_INFINITY,
+                self.play_since = R64::INFINITY,
 
             &AppEvent::Frame(now) =>
                 self.now = now / 1000u16,
@@ -414,9 +381,7 @@ impl AppContext {
                 }
             }
 
-            e => if e.is_epilog() {
-                self.action_done = false
-            }
+            _ => ()
         })
     }
 }
@@ -427,8 +392,7 @@ pub struct App {
     ctx: AppContext,
     hint_handler: HintHandler,
     frame_emitter: Function,
-    selected_id: Option<usize>,
-    epilog: Option<AppEvent>
+    selected_id: Option<usize>
 }
 
 impl Component for App {
@@ -440,9 +404,8 @@ impl Component for App {
         let ctx = AppContext::new(ctx.link().callback(|x| x)).unwrap_throw(loc!());
         let sound_visualiser = SoundVisualiser::new(&ctx.audio_ctx).unwrap_throw(loc!());
 
-        let res = Self{epilog: None,
-            selected_id: None,
-            hint_handler: HintHandler::default(),
+        let res = Self{selected_id: None,
+            hint_handler: default(),
             sequencer: Sequencer::new(&ctx.audio_ctx, Rc::clone(sound_visualiser.input())).unwrap_throw(loc!()),
             frame_emitter: Closure::<dyn Fn(f64)>::new(move |x| cb.emit(R64::new_or(r64![0.0], x)))
                 .into_js_value().unchecked_into(),
@@ -514,9 +477,9 @@ impl Component for App {
                 _ => ()
             }
 
-            self.epilog = msg.epilog();
+            let res = msg.needs_layout_rerender();
             self.forward_event(msg).add_loc(loc!())?;
-            return self.ctx.recent_action_done() || self.epilog.is_some()
+            return res | self.ctx.recent_action_done()
         }.report_err(loc!());
         false
     }
@@ -678,9 +641,6 @@ impl Component for App {
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
-        let epilog = self.epilog.take().unwrap_or(AppEvent::Rendered);
-        self.forward_event(epilog).report_err(loc!());
-
         if !first_render {return}
         let window = window();
 

@@ -1,4 +1,4 @@
-use std::ops::{Div, Mul, Add, Deref, DerefMut};
+use std::{ops::{Div, Mul, Add, Deref, DerefMut}, marker::PhantomData};
 use wasm_bindgen::JsValue;
 use web_sys::{
     Element,
@@ -17,10 +17,9 @@ use yew::{
     AttrValue,
     Callback,
     Properties,
-    scheduler::Shared,
-    function_component};
+    scheduler::Shared};
 use crate::{
-    utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, R64, Point, HtmlElementExt, ResultToJsResult, report_err, Pipe, BoolExt},
+    utils::{js_try, JsResultUtils, HtmlCanvasExt, OptionExt, R64, Point, HtmlElementExt, ResultToJsResult, report_err, Pipe, BoolExt, default},
     visual::{GraphPoint, GraphEditor},
     global::AppEvent,
     loc,
@@ -316,7 +315,8 @@ impl Component for Button {
     }
 }
 
-// TODO: make this not need `<T>` somehow
+pub struct GraphEditorCanvas<T>(PhantomData<T>);
+
 #[derive(Debug, PartialEq, Properties)]
 pub struct GraphEditorCanvasProps<T: GraphPoint> {
     pub emitter: Callback<AppEvent>,
@@ -324,22 +324,36 @@ pub struct GraphEditorCanvasProps<T: GraphPoint> {
     pub id: Option<&'static str>
 }
 
-#[function_component(GraphEditorCanvas)]
-pub fn f<T: GraphPoint>(props: &GraphEditorCanvasProps<T>) -> Html {
-    let GraphEditorCanvasProps{emitter, editor, id} = props;
-    match editor.try_borrow().to_js_result(loc!()) {
-        Ok(editor) => {
-            let (canvas_id, id) = (*id, editor.id());
-            html!{<canvas ref={editor.canvas().clone()} id={canvas_id}
-                onpointerdown={emitter.reform(move  |e| AppEvent::Focus(id, e))}
-                onpointerup={emitter.reform(move    |e| AppEvent::Hover(id, MouseEvent::from(e)))}
-                onpointermove={emitter.reform(move  |e| AppEvent::Hover(id, MouseEvent::from(e)))}
-                onpointerenter={emitter.reform(move |e| AppEvent::Enter(id, MouseEvent::from(e)))}
-                onpointerout={emitter.reform(move   |_| AppEvent::Leave(id))}/>}
+impl<T: 'static + GraphPoint> Component for GraphEditorCanvas<T> {
+    type Message = ();
+    type Properties = GraphEditorCanvasProps<T>;
+
+    #[inline] fn create(_: &Context<Self>) -> Self {Self(default())}
+
+    fn view(&self, ctx: &Context<Self>) -> Html {
+        let GraphEditorCanvasProps{emitter, editor, id} = ctx.props();
+        match editor.try_borrow().to_js_result(loc!()) {
+            Ok(editor) => {
+                let (canvas_id, id) = (*id, editor.id());
+                html!{<canvas ref={editor.canvas().clone()} id={canvas_id}
+                    onpointerdown={emitter.reform(move  |e| AppEvent::Focus(id, e))}
+                    onpointerup={emitter.reform(move    |e| AppEvent::Hover(id, MouseEvent::from(e)))}
+                    onpointermove={emitter.reform(move  |e| AppEvent::Hover(id, MouseEvent::from(e)))}
+                    onpointerenter={emitter.reform(move |e| AppEvent::Enter(id, MouseEvent::from(e)))}
+                    onpointerout={emitter.reform(move   |_| AppEvent::Leave(id))}/>}
+            }
+            Err(err) => {
+                report_err(err);
+                html!{"Error"}
+            }
         }
-        Err(err) => {
-            report_err(err);
-            html!{"Error"}
+    }
+
+    #[inline] fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
+        if !first_render {return}
+        match ctx.props().editor.try_borrow_mut().to_js_result(loc!()) {
+            Ok(mut x) => _ = x.init().report_err(loc!()),
+            Err(e) => report_err(e)
         }
     }
 }

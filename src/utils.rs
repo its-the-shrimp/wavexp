@@ -8,7 +8,11 @@ use std::{
     collections::TryReserveError,
     cmp::Ordering,
     any::type_name,
-    array::from_fn};
+    array::from_fn,
+    num::{TryFromIntError,
+        NonZeroU8, NonZeroU16, NonZeroU32, NonZeroUsize, NonZeroU64,
+        NonZeroI8, NonZeroI16, NonZeroI32, NonZeroIsize, NonZeroI64}
+};
 use js_sys::{
     Object as JsObject,
     Error as JsError};
@@ -25,8 +29,6 @@ use web_sys::{
     console::warn_1,
     HtmlElement};
 use yew::html::IntoPropValue;
-
-// TODO: RcVec
 
 pub struct EveryNth<'a, T> {
     iter: &'a [T],
@@ -1288,8 +1290,8 @@ impl Display for NanError {
     }
 }
 
-macro_rules! real_from_ints_impl {
-    ($real:ty { $float:ty } : $($int:ty),+) => {
+macro_rules! real_from_unsigned_ints_impl {
+    ($real:ty { $float:ty } : $($nonzero:ty{ $int:ty }),+) => {
         $(
             impl From<$int> for $real {
                 #[inline] fn from(x: $int) -> Self {Self(x as $float)}
@@ -1322,6 +1324,103 @@ macro_rules! real_from_ints_impl {
                     PartialOrd::partial_cmp(&self.0, &(*other as $float))
                 }
             }
+
+            impl From<$nonzero> for $real {
+                #[inline] fn from(x: $nonzero) -> Self {Self(x.get() as $float)}
+            }
+
+            impl IntoPropValue<$real> for $nonzero {
+                #[inline] fn into_prop_value(self) -> $real {self.into()}
+            }
+
+            impl From<$real> for $nonzero {
+                #[inline] fn from(x: $real) -> Self {
+                    if      *x >= <$int>::MAX as $float {<$nonzero>::MAX}
+                    else if *x <= 1.0 {<$nonzero>::MIN}
+                    else {unsafe{<$nonzero>::new_unchecked(*x as $int)}}
+                }
+            }
+
+            impl IntoPropValue<$nonzero> for $real {
+                #[inline] fn into_prop_value(self) -> $nonzero {self.into()}
+            }
+
+            impl PartialEq<$nonzero> for $real {
+                #[inline] fn eq(&self, other: &$nonzero) -> bool {
+                    PartialEq::eq(&self.0, &(other.get() as $float))
+                }
+            }
+
+            impl PartialOrd<$nonzero> for $real {
+                #[inline] fn partial_cmp(&self, other: &$nonzero) -> Option<Ordering> {
+                    PartialOrd::partial_cmp(&self.0, &(other.get() as $float))
+                }
+            }
+        )+
+    };
+}
+
+macro_rules! real_from_signed_ints_impl {
+    ($real:ty { $float:ty } : $($nonzero:ty{ $int:ty }),+) => {
+        $(
+            impl From<$int> for $real {
+                #[inline] fn from(x: $int) -> Self {Self(x as $float)}
+            }
+
+            impl IntoPropValue<$real> for $int {
+                #[inline] fn into_prop_value(self) -> $real {self.into()}
+            }
+
+            impl From<$real> for $int {
+                #[inline] fn from(x: $real) -> Self {
+                    if      *x >= <$int>::MAX as $float {<$int>::MAX}
+                    else if *x <= <$int>::MIN as $float {<$int>::MIN}
+                    else {*x as $int}
+                }
+            }
+
+            impl IntoPropValue<$int> for $real {
+                #[inline] fn into_prop_value(self) -> $int {self.into()}
+            }
+
+            impl PartialEq<$int> for $real {
+                #[inline] fn eq(&self, other: &$int) -> bool {
+                    PartialEq::eq(&self.0, &(*other as $float))
+                }
+            }
+
+            impl PartialOrd<$int> for $real {
+                #[inline] fn partial_cmp(&self, other: &$int) -> Option<Ordering> {
+                    PartialOrd::partial_cmp(&self.0, &(*other as $float))
+                }
+            }
+
+            impl From<$nonzero> for $real {
+                #[inline] fn from(x: $nonzero) -> Self {Self(x.get() as $float)}
+            }
+
+            impl IntoPropValue<$real> for $nonzero {
+                #[inline] fn into_prop_value(self) -> $real {self.into()}
+            }
+
+            impl TryFrom<$real> for $nonzero {
+                type Error = TryFromIntError;
+                #[inline] fn try_from(x: $real) -> Result<Self, Self::Error> {
+                    <$nonzero>::try_from(<$int>::from(x))
+                }
+            }
+
+            impl PartialEq<$nonzero> for $real {
+                #[inline] fn eq(&self, other: &$nonzero) -> bool {
+                    PartialEq::eq(&self.0, &(other.get() as $float))
+                }
+            }
+
+            impl PartialOrd<$nonzero> for $real {
+                #[inline] fn partial_cmp(&self, other: &$nonzero) -> Option<Ordering> {
+                    PartialOrd::partial_cmp(&self.0, &(other.get() as $float))
+                }
+            }
         )+
     };
 }
@@ -1333,7 +1432,7 @@ macro_rules! real_float_operator_impl {
                 type Output = Self;
                 #[inline(always)] fn $method(self, rhs: $other_float) -> Self {
                     let res = Self(self.0.$method(rhs as $float));
-                    assert!(!res.0.is_nan());
+                    debug_assert!(!res.is_nan(), stringify!(<$real as $op<$other_float>>::$method failed));
                     res
                 }
             }
@@ -1359,7 +1458,7 @@ macro_rules! real_float_operator_impl {
             impl $assign_op<$other_float> for $real {
                 #[inline(always)] fn $assign_method(&mut self, rhs: $other_float) {
                     let res = Self(self.0.$method(rhs as $float));
-                    assert!(!res.0.is_nan());
+                    debug_assert!(!res.is_nan(), stringify!(<$real as $assign_op<$other_float>>::$assign_method failed));
                     *self = res;
                 }
             }
@@ -1373,7 +1472,7 @@ macro_rules! real_float_operator_impl {
 }
 
 macro_rules! real_int_operator_impl {
-    ($real:ty { $float:ty }, $int:ty : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
+    ($real:ty { $float:ty }, $nonzero:ty { $int:ty } : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
         $(
             impl $op<$int> for $real {
                 type Output = Self;
@@ -1408,6 +1507,40 @@ macro_rules! real_int_operator_impl {
                 #[inline(always)]
                 fn $assign_method(&mut self, rhs: &$int) {$assign_op::$assign_method(self, *rhs)}
             }
+
+            impl $op<$nonzero> for $real {
+                type Output = Self;
+                #[inline(always)]
+                fn $method(self, rhs: $nonzero) -> Self {Self(self.0.$method(rhs.get() as $float))}
+            }
+
+            impl $op<&$nonzero> for $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: &$nonzero) -> $real {$op::$method(self, *rhs)}
+            }
+
+            impl<'a> $op<$nonzero> for &'a $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: $nonzero) -> $real {$op::$method(*self, rhs)}
+            }
+
+            impl<'a> $op<&$nonzero> for &'a $real {
+                type Output = $real;
+                #[inline(always)]
+                fn $method(self, rhs: &$nonzero) -> $real {$op::$method(*self, *rhs)}
+            }
+
+            impl $assign_op<$nonzero> for $real {
+                #[inline(always)]
+                fn $assign_method(&mut self, rhs: $nonzero) {self.0.$assign_method(rhs.get() as $float)}
+            }
+
+            impl $assign_op<&$nonzero> for $real {
+                #[inline(always)]
+                fn $assign_method(&mut self, rhs: &$nonzero) {$assign_op::$assign_method(self, *rhs)}
+            }
         )+
     };
 }
@@ -1418,7 +1551,9 @@ macro_rules! real_real_operator_impl {
             impl $op<$other_real> for $real {
                 type Output = Self;
                 #[inline] fn $method(self, rhs: $other_real) -> Self {
-                    Self::new(self.0.$method(rhs.0 as $float)).unwrap()
+                    let res = self.0.$method(rhs.0 as $float);
+                    debug_assert!(!res.is_nan(), stringify!(<$real as $op<$other_real>>::$method failed));
+                    Self(res)
                 }
             }
 
@@ -1443,7 +1578,7 @@ macro_rules! real_real_operator_impl {
             impl $assign_op<$other_real> for $real {
                 #[inline] fn $assign_method(&mut self, rhs: $other_real) {
                     let res = self.0.$method(rhs.0 as $float);
-                    assert!(!res.is_nan());
+                    debug_assert!(!res.is_nan(), stringify!(<$real as $assign_op<$other_real>>::$assign_method failed));
                     self.0 = res;
                 }
             }
@@ -1538,45 +1673,47 @@ macro_rules! real_impl {
             #[inline] fn  ceil_to(self, step: Self) -> Self {step - (self - 1) % step + self - 1}
         }
 
-        real_from_ints_impl!($real{$float}:
-            u8, i8, u16, i16, u32, i32, usize, isize, u64, i64);
-        real_int_operator_impl!($real{$float}, u8:
+        real_from_unsigned_ints_impl!($real{$float}:
+            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64});
+        real_from_signed_ints_impl!($real{$float}:
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
+        real_int_operator_impl!($real{$float}, NonZeroU8{u8}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
             Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, i8:
+        real_int_operator_impl!($real{$float}, NonZeroI8{i8}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
             Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, u16:
+        real_int_operator_impl!($real{$float}, NonZeroU16{u16}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
             Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, i16:
+        real_int_operator_impl!($real{$float}, NonZeroI16{i16}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
             Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, u32:
+        real_int_operator_impl!($real{$float}, NonZeroU32{u32}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
             Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, i32:
+        real_int_operator_impl!($real{$float}, NonZeroI32{i32}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
             Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, usize:
+        real_int_operator_impl!($real{$float}, NonZeroUsize{usize}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
             Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, isize:
+        real_int_operator_impl!($real{$float}, NonZeroIsize{isize}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
             Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, u64:
+        real_int_operator_impl!($real{$float}, NonZeroU64{u64}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
             Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, i64:
+        real_int_operator_impl!($real{$float}, NonZeroI64{i64}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
             Rem::rem|RemAssign::rem_assign);

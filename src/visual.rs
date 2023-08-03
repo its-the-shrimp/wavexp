@@ -1,6 +1,6 @@
 use std::{
     iter::Iterator,
-    slice::{from_raw_parts, from_mut},
+    slice::{from_raw_parts, from_mut, Iter},
     mem::{replace, take},
     ops::{Range, Deref, Not, DerefMut},
     fmt::Debug,
@@ -26,7 +26,7 @@ use crate::{
         ArrayFrom, IntoArray, SliceRef, ResultToJsResult,
         SliceMove, RoundTo, FlippedArray, default, WasmCell,
         Alias, ToEveryNth, ToIterIndicesMut},
-    sound::{FromBeats, Secs},
+    sound::Secs,
     global::{AppEvent, AppContext, AppAction},
     input::{Buttons, Cursor},
     loc,
@@ -217,6 +217,9 @@ pub trait GraphPoint: Sized + Ord {
     /// type of the Y coordinate, used to allow modifying points' Y axis without unsafe code or
     /// additional checks, which would be needed to modify the points' X axis
     type Y;
+    /// type of the context passed to the `on_redraw` handler through graph editor's `handle_event`
+    /// method
+    type RedrawContext;
 
     /// inner data of the point
     fn inner(&self) -> &Self::Inner;
@@ -305,14 +308,25 @@ pub trait GraphPoint: Sized + Ord {
         ctx: &mut AppContext,
         action: &AppAction
     ) {}
+    /// Handle request for a redraw.
+    /// `scale` are the coefficients by which a user coordinate point must be
+    /// multiplied to get a canvas coordinate point.
+    /// `offset` are the offsets which must be added to a canvas coordinate point for
+    /// it to be correctly displayed to the user.
+    /// `solid` is a path that will be rendered with a solid stroke style.
+    /// `dotted` is a path that will be rendered with a dotted stroke style.
+    /// `redraw_ctx` is a context provided to the graph editor through its `handle_event` method
+    fn on_redraw(
+        editor:      &mut GraphEditor<Self>,
+        ctx:         &mut AppContext,
+        canvas_size: &[R64; 2],
+        solid:       &Path2d,
+        dotted:      &Path2d,
+        redraw_ctx:  Self::RedrawContext
+    );
 
     /// `loc` is in user coordinates
     fn fmt_loc(loc: [R64; 2]) -> String;
-
-    /// visual representation of the point's hitbox
-    /// `mapper` maps user coordinates to canvas coordinates, all vertices in the
-    /// returned `Path2d` must be the result of the `mapper` function
-    fn draw(&self, next: Option<&Self>, mapper: impl Fn([R64; 2]) -> [R64; 2]) -> JsResult<Path2d>;
     /// the canvas's coordinate space
     /// the function will be called every time the user 
     #[inline] fn canvas_coords(canvas: &HtmlCanvasElement) -> JsResult<[u32; 2]> {
@@ -382,15 +396,19 @@ impl AnyGraphEditor {
     pub const INVALID_ID: usize = 0;
 
     #[inline] pub fn id(&self) -> usize {self.id}
+    #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
+    #[inline] pub fn selection(&self) -> &[usize] {&self.selection}
+    /// Offsets which must be subtracted from a canvas coordinate point for
+    /// it to be correctly displayed to the user.
+    /// Changed by the user dragging the editor plane.
+    #[inline] pub fn offset(&self) -> Point {self.offset}
+    /// Coefficients by which a user coordinate point must be
+    /// multiplied to get a canvas coordinate point.
+    #[inline] pub fn scale(&self) -> [R64; 2] {self.scale}
 
     #[inline] pub fn last_cursor(&self) -> Option<Cursor> {
         matches!(self.focus, Focus::None).not().then_some(self.last_cursor)
     }
-
-    #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
-
-    #[inline] pub fn selection(&self) -> &[usize] {&self.selection}
-
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -443,13 +461,11 @@ impl<T: GraphPoint> GraphEditor<T> {
         GraphPointView(self.data.get_unchecked_mut(index))
     }
 
-    #[inline] pub unsafe fn first_unchecked(&self) -> &T {
-        &*self.data.as_ptr()
-    }
+    #[inline] pub fn first(&self) -> Option<&T> {self.data.first()}
 
-    #[inline] pub unsafe fn last_unchecked(&self) -> &T {
-        unsafe{self.data.last().unwrap_unchecked()}
-    }
+    #[inline] pub fn last(&self) -> Option<&T> {self.data.last()}
+
+    #[inline] pub fn iter(&self) -> Iter<'_, T> {self.data.iter()}
 
     #[inline] pub fn iter_mut(&mut self) -> impl Iterator<Item=GraphPointView<'_, T>> {
         self.data.iter_mut().map(GraphPointView)
@@ -846,7 +862,12 @@ impl<T: GraphPoint> GraphEditor<T> {
         Ok((res, scale))
     }
 
-    pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> JsResult<()> {
+    pub fn handle_event(
+        &mut self,
+        event: &AppEvent,
+        ctx: &mut AppContext,
+        redraw_ctx: impl FnOnce() -> T::RedrawContext
+    ) -> JsResult<()> {
         Ok(match event {
             AppEvent::Enter(id, e) | AppEvent::Hover(id, e) if *id == self.id =>
                 self.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())?,
@@ -948,8 +969,8 @@ impl<T: GraphPoint> GraphEditor<T> {
                     % (self.offset.y > (T::Y_BOUND.start * step[1]).into())
                     .choose(step[1] * 2.0, R64::INFINITY);
 
-                let offset = |loc| loc + self.inner.offset;
-                let to_user = |loc| R64::array_from(offset(loc)).div(step);
+                let offset = &R64::array_from(self.offset);
+                let to_user = |loc| R64::array_from(loc).add(offset).div(step);
                 let to_aligned_canvas = |loc: Point| loc.floor_to(snap_step.mul(step).into());
                 let confine = |x| [T::X_BOUND, T::Y_BOUND].fit(x);
 
@@ -975,31 +996,21 @@ impl<T: GraphPoint> GraphEditor<T> {
                 }
                 canvas_ctx.reset_transform().add_loc(loc!())?;
 
-                let points = Path2d::new().add_loc(loc!())?;
-                let mapper = |loc: [R64; 2]| loc.mul(step).sub(&R64::array_from(self.inner.offset));
-                for [this, next] in self.data.array_windows::<2>() {
-                    points.add_path(&this.draw(Some(next), mapper).add_loc(loc!())?);
-                }
-                if let Some(last) = self.data.last() {
-                    points.add_path(&last.draw(None, mapper).add_loc(loc!())?);
-                }
-                canvas_ctx.fill_with_path_2d(&points);
-                canvas_ctx.set_stroke_style(&AnyGraphEditor::FG_STYLE.into());
-                canvas_ctx.stroke_with_path(&points);
+                let solid = Path2d::new().add_loc(loc!())?;
+                let dotted = Path2d::new().add_loc(loc!())?;
+                T::on_redraw(self, ctx, &size, &solid, &dotted, redraw_ctx());
 
-                let [x, y] = mapper(self.selection_src);
+                let [x, y] = self.selection_src.mul(step).sub(offset);
                 let [w, h] = self.selection_size.mul(step);
-                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
-                canvas_ctx.stroke_rect(*x, *y, *w, *h);
-                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
+                dotted.rect(*x, *y, *w, *h);
 
-                if ctx.play_since().is_finite() {
-                    canvas_ctx.set_fill_style(&AnyGraphEditor::FG_STYLE.into());
-                    let play_at = (ctx.now() - ctx.play_since()).secs_to_beats(ctx.bps());
-                    canvas_ctx.fill_rect(*play_at * *step[0] - self.offset.x as f64, 0.0, 3.0, *size[1]);
-                } else {
-                    self.inner.redraw = false;
-                }
+                canvas_ctx.set_stroke_style(&AnyGraphEditor::FG_STYLE.into());
+                canvas_ctx.fill_with_path_2d(&solid);
+                canvas_ctx.stroke_with_path(&solid);
+                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
+                canvas_ctx.fill_with_path_2d(&dotted);
+                canvas_ctx.stroke_with_path(&dotted);
+                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
 
                 match self.focus {
                     Focus::Zoom{pivot, init_offset, ..} => if self.last_cursor.left {
@@ -1021,7 +1032,7 @@ impl<T: GraphPoint> GraphEditor<T> {
 
                     Focus::Plane{origin, ..} if self.last_cursor.meta => if self.last_cursor.left {
                         let cur = to_aligned_canvas(self.last_cursor.point);
-                        let origin = mapper(origin).map(|x| *x);
+                        let origin = origin.mul(step).sub(offset).map(|x| *x);
                         canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
                         canvas_ctx.stroke_rect(origin[0], origin[1], cur.x as f64 - origin[0], cur.y as f64 - origin[1]);
                         canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;

@@ -6,6 +6,7 @@
 #![feature(array_windows)]
 #![feature(const_range_bounds)]
 #![feature(lazy_cell)]
+#![feature(variant_count)]
 #![allow(clippy::unit_arg)]
 #![allow(clippy::option_map_unit_fn)]
 #![allow(clippy::comparison_chain)]
