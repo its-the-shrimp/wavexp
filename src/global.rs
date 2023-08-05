@@ -13,7 +13,9 @@ use web_sys::{
     MouseEvent,
     AudioContext,
     UiEvent,
-    KeyboardEvent};
+    KeyboardEvent,
+    Event,
+    AudioBuffer};
 use yew::{
     Component,
     Context,
@@ -21,7 +23,7 @@ use yew::{
     html,
     AttrValue, Callback};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats, Note, NoteBlock},
+    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats, Note, NoteBlock, CustomBlock},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
     utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, ResultToJsResult, Point, Take, default},
     input::{Button, Slider, Switch, GraphEditorCanvas},
@@ -96,10 +98,10 @@ pub enum AppEvent {
     FetchHint(UiEvent),
     /// emitted when the user cancels an action, by clicking the necessary key combination or by
     /// choosing the action to unwind to in the UI
-    Undo(Rc<Vec<AppAction>>),
+    Undo(Box<[AppAction]>),
     /// emitted when the user cancels cancelling an action, by clicking the necessary key
     /// combination or by choosing the action to rewind to in the UI
-    Redo(Rc<Vec<AppAction>>),
+    Redo(Box<[AppAction]>),
     /// emitted when the user unwinds action history in the UI.
     /// The contained number is the number of actions to undo.
     Unwind(usize),
@@ -107,7 +109,11 @@ pub enum AppEvent {
     /// The contained number is the number of actions to redo.
     Rewind(usize),
     /// set the repetition count of a sound block
-    RepCount(NonZeroUsize)
+    RepCount(NonZeroUsize),
+    /// audio file was uploaded to a Custom Audio sound block
+    AudioUploaded(Event),
+    /// audio source was decoded and is ready to be used
+    AudioProcessed(AudioBuffer)
 }
 
 impl AppEvent {
@@ -147,6 +153,8 @@ pub enum AppAction {
     AddSoundBlock{block_id: usize, offset: R64, layer: i32},
     /// add a note block to a graph editor
     AddNoteBlock{block_id: usize, offset: R64, value: Note},
+    /// add a custom audio block to a graph editor
+    AddCustomBlock(usize, CustomBlock),
     /// select a sound block
     Select{from: Option<usize>, to: Option<usize>,
         prev_selected_tab: usize},
@@ -157,9 +165,9 @@ pub enum AppAction {
     /// remove sound blocks
     RemoveSoundBlock(usize, SoundBlock),
     /// remove note blocks
-    RemoveNoteBlocks(Rc<Vec<(usize, NoteBlock)>>),
+    RemoveNoteBlocks(Box<[(usize, NoteBlock)]>),
     /// change the length of note blocks, optionally removing some
-    StretchNoteBlocks{delta_x: R64, delta_y: isize, removed: Rc<Vec<(usize, NoteBlock)>>},
+    StretchNoteBlocks{delta_x: R64, delta_y: isize, removed: Box<[(usize, NoteBlock)]>},
     /// change sound's volume
     SetVolume{from: R32, to: R32},
     /// change sound's attack time
@@ -178,6 +186,8 @@ pub enum AppAction {
     SetMasterVolume{from: R32, to: R32},
     /// set repetition count of a sound block
     SetRepCount{from: NonZeroUsize, to: NonZeroUsize},
+    /// remove custom blocks
+    RemoveCustomBlocks(Box<[(usize, CustomBlock)]>)
 }
 
 impl AppAction {
@@ -198,7 +208,8 @@ impl AppAction {
             Self::AddNoteBlock{..} =>
                 "Add Note Block",
             Self::Select{to, ..} =>
-                to.choose("Open Sound Block Editor", "Close Sound Block Editor"),
+                if to.is_some() {"Open Sound Block Editor"}
+                else {"Close Sound Block Editor"}
             Self::SetBlockType(..) =>
                 "Set Sound Block Type",
             Self::SwitchTab{..} =>
@@ -226,7 +237,12 @@ impl AppAction {
             Self::SetMasterVolume{..} =>
                 "Set Master Volume",
             Self::SetRepCount{..} =>
-                "Set Sound Block Rep Count"
+                "Set Sound Block Repetition Count",
+            Self::RemoveCustomBlocks(removed) =>
+                if removed.len() == 1 {"Remove Custom Audio Block"}
+                else {"Remove Custom Audio Blocks"},
+            Self::AddCustomBlock(..) =>
+                "Add Custom Audio Block"
         }
     }
 }
@@ -264,7 +280,7 @@ impl AppContext {
     /// If audio's not currently playing, positive infinity is returned.
     #[inline] pub fn play_since(&self) -> R64 {self.play_since}
     #[inline] pub fn now(&self) -> R64 {self.now}
-    #[inline] pub fn audio_ctx(&self) -> &AudioContext {&self.audio_ctx}
+    #[inline] pub fn audio_ctx(&self) -> &Rc<AudioContext> {&self.audio_ctx}
     #[inline] pub fn snap_step(&self) -> R64 {self.snap_step}
     #[inline] pub fn selected_tab(&self) -> usize {self.selected_tab}
     #[inline] pub fn actions(&self) -> &[AppAction] {&self.actions}
@@ -276,7 +292,8 @@ impl AppContext {
         self
     }
 
-    #[inline] pub fn emit_event(&mut self, event: AppEvent) {self.event_emitter.emit(event)}
+    #[inline] pub fn event_emitter(&self) -> &Callback<AppEvent> {&self.event_emitter}
+    #[inline] pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
 
     #[inline] pub fn register_action(&mut self, action: AppAction) {
         self.actions.drain(self.actions.len() - take(&mut self.undid_actions) ..);
@@ -334,15 +351,15 @@ impl AppContext {
                     .to_js_result(loc!())?
                     .iter().rev().cloned().collect();
                 self.undid_actions += n;
-                self.event_emitter.emit(AppEvent::Undo(Rc::new(unwound)))
+                self.event_emitter.emit(AppEvent::Undo(unwound))
             }
 
             &AppEvent::Rewind(n) => {
                 let len = self.actions.len();
                 let rewound = self.actions.get({let x = len - self.undid_actions; x .. x + n})
-                    .to_js_result(loc!())?.to_vec();
+                    .to_js_result(loc!())?.to_box();
                 self.undid_actions -= n;
-                self.event_emitter.emit(AppEvent::Redo(Rc::new(rewound)))
+                self.event_emitter.emit(AppEvent::Redo(rewound))
             }
 
             AppEvent::Undo(actions) => for action in actions.iter() {

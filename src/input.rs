@@ -393,7 +393,7 @@ impl Component for Counter {
                 Cmd::Drag(e) => self.value = R64::from(e.movement_y())
                     .div(-e.target_dyn_into::<Element>().to_js_result(loc!())?.client_height())
                     .mul(coef)
-                    .pipe_if(e.shift_key(), |x| x / 2)
+                    .pipe_if(e.shift_key(), |x| x / 200)
                     .add(self.value)
                     .max(*min),
 

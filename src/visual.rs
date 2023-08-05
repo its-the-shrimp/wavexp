@@ -21,8 +21,7 @@ use yew::{TargetCast, NodeRef};
 use crate::{
     utils::{SliceExt, Point,
         JsResult, HtmlCanvasExt, JsResultUtils, OptionExt,
-        HtmlElementExt, 
-        Pipe, BoolExt, RangeExt, VecExt, R64, ArrayExt,
+        HtmlElementExt, BoolExt, RangeExt, VecExt, R64, ArrayExt,
         ArrayFrom, IntoArray, SliceRef, ResultToJsResult,
         SliceMove, RoundTo, FlippedArray, default, WasmCell,
         Alias, ToEveryNth, ToIterIndicesMut},
@@ -217,9 +216,9 @@ pub trait GraphPoint: Sized + Ord {
     /// type of the Y coordinate, used to allow modifying points' Y axis without unsafe code or
     /// additional checks, which would be needed to modify the points' X axis
     type Y;
-    /// type of the context passed to the `on_redraw` handler through graph editor's `handle_event`
-    /// method
-    type RedrawContext;
+    /// Type of the context passed to all the trait's functions related to visuals through `GraphEditor::handle_event()`.
+    /// Such functions are `in_hitbox` and `on_redraw`.
+    type VisualContext: Copy;
 
     /// inner data of the point
     fn inner(&self) -> &Self::Inner;
@@ -235,7 +234,7 @@ pub trait GraphPoint: Sized + Ord {
     /// `meta` signifies whether the meta key was held while moving the point
     fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], meta: bool);
     /// returns `true` if the given user coordinates are inside the hitbox of the point
-    fn in_hitbox(&self, point: [R64; 2]) -> bool;
+    fn in_hitbox(&self, point: [R64; 2], visual_ctx: Self::VisualContext) -> bool;
 
     ////// HANDLERS
     /// Handle points being moved in the UI.
@@ -322,7 +321,7 @@ pub trait GraphPoint: Sized + Ord {
         canvas_size: &[R64; 2],
         solid:       &Path2d,
         dotted:      &Path2d,
-        redraw_ctx:  Self::RedrawContext
+        visual_ctx:  Self::VisualContext
     );
 
     /// `loc` is in user coordinates
@@ -500,6 +499,28 @@ impl<T: GraphPoint> GraphEditor<T> {
         to
     }
 
+    /// `to_remove` accepts an ID of the selected point and a reference to it,
+    /// and returns `true` if the point stays or `false` if the point must be removed.
+    /// `sink` is the function that will be called on every removed point.
+    /// If there's nothing to do with the points, standard library's `drop` function can be passed.
+    #[inline] pub fn filter_selected(
+        &mut self,
+        mut to_remove: impl FnMut((usize, &T)) -> bool,
+        mut sink: impl FnMut((usize, T))
+    ) {
+        for i in (0 .. self.selection.len()).rev() {
+            unsafe {
+                let selected_id = *self.selection.get_unchecked(i);
+                if to_remove((selected_id, self.get_unchecked(selected_id))) {
+                    sink((selected_id, self.data.remove_unchecked(selected_id)));
+                    self.selection.remove_unchecked(i);
+                    self.redraw = true;
+                }
+            }
+        }
+    }
+
+    /// `to_remove` iterates over IDs of points that must be removed.
     /// `sink` is the function that will be called on every removed point.
     /// If there's nothing to do with the points, standard library's `drop` function can be passed.
     #[inline] pub fn remove_points(
@@ -520,7 +541,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     Ordering::Less =>
                         *x -= 1,
                     Ordering::Equal =>
-                        break ids_iter.len().pipe(|x| unsafe{inner.selection.remove_unchecked(x); x}),
+                        break unsafe{let x = ids_iter.len(); inner.selection.remove_unchecked(x); x},
                     Ordering::Greater =>
                         break ids_iter.len()
                 }
@@ -552,8 +573,8 @@ impl<T: GraphPoint> GraphEditor<T> {
         Ok(self.redraw = true)
     }
 
-    #[inline] fn point_by_pos(&self, loc: [R64; 2]) -> Option<SliceRef<'_, T>> {
-        self.data.iter().enumerate().find(|(_, x)| x.in_hitbox(loc))
+    #[inline] fn point_by_pos(&self, loc: [R64; 2], visual_ctx: T::VisualContext) -> Option<SliceRef<'_, T>> {
+        self.data.iter().enumerate().find(|x| x.1.in_hitbox(loc, visual_ctx))
             .map(|(id, x)| unsafe{SliceRef::raw(x, id)})
     }
 
@@ -588,7 +609,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         T::on_selection_hover(self, ctx, cursor, true)
     }
 
-    fn handle_hover(&mut self, cursor: Option<Cursor>, ctx: &mut AppContext) -> JsResult<()> {
+    fn handle_hover(&mut self, cursor: Option<Cursor>, ctx: &mut AppContext, visual_ctx: impl Deref<Target = T::VisualContext>) -> JsResult<()> {
         let Some(cursor) = cursor else {
             self.focus = Focus::None;
             self.changed_focus = true;
@@ -661,7 +682,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         let prev_ids = replace(&mut self.inner.selection, self.data.iter().enumerate()
                             .filter_map(|(id, x)| x.loc().array_check_in(&area).map(|_| id))
                             .collect()).to_box();
-                        if let Some(p) = self.point_by_pos(cur_loc) {
+                        if let Some(p) = self.point_by_pos(cur_loc, *visual_ctx) {
                             self.set_point_focus(ctx, cursor, p.index());
                         } else {
                             self.set_plane_focus(ctx, cursor, &end);
@@ -710,7 +731,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     }
                 } else if self.point_in_selection(*cursor_point_user) {
                     self.set_selection_focus(ctx, cursor);
-                } else if let Some(p) = self.point_by_pos(*cursor_point_user) {
+                } else if let Some(p) = self.point_by_pos(*cursor_point_user, *visual_ctx) {
                     self.set_point_focus(ctx, cursor, p.index());
                 } else {
                     self.redraw |= self.last_cursor.meta | meta;
@@ -778,7 +799,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                 }
             } else if cursor.shift {
                 self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))
-            } else if !unsafe{self.data.get_unchecked(*id)}.in_hitbox(*cursor_point_user) {
+            } else if !unsafe{self.data.get_unchecked(*id)}.in_hitbox(*cursor_point_user, *visual_ctx) {
                 self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))
             }
 
@@ -816,7 +837,7 @@ impl<T: GraphPoint> GraphEditor<T> {
             } else if cursor.shift {
                 self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))
             } else if !self.point_in_selection(*cursor_point_user) {
-                if let Some(p) = self.point_by_pos(*cursor_point_user) {
+                if let Some(p) = self.point_by_pos(*cursor_point_user, *visual_ctx) {
                     self.set_point_focus(ctx, cursor, p.index())
                 } else {
                     self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))
@@ -866,23 +887,23 @@ impl<T: GraphPoint> GraphEditor<T> {
         &mut self,
         event: &AppEvent,
         ctx: &mut AppContext,
-        redraw_ctx: impl FnOnce() -> T::RedrawContext
+        visual_ctx: impl FnOnce() -> T::VisualContext
     ) -> JsResult<()> {
         Ok(match event {
             AppEvent::Enter(id, e) | AppEvent::Hover(id, e) if *id == self.id =>
-                self.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())?,
+                self.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx, LazyCell::new(visual_ctx)).add_loc(loc!())?,
 
             AppEvent::Focus(id, e) if *id == self.id => {
                 e.target_dyn_into::<Element>().to_js_result(loc!())?
                     .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                self.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx).add_loc(loc!())?;
+                self.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx, LazyCell::new(visual_ctx)).add_loc(loc!())?;
             }
 
             AppEvent::KeyPress(id, e) | AppEvent::KeyRelease(id, e) if *id == self.id =>
-                self.handle_hover(Some(self.last_cursor + e), ctx).add_loc(loc!())?,
+                self.handle_hover(Some(self.last_cursor + e), ctx, LazyCell::new(visual_ctx)).add_loc(loc!())?,
 
             AppEvent::Leave(id) if *id == self.id =>
-                self.handle_hover(None, ctx).add_loc(loc!())?,
+                self.handle_hover(None, ctx, LazyCell::new(visual_ctx)).add_loc(loc!())?,
 
             AppEvent::Resize =>
                 self.init().add_loc(loc!())?,
@@ -998,7 +1019,7 @@ impl<T: GraphPoint> GraphEditor<T> {
 
                 let solid = Path2d::new().add_loc(loc!())?;
                 let dotted = Path2d::new().add_loc(loc!())?;
-                T::on_redraw(self, ctx, &size, &solid, &dotted, redraw_ctx());
+                T::on_redraw(self, ctx, &size, &solid, &dotted, visual_ctx());
 
                 let [x, y] = self.selection_src.mul(step).sub(offset);
                 let [w, h] = self.selection_size.mul(step);

@@ -456,6 +456,15 @@ macro_rules! js_try {
         }; x}
     };
 
+    (async move: $($s:tt)*) => {
+        async move {
+            let x: $crate::utils::JsResult<_> = try {
+                $($s)*
+            };
+            x.report_err(loc!());
+        }
+    };
+
     ($($s:tt)*) => {
         {let x: $crate::utils::JsResult<_> = try {
             $($s)*

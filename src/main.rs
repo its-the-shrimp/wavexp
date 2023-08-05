@@ -21,6 +21,7 @@ pub use js_sys;
 pub use wasm_bindgen;
 pub use yew;
 pub use web_sys;
+pub use wasm_bindgen_futures;
 
 fn main() {
     yew::Renderer::<global::App>::new().render();
