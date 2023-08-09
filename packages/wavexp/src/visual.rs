@@ -18,22 +18,37 @@ use web_sys::{
     Element};
 use wasm_bindgen::{Clamped, JsValue, JsCast};
 use yew::{TargetCast, NodeRef};
-use crate::{
-    utils::{SliceExt, Point,
-        JsResult, HtmlCanvasExt, JsResultUtils, OptionExt,
-        HtmlElementExt, BoolExt, RangeExt, VecExt, R64, ArrayExt,
-        ArrayFrom, IntoArray, SliceRef, ResultToJsResult,
-        SliceMove, RoundTo, FlippedArray, default, WasmCell,
-        Alias, ToEveryNth, ToIterIndicesMut},
-    sound::Secs,
-    global::{AppEvent, AppContext, AppAction},
-    input::{Buttons, Cursor},
-    loc,
+use wavexp_utils::{
+    SliceExt,
+    Point,
+    JsResult,
+    HtmlCanvasExt,
+    JsResultUtils,
+    OptionExt,
+    HtmlElementExt,
+    BoolExt,
+    RangeExt,
+    VecExt,
+    R64,
+    ArrayExt,
+    ArrayFrom,
+    IntoArray,
+    SliceRef,
+    SliceMove,
+    RoundTo,
+    FlippedArray,
+    default,
+    WasmCell,
+    Alias,
+    ToEveryNth,
+    ToIterIndicesMut,
     r64,
     js_assert,
-    eval_once,
-    js_array
-};
+    ResultExt, eval_once, js_array};
+use crate::{
+    sound::Secs,
+    global::{AppEvent, AppContext, AppAction},
+    input::{Buttons, Cursor}};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Rgba {
@@ -93,13 +108,14 @@ pub struct SoundVisualiser {
 impl SoundVisualiser {
 	pub const FG: Rgba = Rgba{r:0x00, g:0x69, b:0xE1, a:0xFF};
 	pub const BG: Rgba = Rgba{r:0x18, g:0x18, b:0x18, a:0xFF};
-	pub fn new(ctx: &AudioContext) -> JsResult<Self> {
-		Ok(Self{input: Rc::new(ctx.create_analyser().add_loc(loc!())?),
+	pub fn new(ctx: &AudioContext) -> Option<Self> {
+		Some(Self{input: Rc::new(ctx.create_analyser().report()?),
             out_data: vec![], in_data: vec![],
             gradient: (0 ..= u8::MAX)
                 .map(|i| interp(&[Self::BG, Self::FG], i))
                 .collect(),
-			width: 0, height: 0, canvas: NodeRef::default()})
+			width: 0, height: 0,
+            canvas: default()})
 	}
 
     #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
@@ -107,10 +123,10 @@ impl SoundVisualiser {
     #[inline] pub fn input(&self) -> &Rc<AnalyserNode> {&self.input}
 
     // TODO: correctly readjust the graph when shrinked in the UI
-    pub fn handle_event(&mut self, event: &AppEvent, ctx: &AppContext) -> JsResult<()> {
-        Ok(match event {
+    pub fn handle_event(&mut self, event: &AppEvent, ctx: &AppContext) -> Option<()> {
+        Some(match event {
             AppEvent::Resize => {
-                let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
+                let canvas: HtmlCanvasElement = self.canvas.cast().report_none()?;
                 let [w, h] = canvas.client_size().map(|x| x as u32);
                 canvas.set_width(w);
                 canvas.set_height(h);
@@ -128,10 +144,10 @@ impl SoundVisualiser {
                 }
 
                 let out = unsafe{from_raw_parts(self.out_data.as_ptr().cast(), self.out_data.len() * 4)};
-                let out = ImageData::new_with_u8_clamped_array(Clamped(out), self.width).add_loc(loc!())?;
-                self.canvas.cast::<HtmlCanvasElement>().to_js_result(loc!())?
-                    .get_2d_context(loc!())?
-                    .put_image_data(&out, 0.0, 0.0).add_loc(loc!())?;
+                let out = ImageData::new_with_u8_clamped_array(Clamped(out), self.width).report()?;
+                self.canvas.cast::<HtmlCanvasElement>().report_none()?
+                    .get_2d_context()?
+                    .put_image_data(&out, 0.0, 0.0).report()?;
             }
 
             _ => (),
@@ -146,19 +162,19 @@ pub struct HintHandler {
 }
 
 impl HintHandler {
-    pub fn handle_event(&mut self, event: &AppEvent, _: &AppContext) -> JsResult<()> {
-        Ok(match event {
+    pub fn handle_event(&mut self, event: &AppEvent, _: &AppContext) -> Option<()> {
+        Some(match event {
             AppEvent::SetHint(main, aux) => {
-                self.main_bar.cast::<HtmlElement>().to_js_result(loc!())?
+                self.main_bar.cast::<HtmlElement>().report_none()?
                     .set_inner_text(main);
-                self.aux_bar.cast::<HtmlElement>().to_js_result(loc!())?
+                self.aux_bar.cast::<HtmlElement>().report_none()?
                     .set_inner_text(aux);
             }
 
             AppEvent::FetchHint(e) => {
-                let main_bar: HtmlElement = self.main_bar.cast().to_js_result(loc!())?;
-                let  aux_bar: HtmlElement = self.aux_bar.cast().to_js_result(loc!())?;
-                let mut src: Element = e.target_dyn_into().to_js_result(loc!())?;
+                let main_bar: HtmlElement = self.main_bar.cast().report_none()?;
+                let  aux_bar: HtmlElement = self.aux_bar.cast().report_none()?;
+                let mut src: Element = e.target_dyn_into().report_none()?;
 
                 loop {
                     let dataset = if let Some(x) = src.dyn_ref::<HtmlElement>() {
@@ -475,13 +491,13 @@ impl<T: GraphPoint> GraphEditor<T> {
             .map(GraphPointView)
     }
 
-    #[inline] pub fn expand_selection(&mut self, ids: impl Iterator<Item = usize>) -> JsResult<()> {
+    #[inline] pub fn expand_selection(&mut self, ids: impl Iterator<Item = usize>) -> Option<()> {
         let len = self.data.len();
         for id in ids {
-            js_assert!(id < len)?;
+            js_assert!(id < len).report()?;
             self.selection.push_sorted(id);
         }
-        Ok(())
+        Some(())
     }
 
     /// The function is unsafe because maintaining sorted order of the points is on the caller.
@@ -498,6 +514,9 @@ impl<T: GraphPoint> GraphEditor<T> {
         SliceMove{from: self.data.len(), to}.apply(&mut self.selection);
         to
     }
+
+    /// removes the selection area from the plane (not the selected points)
+    #[inline] pub fn clear_selection_area(&mut self) {self.selection_size = default()}
 
     /// `to_remove` accepts an ID of the selected point and a reference to it,
     /// and returns `true` if the point stays or `false` if the point must be removed.
@@ -527,14 +546,14 @@ impl<T: GraphPoint> GraphEditor<T> {
         &mut self,
         to_remove: impl Iterator<Item = usize> + DoubleEndedIterator,
         mut sink: impl FnMut((usize, T))
-    ) -> JsResult<()> {
+    ) -> Option<()> {
         self.redraw = true;
         let GraphEditor{inner, data} = self;
         let mut ids_iter = inner.selection.iter_mut().rev();
         let mut prev_id = data.len();
-        for id in to_remove.rev() {
-            js_assert!(id < replace(&mut prev_id, id))?;
-            sink((id, data.try_remove(id).to_js_result(loc!())?));
+        Some(for id in to_remove.rev() {
+            js_assert!(id < replace(&mut prev_id, id)).report()?;
+            sink((id, data.try_remove(id).report_fmt()?));
             let rem = loop {
                 let Some(x) = ids_iter.next() else {break 0};
                 match id.cmp(x) {
@@ -547,16 +566,15 @@ impl<T: GraphPoint> GraphEditor<T> {
                 }
             };
             ids_iter = inner.selection.get_mut(..rem).unwrap_or(&mut []).iter_mut().rev();
-        }
-        Ok(())
+        })
     }
 
     #[inline] pub fn force_redraw(&mut self) {self.redraw = true}
 
     /// must be called when a canvas has just been bound or its dimensions have been changed
-    pub fn init(&mut self) -> JsResult<()> {
-        let canvas: HtmlCanvasElement = self.canvas.cast().to_js_result(loc!())?;
-        let [w, h] = T::canvas_coords(&canvas).add_loc(loc!())?;
+    pub fn init(&mut self) -> Option<()> {
+        let canvas: HtmlCanvasElement = self.canvas.cast().report_none()?;
+        let [w, h] = T::canvas_coords(&canvas).report()?;
         canvas.set_width(w);
         canvas.set_height(h);
         self.scale = self.scale.map(|x| x.ceil_to(r64![2.0]));
@@ -567,10 +585,10 @@ impl<T: GraphPoint> GraphEditor<T> {
         if self.offset.y <= 0 {
             self.offset.y = (T::OFFSET_Y_BOUND.start * R64::from(h) / self.scale[1]).into();
         }
-        let ctx = canvas.get_2d_context(loc!())?;
+        let ctx = canvas.get_2d_context()?;
         ctx.set_font(AnyGraphEditor::FONT);
         ctx.set_line_width(AnyGraphEditor::LINE_WIDTH);
-        Ok(self.redraw = true)
+        Some(self.redraw = true)
     }
 
     #[inline] fn point_by_pos(&self, loc: [R64; 2], visual_ctx: T::VisualContext) -> Option<SliceRef<'_, T>> {
@@ -609,15 +627,15 @@ impl<T: GraphPoint> GraphEditor<T> {
         T::on_selection_hover(self, ctx, cursor, true)
     }
 
-    fn handle_hover(&mut self, cursor: Option<Cursor>, ctx: &mut AppContext, visual_ctx: impl Deref<Target = T::VisualContext>) -> JsResult<()> {
+    fn handle_hover(&mut self, cursor: Option<Cursor>, ctx: &mut AppContext, visual_ctx: impl Deref<Target = T::VisualContext>)
+    -> Option<()> {
         let Some(cursor) = cursor else {
             self.focus = Focus::None;
             self.changed_focus = true;
-            return Ok(())
+            return Some(())
         };
 
-        let size = self.canvas.cast::<HtmlCanvasElement>()
-            .to_js_result(loc!())?.size();
+        let size = self.canvas.cast::<HtmlCanvasElement>().report_none()?.size();
         let snap_step = [ctx.snap_step(), T::Y_SNAP];
         let step = &R64::array_from(size).div(&self.scale);
 
@@ -860,14 +878,13 @@ impl<T: GraphPoint> GraphEditor<T> {
         }
 
         let old_buttons = *replace(&mut self.last_cursor, cursor);
-        self.redraw |= *cursor != old_buttons;
-        Ok(())
+        Some(self.redraw |= *cursor != old_buttons)
     }
 
     /// an offset of 0 is assumed
     /// the returned array are the actual bounds of the rendered grid in user coordinates
     fn draw_grid(canvas_size: [R64; 2], step: [R64; 2], scale: [R64; 2]) -> JsResult<(Path2d, [R64; 2])> {
-        let res = Path2d::new().add_loc(loc!())?;
+        let res = Path2d::new()?;
         let steps: [usize; 2] = [T::X_BOUND.end, T::Y_BOUND.end].mul(&step)
             .zip(canvas_size, min).div(&canvas_size).mul(&scale)
             .into_array();
@@ -888,25 +905,24 @@ impl<T: GraphPoint> GraphEditor<T> {
         event: &AppEvent,
         ctx: &mut AppContext,
         visual_ctx: impl FnOnce() -> T::VisualContext
-    ) -> JsResult<()> {
-        Ok(match event {
+    ) -> Option<()> {
+        Some(match event {
             AppEvent::Enter(id, e) | AppEvent::Hover(id, e) if *id == self.id =>
-                self.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx, LazyCell::new(visual_ctx)).add_loc(loc!())?,
+                self.handle_hover(Some(e.try_into().report()?), ctx, LazyCell::new(visual_ctx))?,
 
             AppEvent::Focus(id, e) if *id == self.id => {
-                e.target_dyn_into::<Element>().to_js_result(loc!())?
-                    .set_pointer_capture(e.pointer_id()).add_loc(loc!())?;
-                self.handle_hover(Some(e.try_into().add_loc(loc!())?), ctx, LazyCell::new(visual_ctx)).add_loc(loc!())?;
+                e.target_dyn_into::<Element>().report_none()?
+                    .set_pointer_capture(e.pointer_id()).report()?;
+                self.handle_hover(Some(e.try_into().report()?), ctx, LazyCell::new(visual_ctx))?;
             }
 
             AppEvent::KeyPress(id, e) | AppEvent::KeyRelease(id, e) if *id == self.id =>
-                self.handle_hover(Some(self.last_cursor + e), ctx, LazyCell::new(visual_ctx)).add_loc(loc!())?,
+                self.handle_hover(Some(self.last_cursor + e), ctx, LazyCell::new(visual_ctx))?,
 
             AppEvent::Leave(id) if *id == self.id =>
-                self.handle_hover(None, ctx, LazyCell::new(visual_ctx)).add_loc(loc!())?,
+                self.handle_hover(None, ctx, LazyCell::new(visual_ctx))?,
 
-            AppEvent::Resize =>
-                self.init().add_loc(loc!())?,
+            AppEvent::Resize => self.init()?,
 
             AppEvent::AudioStarted(_) => self.redraw = true,
 
@@ -977,10 +993,10 @@ impl<T: GraphPoint> GraphEditor<T> {
             }
 
             AppEvent::Frame(_) if self.redraw => {
-                let canvas: HtmlCanvasElement = self.canvas().cast().to_js_result(loc!())?;
+                let canvas: HtmlCanvasElement = self.canvas().cast().report_none()?;
                 let size = canvas.size().map(R64::from);
                 let snap_step = [ctx.snap_step(), T::Y_SNAP];
-                let canvas_ctx = canvas.get_2d_context(loc!())?;
+                let canvas_ctx = canvas.get_2d_context()?;
 
                 let step = &size.div(&self.scale);
                 let offset_x = R64::from(-self.offset.x)
@@ -998,27 +1014,28 @@ impl<T: GraphPoint> GraphEditor<T> {
                 canvas_ctx.set_fill_style(&AnyGraphEditor::BG_STYLE.into());
                 canvas_ctx.fill_rect(0.0, 0.0, *size[0], *size[1]);
 
-                let (grid, original_scale) = self.inner.grid.get_or_try_insert(||
-                    Self::draw_grid(size, *step, self.inner.scale).add_loc(loc!()))?;
+                let (grid, original_scale) = self.inner.grid
+                    .get_or_try_insert(|| Self::draw_grid(size, *step, self.inner.scale))
+                    .report()?;
                 let grid_scale = original_scale.div(&self.inner.scale);
                 let repetitions = self.inner.scale.sub(&[offset_x, offset_y].div(step))
                     .div(original_scale)
                     .map(|x| usize::from(x.ceil()));
 
                 canvas_ctx.set_fill_style(&AnyGraphEditor::MG_STYLE.into());
-                canvas_ctx.transform(*grid_scale[0], 0.0, 0.0, *grid_scale[1], *offset_x, *offset_y).add_loc(loc!())?;
+                canvas_ctx.transform(*grid_scale[0], 0.0, 0.0, *grid_scale[1], *offset_x, *offset_y).report()?;
 
                 for _ in 0 .. repetitions[1] {
                     for _ in 0 .. repetitions[0] {
                         canvas_ctx.fill_with_path_2d(grid);
-                        canvas_ctx.translate(*size[0], 0.0).add_loc(loc!())?;
+                        canvas_ctx.translate(*size[0], 0.0).report()?;
                     }
-                    canvas_ctx.translate(-*size[0] * repetitions[0] as f64, *size[1]).add_loc(loc!())?;
+                    canvas_ctx.translate(-*size[0] * repetitions[0] as f64, *size[1]).report()?;
                 }
-                canvas_ctx.reset_transform().add_loc(loc!())?;
+                canvas_ctx.reset_transform().report()?;
 
-                let solid = Path2d::new().add_loc(loc!())?;
-                let dotted = Path2d::new().add_loc(loc!())?;
+                let solid = Path2d::new().report()?;
+                let dotted = Path2d::new().report()?;
                 T::on_redraw(self, ctx, &size, &solid, &dotted, visual_ctx());
 
                 let [x, y] = self.selection_src.mul(step).sub(offset);
@@ -1028,10 +1045,10 @@ impl<T: GraphPoint> GraphEditor<T> {
                 canvas_ctx.set_stroke_style(&AnyGraphEditor::FG_STYLE.into());
                 canvas_ctx.fill_with_path_2d(&solid);
                 canvas_ctx.stroke_with_path(&solid);
-                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
+                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).report()?;
                 canvas_ctx.fill_with_path_2d(&dotted);
                 canvas_ctx.stroke_with_path(&dotted);
-                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
+                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![])).report()?;
 
                 match self.focus {
                     Focus::Zoom{pivot, init_offset, ..} => if self.last_cursor.left {
@@ -1047,26 +1064,25 @@ impl<T: GraphPoint> GraphEditor<T> {
                         canvas_ctx.set_text_align("left");
                         canvas_ctx.set_text_baseline("bottom");
                         canvas_ctx.set_fill_style(&AnyGraphEditor::FG_STYLE.into());
-                        canvas_ctx.fill_text(&T::fmt_loc(confine(to_user(pivot))), 5.0, *size[1] - 5.0)
-                            .add_loc(loc!())?;
+                        canvas_ctx.fill_text(&T::fmt_loc(confine(to_user(pivot))), 5.0, *size[1] - 5.0).report()?;
                     }
 
                     Focus::Plane{origin, ..} if self.last_cursor.meta => if self.last_cursor.left {
                         let cur = to_aligned_canvas(self.last_cursor.point);
                         let origin = origin.mul(step).sub(offset).map(|x| *x);
-                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
+                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).report()?;
                         canvas_ctx.stroke_rect(origin[0], origin[1], cur.x as f64 - origin[0], cur.y as f64 - origin[1]);
-                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
+                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![])).report()?;
                     } else {
                         let [x, y] = self.last_cursor.point.map(|x| x as f64);
-                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).add_loc(loc!())?;
+                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0])).report()?;
                         canvas_ctx.begin_path();
                         canvas_ctx.move_to(-*size[0], y);
                         canvas_ctx.line_to( *size[0], y);
                         canvas_ctx.move_to(x, -*size[1]);
                         canvas_ctx.line_to(x,  *size[1]);
                         canvas_ctx.stroke();
-                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![])).add_loc(loc!())?;
+                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![])).report()?;
                     }
                     
                     _ => ()

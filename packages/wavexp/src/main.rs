@@ -12,11 +12,11 @@
 #![allow(clippy::comparison_chain)]
 
 mod visual;
-mod utils;
 mod input;
 mod sound;
 mod global;
 
+pub use wavexp_utils;
 pub use js_sys;
 pub use wasm_bindgen;
 pub use yew;

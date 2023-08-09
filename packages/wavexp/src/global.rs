@@ -7,7 +7,7 @@ use std::{
 use js_sys::Function;
 use wasm_bindgen::{
     closure::Closure,
-    JsCast};
+    JsCast, UnwrapThrowExt};
 use web_sys::{
     PointerEvent,
     MouseEvent,
@@ -22,14 +22,22 @@ use yew::{
     Html,
     html,
     AttrValue, Callback};
+use wavexp_utils::{
+    R64,
+    R32,
+    JsResultUtils,
+    window,
+    SliceExt,
+    OptionExt,
+    ResultExt,
+    Point,
+    Take,
+    default,
+    r64};
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats, Note, NoteBlock, CustomBlock},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
-    utils::{R64, R32, JsResultUtils, window, SliceExt, JsResult, OptionExt, ResultToJsResult, Point, Take, default},
-    input::{Button, Slider, Switch, GraphEditorCanvas},
-    loc,
-    r64,
-    js_try};
+    input::{Button, Slider, Switch, GraphEditorCanvas}};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, PartialEq, Clone)]
@@ -113,7 +121,9 @@ pub enum AppEvent {
     /// audio file was uploaded to a Custom Audio sound block
     AudioUploaded(Event),
     /// audio source was decoded and is ready to be used
-    AudioProcessed(AudioBuffer)
+    AudioProcessed(AudioBuffer),
+    /// set the playback speed of the audio source of the Custom Audio sound block
+    Speed(R32),
 }
 
 impl AppEvent {
@@ -187,7 +197,9 @@ pub enum AppAction {
     /// set repetition count of a sound block
     SetRepCount{from: NonZeroUsize, to: NonZeroUsize},
     /// remove custom blocks
-    RemoveCustomBlocks(Box<[(usize, CustomBlock)]>)
+    RemoveCustomBlocks(Box<[(usize, CustomBlock)]>),
+    /// set playback speed of the audio source of a Custom Audio sound block
+    SetSpeed{from: R32, to: R32},
 }
 
 impl AppAction {
@@ -242,7 +254,9 @@ impl AppAction {
                 if removed.len() == 1 {"Remove Custom Audio Block"}
                 else {"Remove Custom Audio Blocks"},
             Self::AddCustomBlock(..) =>
-                "Add Custom Audio Block"
+                "Add Custom Audio Block",
+            Self::SetSpeed{..} =>
+                "Set Custom Audio's Playback Speed"
         }
     }
 }
@@ -263,11 +277,11 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    #[inline] pub fn new(event_emitter: Callback<AppEvent>) -> JsResult<Self> {
-        Ok(Self{bps: r64![2.0],
+    #[inline] pub fn new(event_emitter: Callback<AppEvent>) -> Option<Self> {
+        Some(Self{bps: r64![2.0],
             play_since: Secs::NEG_INFINITY,
             now: r64![0.0],
-            audio_ctx: Rc::new(AudioContext::new().add_loc(loc!())?),
+            audio_ctx: Rc::new(AudioContext::new().report()?),
             snap_step: r64![1.0],
             selected_tab: 0,
             undid_actions: 0,
@@ -303,8 +317,8 @@ impl AppContext {
 
     #[inline] pub fn recent_action_done(&mut self) -> bool {self.action_done.take()}
 
-    pub fn handle_event(&mut self, event: &AppEvent) -> JsResult<()> {
-        Ok(match event {
+    pub fn handle_event(&mut self, event: &AppEvent) -> Option<()> {
+        Some(match event {
             &AppEvent::Bpm(bpm) => {
                 let to = bpm / 60;
                 self.register_action(AppAction::SetTempo{from: self.bps, to}); 
@@ -348,7 +362,7 @@ impl AppContext {
 
             &AppEvent::Unwind(n) => {
                 let unwound = self.actions.get(self.actions.len() - n - self.undid_actions ..)
-                    .to_js_result(loc!())?
+                    .report_none()?
                     .iter().rev().cloned().collect();
                 self.undid_actions += n;
                 self.event_emitter.emit(AppEvent::Undo(unwound))
@@ -357,7 +371,7 @@ impl AppContext {
             &AppEvent::Rewind(n) => {
                 let len = self.actions.len();
                 let rewound = self.actions.get({let x = len - self.undid_actions; x .. x + n})
-                    .to_js_result(loc!())?.to_box();
+                    .report_none()?.to_box();
                 self.undid_actions -= n;
                 self.event_emitter.emit(AppEvent::Redo(rewound))
             }
@@ -418,24 +432,24 @@ impl Component for App {
 
     fn create(ctx: &Context<Self>) -> Self {
         let cb = ctx.link().callback(AppEvent::Frame);
-        let ctx = AppContext::new(ctx.link().callback(|x| x)).unwrap_throw(loc!());
-        let sound_visualiser = SoundVisualiser::new(&ctx.audio_ctx).unwrap_throw(loc!());
+        let ctx = AppContext::new(ctx.link().callback(|x| x)).unwrap_throw();
+        let sound_visualiser = SoundVisualiser::new(&ctx.audio_ctx).unwrap_throw();
 
         let res = Self{selected_id: None,
             hint_handler: default(),
-            sequencer: Sequencer::new(&ctx.audio_ctx, Rc::clone(sound_visualiser.input())).unwrap_throw(loc!()),
+            sequencer: Sequencer::new(&ctx.audio_ctx, Rc::clone(sound_visualiser.input())).unwrap_throw(),
             frame_emitter: Closure::<dyn Fn(f64)>::new(move |x| cb.emit(R64::new_or(r64![0.0], x)))
                 .into_js_value().unchecked_into(),
             sound_visualiser, ctx};
-        window().request_animation_frame(&res.frame_emitter).unwrap_throw(loc!());
+        window().request_animation_frame(&res.frame_emitter).unwrap_throw();
         res
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        js_try!{type = !:
+        let _: Option<_> = try {
             match msg {
                 AppEvent::Frame(_) =>
-                    _ = window().request_animation_frame(&self.frame_emitter).add_loc(loc!())?,
+                    _ = window().request_animation_frame(&self.frame_emitter).report()?,
 
                 AppEvent::Select(id) => {
                     if id != self.selected_id {
@@ -447,11 +461,11 @@ impl Component for App {
                 }
 
                 AppEvent::Remove => {
-                    let mut pattern = self.sequencer.pattern().try_borrow_mut().to_js_result(loc!())?;
-                    let id = self.selected_id.take().to_js_result(loc!())?;
+                    let mut pattern = self.sequencer.pattern().try_borrow_mut().report_fmt()?;
+                    let id = self.selected_id.take().report_none()?;
                     let id = *unsafe{pattern.selection().get_unchecked(id)};
                     let mut removed = MaybeUninit::uninit();
-                    pattern.remove_points(once(id), |(_, x)| _ = removed.write(x)).add_loc(loc!())?;
+                    pattern.remove_points(once(id), |(_, x)| _ = removed.write(x))?;
                     self.ctx.register_action(AppAction::RemoveSoundBlock(id, unsafe{removed.assume_init()}))
                 }
 
@@ -495,15 +509,15 @@ impl Component for App {
             }
 
             let res = msg.needs_layout_rerender();
-            self.forward_event(msg).add_loc(loc!())?;
+            self.forward_event(msg)?;
             return res | self.ctx.recent_action_done()
-        }.report_err(loc!());
+        };
         false
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         // TODO: add switching between selected blocks
-        let pattern = self.sequencer.pattern().try_borrow().to_js_result(loc!()).unwrap_throw(loc!());
+        let pattern = self.sequencer.pattern().try_borrow().unwrap_throw();
         let block = self.selected_id.map(|i| unsafe{pattern.get_unchecked_aware(i)});
 
         let setter = ctx.link().callback(|x| x);
@@ -555,7 +569,7 @@ impl Component for App {
                                 setter={setter.reform(AppEvent::Bpm)}
                                 min={r64![30.0]} max={r64![240.0]}
                                 postfix="BPM"
-                                initial={self.ctx.bps * r64![60.0]}/>
+                                initial={self.ctx.bps * 60}/>
                             <Slider key="gain" name="Master gain level"
                             setter={setter.reform(|x| AppEvent::MasterVolume(R32::from(x)))}
                             initial={R64::from(self.sequencer.gain())}/>
@@ -686,20 +700,19 @@ impl Component for App {
 }
 
 impl App {
-    fn forward_event(&mut self, event: AppEvent) -> JsResult<()> {
-        self.ctx.handle_event(&event).add_loc(loc!())?;
-        self.hint_handler.handle_event(&event, &self.ctx).add_loc(loc!())?;
-        self.sound_visualiser.handle_event(&event, &self.ctx).add_loc(loc!())?;
-        self.sequencer.handle_event(&event, &mut self.ctx).add_loc(loc!())?;
+    fn forward_event(&mut self, event: AppEvent) -> Option<()> {
+        self.ctx.handle_event(&event)?;
+        self.hint_handler.handle_event(&event, &self.ctx)?;
+        self.sound_visualiser.handle_event(&event, &self.ctx)?;
+        self.sequencer.handle_event(&event, &mut self.ctx)?;
 
-        let mut pattern = self.sequencer.pattern().try_borrow_mut().to_js_result(loc!())?;
-        if let Some(&id) = pattern.selection().first() {
+        let mut pattern = self.sequencer.pattern().try_borrow_mut().report_fmt()?;
+        Some(if let Some(&id) = pattern.selection().first() {
             let mut block = unsafe{pattern.get_unchecked_mut(id)};
             let (prev, bps) = (self.ctx.play_since, self.ctx.bps);
             self.ctx.play_since += block.offset.to_secs(bps);
-            block.inner().handle_event(&event, &mut self.ctx).add_loc(loc!())?;
+            block.inner().handle_event(&event, &mut self.ctx)?;
             self.ctx.play_since = prev;
-        }
-        Ok(())
+        })
     }
 }

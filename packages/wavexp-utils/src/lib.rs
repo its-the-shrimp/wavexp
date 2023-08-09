@@ -1,3 +1,7 @@
+#![feature(const_float_classify)]
+#![feature(never_type)]
+#![feature(try_blocks)]
+
 use std::{
     ptr,
     mem::{take, transmute_copy, MaybeUninit, forget},
@@ -11,15 +15,11 @@ use std::{
     array::from_fn,
     num::{TryFromIntError,
         NonZeroU8, NonZeroU16, NonZeroU32, NonZeroUsize, NonZeroU64,
-        NonZeroI8, NonZeroI16, NonZeroI32, NonZeroIsize, NonZeroI64}
+        NonZeroI8, NonZeroI16, NonZeroI32, NonZeroIsize, NonZeroI64}, backtrace::Backtrace, borrow::Cow
 };
-use js_sys::{
-    Object as JsObject,
-    Error as JsError};
-use wasm_bindgen::{
-    JsCast,
-    JsValue,
-    throw_val};
+pub use js_sys;
+pub use wasm_bindgen;
+use wasm_bindgen::{JsValue, JsCast};
 use web_sys::{
     Document as HtmlDocument,
     Window as HtmlWindow,
@@ -206,6 +206,8 @@ pub trait BoolExt {
     fn then_negate<T: Neg<Output=T>>(self, val: T) -> T;
     fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
     fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T>;
+    fn report_false(self) -> Option<()>;
+    fn to_js_result(self) -> JsResult<()>;
 }
 
 impl BoolExt for bool {
@@ -231,6 +233,15 @@ impl BoolExt for bool {
 
     #[inline] fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T> {
         if self {f()} else {None}
+    }
+
+    #[inline] fn report_false(self) -> Option<()> {
+        self.to_js_result().report()
+    }
+
+    #[inline] fn to_js_result(self) -> JsResult<()> {
+        if self {Ok(())}
+        else {Err(js_sys::Error::new("expected `true`, found `false`").into())}
     }
 }
 
@@ -420,166 +431,158 @@ pub mod js_types {
 macro_rules! js_array {
     ($($t:ident $v:expr),*) => {{
         let res = $crate::js_sys::Array::new();
-        $( res.push(&*$crate::utils::js_types::$t::from($v)); )*
+        $( res.push(&*$crate::js_types::$t::from($v)); )*
         $crate::wasm_bindgen::JsValue::from(res)
     }};
 }
-pub use js_array;
 
 #[macro_export]
 macro_rules! js_obj {
 	($($t:ident $k:ident : $v:expr),*) => {
 		$crate::wasm_bindgen::JsValue::from($crate::js_sys::Map::new()
-			$( .set(&$crate::utils::js_types::str::from(stringify!($k)).into(),
-				&*$crate::utils::js_types::$t::from($v)) )*)
+			$( .set(&$crate::js_types::str::from(stringify!($k)).into(),
+				&*$crate::js_types::$t::from($v)) )*)
 	}
 }
-pub use js_obj;
 
 pub use web_sys::console::log_1;
 #[macro_export]
 macro_rules! js_log {
 	($arg:literal) => {
-        $crate::utils::log_1(&format!($arg).into())
+        $crate::log_1(&format!($arg).into())
 	};
 	($f:literal, $($arg:expr),*) => {
-		$crate::utils::log_1(&format!($f, $($arg),*).into())
+		$crate::log_1(&format!($f, $($arg),*).into())
 	}
 }
-pub use js_log;
 
 #[macro_export]
 macro_rules! js_try {
     (type = $r:ty : $($s:tt)*) => {
-        {let x: $crate::utils::JsResult<$r> = try {
+        {let x: $crate::JsResult<$r> = try {
             $($s)*
         }; x}
     };
 
-    (async move: $($s:tt)*) => {
-        async move {
-            let x: $crate::utils::JsResult<_> = try {
-                $($s)*
-            };
-            x.report_err(loc!());
-        }
-    };
-
     ($($s:tt)*) => {
-        {let x: $crate::utils::JsResult<_> = try {
+        {let x: $crate::JsResult<_> = try {
             $($s)*
         }; x}
     };
 }
-pub use js_try;
 
 #[macro_export]
 macro_rules! js_assert {
     ($($s:tt)+) => {
         if !$($s)+ {
-            Err(js_sys::Error::new(stringify!($($s)+)).into()).add_loc(loc!())
+            Err($crate::wasm_bindgen::JsValue::from($crate::js_sys::Error::new(stringify!($($s)+))))
         } else {
             Ok(())
         }
     };
 }
-pub use js_assert;
 
 #[macro_export]
 macro_rules! eval_once {
     ($t:ty : $e:expr) => {{
-        static RES: $crate::utils::WasmCell<std::cell::OnceCell<$t>> = $crate::utils::WasmCell::new(std::cell::OnceCell::new());
+        static RES: $crate::WasmCell<std::cell::OnceCell<$t>> = $crate::WasmCell::new(std::cell::OnceCell::new());
         RES.get_or_init(|| $e)
     }};
 }
 
 pub fn window() -> HtmlWindow {
-	unsafe {web_sys::window().unwrap_unchecked()}
+	unsafe{web_sys::window().unwrap_unchecked()}
 }
 
 pub fn document() -> HtmlDocument {
-	unsafe {web_sys::window().unwrap_unchecked().document().unwrap_unchecked()}
+	unsafe{web_sys::window().unwrap_unchecked().document().unwrap_unchecked()}
 }
 
 pub fn report_err(err: JsValue) {
-    warn_1(&err);
-    document().element_dyn_into::<HtmlElement>("error-sign").unwrap_throw(loc!())
-        .set_hidden(false);
+    warn_1(&to_error_with_msg(err, &format!("{}", Backtrace::capture())));
+    if let Some(x) = document().element_dyn_into::<HtmlElement>("error-sign") {
+        x.set_hidden(false)
+    } else {
+        warn_1(&JsValue::from("#error-sign element not found in the DOM"))
+    }
 }
 
-fn to_error_with_msg(err: JsValue, msg: &str) -> JsValue {
+#[inline] fn to_error_with_msg(err: JsValue, msg: &str) -> JsValue {
     let s = format!("{}\n{}", msg, 
-        match err.dyn_into::<JsError>() {
+        match err.dyn_into::<js_sys::Error>() {
             Ok(val) => val.message(),
-            Err(val) => JsObject::from(val).to_string()});
-    JsError::new(&s).into()
-}
-
-/// returns a Result for easier handling in `try` blocks
-/// the second argument is recommended to be passed from the `loc!` macro
-#[inline] pub fn js_error(msg: impl AsRef<str>, loc: (&str, u32, u32)) -> JsResult<!> {
-    Err(JsError::new(msg.as_ref()).into()).add_loc(loc)
+            Err(val) => js_sys::Object::from(val).to_string()});
+    js_sys::Error::new(&s).into()
 }
 
 pub type JsResult<T> = Result<T, JsValue>;
 
-pub trait ResultToJsResult<T, E> {
-    fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T> where E: Display;
-    fn to_js_result_with<R: AsRef<str>>(self, f: impl FnOnce(E) -> R, loc: (&str, u32, u32)) -> JsResult<T>;
+pub trait ResultExt<T, E> {
+    fn to_js_result(self) -> JsResult<T> where E: Display;
+    fn report_fmt(self) -> Option<T> where E: Display;
+    fn report_as(self, msg: &str) -> Option<T>;
+    fn report_with(self, f: impl FnOnce() -> Cow<'static, str>) -> Option<T>;
+}
+
+pub trait JsResultUtils<T>: Sized {
+	fn report(self) -> Option<T>;
+}
+
+impl<T> JsResultUtils<T> for JsResult<T> {
+    #[inline] fn report(self) -> Option<T> {
+        match self {
+            Ok(x) => Some(x),
+            Err(e) => {report_err(e); None}
+        }
+    }
+}
+
+impl<T, E> ResultExt<T, E> for Result<T, E> {
+    #[inline] fn to_js_result(self) -> JsResult<T> where E: Display {
+        self.map_err(|e| e.to_string().into())
+    }
+
+    #[inline] fn report_fmt(self) -> Option<T> where E: Display {
+        match self {
+            Ok(x) => Some(x),
+            Err(e) => {report_err(js_sys::Error::new(&e.to_string()).into()); None}
+        }
+    }
+
+    #[inline] fn report_as(self, msg: &str) -> Option<T> {
+        match self {
+            Ok(x) => Some(x),
+            Err(_) => {report_err(js_sys::Error::new(msg).into()); None}
+        }
+    }
+
+    #[inline] fn report_with(self, f: impl FnOnce() -> Cow<'static, str>) -> Option<T> {
+        match self {
+            Ok(x) => Some(x),
+            Err(_) => {report_err(js_sys::Error::new(&f()).into()); None}
+        }
+    }
 }
 
 pub trait OptionExt<T> {
-    fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T>;
-    fn report_err(self, loc: (&str, u32, u32)) -> Self;
-    fn unwrap_throw(self, loc: (&str, u32, u32)) -> T;
+    fn to_js_result(self) -> JsResult<T>;
+    fn report_none(self) -> Self;
     fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
     fn choose<U>(&self, on_some: U, on_none: U) -> U;
     fn drop(self) -> Option<()>;
     fn get_or_try_insert<E>(&mut self, f: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E>;
 }
 
-pub trait JsResultUtils<T>: Sized {
-    fn explain_err_with(self, f: impl FnOnce() -> String) -> Self;
-    fn explain_err(self, msg: &str) -> Self;
-    fn expect_throw_with(self, f: impl FnOnce() -> String) -> T;
-	fn expect_throw(self, msg: &str) -> T;
-    fn unwrap_throw(self, loc: (&str, u32, u32)) -> T;
-	fn report_err(self, loc: (&str, u32, u32)) -> Option<T>;
-    /// best used with the `loc!` macro
-    fn add_loc(self, loc: (&str, u32, u32)) -> Self;
-}
-
-#[macro_export]
-macro_rules! loc {
-    () => {(file!(), line!(), column!())};
-}
-pub use loc;
-
-impl<T, E> ResultToJsResult<T, E> for Result<T, E> {
-    #[inline] fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T> where E: Display {
-        self.map_err(|e| e.to_string().into()).add_loc(loc)
-    }
-
-    #[inline] fn to_js_result_with<R: AsRef<str>>(self, f: impl FnOnce(E) -> R, loc: (&str, u32, u32)) -> JsResult<T> {
-        self.map_err(|e| JsError::new(f(e).as_ref()).into()).add_loc(loc)
-    }
-}
-
 impl<T> OptionExt<T> for Option<T> {
-    #[inline] fn to_js_result(self, loc: (&str, u32, u32)) -> JsResult<T> {
-        self.ok_or_else(|| JsError::new("`Option` contained the `None` value").into())
-            .add_loc(loc)
+    #[inline] fn to_js_result(self) -> JsResult<T> {
+        self.ok_or_else(|| js_sys::Error::new("`Option` contained the `None` value").into())
     }
 
-    #[inline] fn report_err(self, loc: (&str, u32, u32)) -> Self {
+    #[inline] fn report_none(self) -> Self {
         if self.is_none() {
-            report_err(js_error("`Option` contained the `None` value", loc).into_err())
+            report_err(js_sys::Error::new("`Option` contained the `None` value").into())
         }
         self
-    }
-
-    #[inline] fn unwrap_throw(self, loc: (&str, u32, u32)) -> T {
-        self.to_js_result(loc).unwrap_or_else(|x| throw_val(x))
     }
 
     #[inline] fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
@@ -603,56 +606,16 @@ impl<T> OptionExt<T> for Option<T> {
     }
 }
 
-impl<T> JsResultUtils<T> for JsResult<T> {
-    #[inline] fn explain_err_with(self, f: impl FnOnce() -> String) -> Self {
-        self.map_err(|err| to_error_with_msg(err, &f()))
-    }
-    #[inline] fn explain_err(self, msg: &str) -> Self {
-        self.map_err(|err| to_error_with_msg(err, msg))
-    }
-
-    #[inline] fn expect_throw_with(self, f: impl FnOnce() -> String) -> T {
-		match self {
-			Ok(val)  => val,
-			Err(err) => throw_val(to_error_with_msg(err, &f()))}
-	}
-
-    #[inline] fn expect_throw(self, msg: &str) -> T {
-        match self {
-            Ok(val) => val,
-            Err(err) => throw_val(to_error_with_msg(err, msg))}
-    }
-
-    #[inline] fn unwrap_throw(self, loc: (&str, u32, u32)) -> T {
-        self.add_loc(loc).unwrap_or_else(|x| throw_val(x))
-    }
-
-    #[inline]
-    fn report_err(mut self, loc: (&str, u32, u32)) -> Option<T> {
-        self = self.add_loc(loc);
-        match self {
-            Ok(x) => Some(x),
-            Err(err) => {report_err(err.clone()); None},
-        }
-    }
-
-    #[inline] fn add_loc(self, loc: (&str, u32, u32)) -> Self {
-        self.map_err(|x| to_error_with_msg(x, &format!("in {}:{}:{}", loc.0, loc.1, loc.2)))
-    }
-}
-
 pub trait HtmlCanvasExt {
-    fn get_2d_context(&self, loc: (&str, u32, u32)) -> JsResult<CanvasRenderingContext2d>;
+    fn get_2d_context(&self) -> Option<CanvasRenderingContext2d>;
     fn rect(&self) -> Rect;
     fn size(&self) -> [u32; 2];
     fn sync(&self);
 }
 
 impl HtmlCanvasExt for HtmlCanvasElement {
-    fn get_2d_context(&self, loc: (&str, u32, u32)) -> JsResult<CanvasRenderingContext2d> {
-        Ok(self.get_context("2d").add_loc(loc!()).add_loc(loc)?
-            .to_js_result(loc!()).add_loc(loc)?
-            .unchecked_into::<CanvasRenderingContext2d>())
+    fn get_2d_context(&self) -> Option<CanvasRenderingContext2d> {
+        Some(self.get_context("2d").report()?.report_none()?.unchecked_into())
     }
 
     fn rect(&self) -> Rect {
@@ -667,14 +630,13 @@ impl HtmlCanvasExt for HtmlCanvasElement {
 }
 
 pub trait HtmlDocumentExt {
-    fn element_dyn_into<T: JsCast>(&self, id: &str) -> JsResult<T>;
+    fn element_dyn_into<T: JsCast>(&self, id: &str) -> Option<T>;
 }
 
 impl HtmlDocumentExt for HtmlDocument {
-    fn element_dyn_into<T: JsCast>(&self, id: &str) -> JsResult<T> {
-        self.get_element_by_id(id).to_js_result(loc!())?
-            .dyn_into::<T>()
-            .to_js_result_with(|_| format!("element #{} is not of type `{}`", id, type_name::<T>()), loc!())
+    fn element_dyn_into<T: JsCast>(&self, id: &str) -> Option<T> {
+        self.get_element_by_id(id).to_js_result().report()?
+            .dyn_into::<T>().report_with(|| format!("#{id} is not of type {}", type_name::<T>()).into())
     }
 }
 
@@ -1198,33 +1160,33 @@ impl<D> ArrayFrom<Point, 2> for D where D: From<i32> {
 impl Add for Point {
     type Output = Self;
     #[inline] fn add(self, rhs: Self) -> Self::Output {
-        Self{x: self.x + rhs.x, y: self.y + rhs.y}
+        self.checked_add(rhs).report_none().unwrap_or(self)
     }
 }
 
 impl AddAssign for Point {
     #[inline] fn add_assign(&mut self, rhs: Self) {
-        *self = *self + rhs
+        self.checked_add_assign(rhs).report_false();
     }
 }
 
 impl Sub for Point {
     type Output = Self;
     #[inline] fn sub(self, rhs: Self) -> Self::Output {
-        Self{x: self.x - rhs.x, y: self.y - rhs.y}
+        self.checked_sub(rhs).report_none().unwrap_or(self)
     }
 }
 
 impl SubAssign for Point {
     #[inline] fn sub_assign(&mut self, rhs: Self) {
-        *self = *self - rhs
+        self.checked_sub_assign(rhs).report_false();
     }
 }
 
 impl Neg for Point {
     type Output = Self;
     #[inline] fn neg(self) -> Self::Output {
-        Self{x: -self.x, y: -self.y}
+        self.checked_neg().report_none().unwrap_or(self)
     }
 }
 
@@ -1261,6 +1223,33 @@ impl Point {
 
     #[inline] pub fn map<T>(self, mut f: impl FnMut(i32) -> T) -> [T; 2] {
         [f(self.x), f(self.y)]
+    }
+
+    #[inline] pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        Some(Self{x: self.x.checked_add(rhs.x)?, y: self.y.checked_add(rhs.y)?})
+    }
+
+    #[inline] pub fn checked_add_assign(&mut self, rhs: Self) -> bool {
+        if let Some(x) = self.checked_add(rhs) {*self = x; true}
+        else {false}
+    }
+
+    #[inline] pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        Some(Self{x: self.x.checked_sub(rhs.x)?, y: self.y.checked_sub(rhs.y)?})
+    }
+
+    #[inline] pub fn checked_sub_assign(&mut self, rhs: Self) -> bool {
+        if let Some(x) = self.checked_sub(rhs) {*self = x; true}
+        else {false}
+    }
+
+    #[inline] pub fn checked_neg(self) -> Option<Self> {
+        Some(Self{x: self.x.checked_neg()?, y: self.y.checked_neg()?})
+    }
+
+    #[inline] pub fn checked_neg_assign(&mut self) -> bool {
+        if let Some(x) = self.checked_neg() {*self = x; true}
+        else {false}
     }
 }
 
@@ -1434,48 +1423,56 @@ macro_rules! real_from_signed_ints_impl {
     };
 }
 
+macro_rules! impl_op {
+    ($op:ident :: $method:ident ($self:ident : $real:ty , $rhs:ident : $rhs_ty:ty) -> $out:ty { $($s:stmt);+ }) => {
+        impl $op<$rhs_ty> for $real {
+            type Output = $out;
+            #[inline] fn $method($self, $rhs: $rhs_ty) -> Self::Output { $($s)+ }
+        }
+
+        impl $op<&$rhs_ty> for $real {
+            type Output = $out;
+            #[inline] fn $method(self, rhs: &$rhs_ty) -> Self::Output {$op::$method(self, *rhs)}
+        }
+
+        impl<'a> $op<$rhs_ty> for &'a $real {
+            type Output = $out;
+            #[inline] fn $method(self, rhs: $rhs_ty) -> Self::Output {$op::$method(*self, rhs)}
+        }
+
+        impl<'a> $op<&$rhs_ty> for &'a $real {
+            type Output = $out;
+            #[inline] fn $method(self, rhs: &$rhs_ty) -> Self::Output {$op::$method(*self, *rhs)}
+        }
+    };
+}
+
+macro_rules! impl_assign_op {
+    ($op:ident :: $method:ident ($self:ident : $real:ty , $rhs:ident : $rhs_ty:ty) { $($s:stmt);+ }) => {
+        impl $op<$rhs_ty> for $real {
+            #[inline] fn $method(&mut $self, $rhs: $rhs_ty) { $($s)+ }
+        }
+
+        impl $op<&$rhs_ty> for $real {
+            #[inline] fn $method(&mut self, rhs: &$rhs_ty) {$op::$method(self, *rhs)}
+        }
+    };
+}
+
 macro_rules! real_float_operator_impl {
     ($real:ty { $float:ty } , $other_float:ty : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
         $(
-            impl $op<$other_float> for $real {
-                type Output = Self;
-                #[inline(always)] fn $method(self, rhs: $other_float) -> Self {
-                    let res = Self(self.0.$method(rhs as $float));
-                    debug_assert!(!res.is_nan(), stringify!(<$real as $op<$other_float>>::$method failed));
-                    res
-                }
-            }
+            impl_op!($op::$method(self: $real, rhs: $other_float) -> $real {
+                let res = self.0.$method(rhs as $float);
+                if res.is_nan() {report_err(js_sys::Error::new("result is NaN").into()); self}
+                else {Self(res)}
+            });
 
-            impl $op<&$other_float> for $real {
-                type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: &$other_float) -> $real {$op::$method(self, *rhs)}
-            }
-
-            impl<'a> $op<$other_float> for &'a $real {
-                type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: $other_float) -> $real {$op::$method(*self, rhs)}
-            }
-
-            impl<'a> $op<&$other_float> for &'a $real {
-                type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: &$other_float) -> $real {$op::$method(*self, *rhs)}
-            }
-
-            impl $assign_op<$other_float> for $real {
-                #[inline(always)] fn $assign_method(&mut self, rhs: $other_float) {
-                    let res = Self(self.0.$method(rhs as $float));
-                    debug_assert!(!res.is_nan(), stringify!(<$real as $assign_op<$other_float>>::$assign_method failed));
-                    *self = res;
-                }
-            }
-
-            impl $assign_op<&$other_float> for $real {
-                #[inline(always)]
-                fn $assign_method(&mut self, rhs: &$other_float) {$assign_op::$assign_method(self, *rhs)}
-            }
+            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $other_float) {
+                let res = self.0.$method(rhs as $float);
+                if res.is_nan() {report_err(js_sys::Error::new("result is NaN").into())}
+                else {self.0 = res}
+            });
         )+
     }
 }
@@ -1483,119 +1480,39 @@ macro_rules! real_float_operator_impl {
 macro_rules! real_int_operator_impl {
     ($real:ty { $float:ty }, $nonzero:ty { $int:ty } : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
         $(
-            impl $op<$int> for $real {
-                type Output = Self;
-                #[inline(always)]
-                fn $method(self, rhs: $int) -> Self {Self(self.0.$method(rhs as $float))}
-            }
+            impl_op!($op::$method(self: $real, rhs: $int) -> $real {
+                Self(self.0.$method(rhs as $float))
+            });
 
-            impl $op<&$int> for $real {
-                type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: &$int) -> $real {$op::$method(self, *rhs)}
-            }
+            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $int) {
+                self.0.$assign_method(rhs as $float)
+            });
 
-            impl<'a> $op<$int> for &'a $real {
-                type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: $int) -> $real {$op::$method(*self, rhs)}
-            }
+            impl_op!($op::$method(self: $real, rhs: $nonzero) -> $real {
+                Self(self.0.$method(rhs.get() as $float))
+            });
 
-            impl<'a> $op<&$int> for &'a $real {
-                type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: &$int) -> $real {$op::$method(*self, *rhs)}
-            }
-
-            impl $assign_op<$int> for $real {
-                #[inline(always)]
-                fn $assign_method(&mut self, rhs: $int) {self.0.$assign_method(rhs as $float)}
-            }
-
-            impl $assign_op<&$int> for $real {
-                #[inline(always)]
-                fn $assign_method(&mut self, rhs: &$int) {$assign_op::$assign_method(self, *rhs)}
-            }
-
-            impl $op<$nonzero> for $real {
-                type Output = Self;
-                #[inline(always)]
-                fn $method(self, rhs: $nonzero) -> Self {Self(self.0.$method(rhs.get() as $float))}
-            }
-
-            impl $op<&$nonzero> for $real {
-                type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: &$nonzero) -> $real {$op::$method(self, *rhs)}
-            }
-
-            impl<'a> $op<$nonzero> for &'a $real {
-                type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: $nonzero) -> $real {$op::$method(*self, rhs)}
-            }
-
-            impl<'a> $op<&$nonzero> for &'a $real {
-                type Output = $real;
-                #[inline(always)]
-                fn $method(self, rhs: &$nonzero) -> $real {$op::$method(*self, *rhs)}
-            }
-
-            impl $assign_op<$nonzero> for $real {
-                #[inline(always)]
-                fn $assign_method(&mut self, rhs: $nonzero) {self.0.$assign_method(rhs.get() as $float)}
-            }
-
-            impl $assign_op<&$nonzero> for $real {
-                #[inline(always)]
-                fn $assign_method(&mut self, rhs: &$nonzero) {$assign_op::$assign_method(self, *rhs)}
-            }
+            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $nonzero) {
+                self.0.$assign_method(rhs.get() as $float)
+            });
         )+
     };
 }
 
 macro_rules! real_real_operator_impl {
-    ($real:ty { $float:ty }, $other_real:ty { $other_float:ty } : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
+    ($real:ty { $float:ty } , $other_real:ty { $other_float:ty } : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
         $(
-            impl $op<$other_real> for $real {
-                type Output = Self;
-                #[inline] fn $method(self, rhs: $other_real) -> Self {
-                    let res = self.0.$method(rhs.0 as $float);
-                    debug_assert!(!res.is_nan(), stringify!(<$real as $op<$other_real>>::$method failed));
-                    Self(res)
-                }
-            }
+            impl_op!($op::$method(self: $real, rhs: $other_real) -> $real {
+                let res = self.0.$method(rhs.0 as $float);
+                if res.is_nan() {report_err(js_sys::Error::new("result is NaN").into()); self}
+                else {Self(res)}
+            });
 
-            impl $op<&$other_real> for $real {
-                type Output = $real;
-                #[inline]
-                fn $method(self, rhs: &$other_real) -> $real {$op::$method(self, *rhs)}
-            }
-
-            impl<'a> $op<$other_real> for &'a $real {
-                type Output = $real;
-                #[inline]
-                fn $method(self, rhs: $other_real) -> $real {$op::$method(*self, rhs)}
-            }
-
-            impl<'a> $op<&$other_real> for &'a $real {
-                type Output = $real;
-                #[inline]
-                fn $method(self, rhs: &$other_real) -> $real {$op::$method(*self, *rhs)}
-            }
-
-            impl $assign_op<$other_real> for $real {
-                #[inline] fn $assign_method(&mut self, rhs: $other_real) {
-                    let res = self.0.$method(rhs.0 as $float);
-                    debug_assert!(!res.is_nan(), stringify!(<$real as $assign_op<$other_real>>::$assign_method failed));
-                    self.0 = res;
-                }
-            }
-
-            impl $assign_op<&$other_real> for $real {
-                #[inline(always)]
-                fn $assign_method(&mut self, rhs: &$other_real) {$assign_op::$assign_method(self, *rhs)}
-            }
+            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $other_real) {
+                let res = self.0.$method(rhs.0 as $float);
+                if res.is_nan() {report_err(js_sys::Error::new("result is NaN").into())}
+                else {self.0 = res}
+            });
         )+
     }
 }
@@ -1624,7 +1541,7 @@ macro_rules! real_impl {
 
         impl PartialOrd for $real {
             #[inline] fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                self.0.partial_cmp(&other.0)
+                Some(self.cmp(other))
             }
         }
 
@@ -1644,13 +1561,11 @@ macro_rules! real_impl {
         }
 
         impl From<$other_real> for $real {
-            #[inline]
-            fn from(x: $other_real) -> Self {Self(x.0 as $float)}
+            #[inline] fn from(x: $other_real) -> Self {Self(x.0 as $float)}
         }
 
         impl IntoPropValue<$other_real> for $real {
-            #[inline]
-            fn into_prop_value(self) -> $other_real {self.into()}
+            #[inline] fn into_prop_value(self) -> $other_real {self.into()}
         }
 
         impl Display for $real {
@@ -1661,8 +1576,20 @@ macro_rules! real_impl {
 
         impl Neg for $real {
             type Output = Self;
-            #[inline]
-            fn neg(self) -> Self::Output {Self(-self.0)}
+            #[inline] fn neg(self) -> Self::Output {Self(-self.0)}
+        }
+
+        impl RoundTo for $real {
+            #[inline] fn floor_to(self, step: Self) -> Self {
+                if self.is_infinite() || step == 0 {return self}
+                Self(*self - *self % *step)
+            }
+
+            #[inline] fn  ceil_to(self, step: Self) -> Self {
+                if self.is_infinite() || step == 0 {return self}
+                let prev = *self - 1.0;
+                Self(*step - prev % *step + prev)
+            }
         }
 
         impl Sum for $real {
@@ -1677,15 +1604,11 @@ macro_rules! real_impl {
             }
         }
 
-        impl RoundTo for $real {
-            #[inline] fn floor_to(self, step: Self) -> Self {self - self % step}
-            #[inline] fn  ceil_to(self, step: Self) -> Self {step - (self - 1) % step + self - 1}
-        }
-
         real_from_unsigned_ints_impl!($real{$float}:
             NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64});
         real_from_signed_ints_impl!($real{$float}:
             NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
+
         real_int_operator_impl!($real{$float}, NonZeroU8{u8}:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
             Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
@@ -1812,7 +1735,7 @@ real_impl!(R64{f64}, R32{f32});
 macro_rules! r32 {
     ($x:literal) => {{
         #[allow(unused_unsafe)]
-        unsafe{$crate::utils::R32::new_unchecked($x)}
+        unsafe{$crate::R32::new_unchecked($x)}
     }};
 }
 
@@ -1820,12 +1743,6 @@ macro_rules! r32 {
 macro_rules! r64 {
     ($x:literal) => {{
         #[allow(unused_unsafe)]
-        unsafe{$crate::utils::R64::new_unchecked($x)}
+        unsafe{$crate::R64::new_unchecked($x)}
     }};
-}
-
-#[test]
-fn real_round_to() {
-    assert!(r64![1.3].floor_to(r64![0.2]).loose_eq(r64![1.2], 0.005));
-    assert!(r64![-1.3].floor_to(r64![0.2]).loose_eq(r64![-1.4], 0.005));
 }
