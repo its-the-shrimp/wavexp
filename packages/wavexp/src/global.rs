@@ -1,5 +1,4 @@
 use std::{
-    rc::Rc,
     borrow::Cow,
     slice::from_ref,
     mem::{take, MaybeUninit},
@@ -7,25 +6,31 @@ use std::{
 use js_sys::Function;
 use wasm_bindgen::{
     closure::Closure,
-    JsCast, UnwrapThrowExt};
+    JsCast,
+    UnwrapThrowExt};
 use web_sys::{
     PointerEvent,
     MouseEvent,
-    AudioContext,
     UiEvent,
     KeyboardEvent,
     Event,
-    AudioBuffer};
+    AudioBuffer,
+    GainNode,
+    AnalyserNode,
+    AudioContext,
+    AudioContextOptions,
+    BaseAudioContext,
+    OfflineAudioContext};
 use yew::{
     Component,
     Context,
     Html,
     html,
-    AttrValue, Callback};
+    AttrValue,
+    Callback};
 use wavexp_utils::{
     R64,
     R32,
-    JsResultUtils,
     window,
     SliceExt,
     OptionExt,
@@ -33,9 +38,11 @@ use wavexp_utils::{
     Point,
     Take,
     default,
-    r64};
+    AppResult,
+    r64,
+    r32, AppResultUtils};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, FromBeats, Note, NoteBlock, CustomBlock},
+    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Sequencer, SoundBlock, Note, NoteBlock, CustomBlock},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
     input::{Button, Slider, Switch, GraphEditorCanvas}};
 
@@ -56,8 +63,6 @@ pub enum AppEvent {
     StartPlay,
     /// emitted when the user stops playing by clicking the `Play` button
     StopPlay,
-    /// emitted when the audio has actually started playing
-    AudioStarted(Secs),
     /// emitted when the user selects a sound block to edit in the side editor
     /// the contained value is index into the selected indices, not into the points directly
     Select(Option<usize>),
@@ -123,14 +128,14 @@ pub enum AppEvent {
     /// audio source was decoded and is ready to be used
     AudioProcessed(AudioBuffer),
     /// set the playback speed of the audio source of the Custom Audio sound block
-    Speed(R32),
+    Speed(R32)
 }
 
 impl AppEvent {
     #[inline] pub fn needs_layout_rerender(&self) -> bool {
         matches!(self, Self::SetTab(..)
             | Self::Select(..)
-            | Self::AudioStarted(..)
+            | Self::StartPlay
             | Self::StopPlay
             | Self::SetBlockType(..)
             | Self::Remove
@@ -261,53 +266,81 @@ impl AppAction {
     }
 }
 
+pub struct PlaybackContext {
+    pub audio_ctx: BaseAudioContext,
+    pub gain: GainNode,
+    pub analyser: AnalyserNode,
+    pub started_at: Secs,
+    pub now: Secs,
+    pub bps: Beats
+}
+
+impl PlaybackContext {
+    #[inline] fn _new(audio_ctx: BaseAudioContext, volume: R32, bps: Beats) -> AppResult<Self> {
+        let analyser = audio_ctx.create_analyser()?;
+        let gain = audio_ctx.create_gain()?;
+        gain.gain().set_value(*volume);
+        gain.connect_with_audio_node(&analyser)?
+            .connect_with_audio_node(&audio_ctx.destination())?;
+        Ok(Self{audio_ctx, analyser, gain, bps,
+            started_at: R64::INFINITY, now: R64::INFINITY})
+    }
+
+    #[inline] pub fn new() -> AppResult<Self> {
+        let audio_ctx = OfflineAudioContext::new_with_number_of_channels_and_length_and_sample_rate(
+            AppContext::CHANNEL_COUNT,
+            1,
+            AppContext::SAMPLE_RATE as f32)?;
+        Self::_new(audio_ctx.into(), r32![1.0], r64![2.0])
+    }
+
+    #[inline] pub fn volume(&self) -> R32 {
+        unsafe{R32::new_unchecked(self.gain.gain().value())}
+    }
+
+    /// Prepare audio context for playing audio live
+    #[inline] pub fn prepare_for_playing(&mut self) -> AppResult<()> {
+        let bps = self.bps;
+        let volume = self.volume();
+        let audio_ctx = AudioContext::new_with_context_options(AudioContextOptions::new()
+            .sample_rate(AppContext::SAMPLE_RATE as f32))?;
+        Ok(*self = Self::_new(audio_ctx.into(), volume, bps)?)
+    }
+}
+
 /// carries all the app-wide settings that are passed to all the event receivers
-#[derive(Debug, Clone)]
 pub struct AppContext {
-    bps: Beats,
-    play_since: Secs,
-    now: Secs,
-    audio_ctx: Rc<AudioContext>,
+    playback_ctx: PlaybackContext,
     snap_step: R64,
     selected_tab: usize,
     event_emitter: Callback<AppEvent>,
     actions: Vec<AppAction>,
     undid_actions: usize,
-    action_done: bool
+    action_done: bool,
+    playing: bool
 }
 
 impl AppContext {
-    #[inline] pub fn new(event_emitter: Callback<AppEvent>) -> Option<Self> {
-        Some(Self{bps: r64![2.0],
-            play_since: Secs::NEG_INFINITY,
-            now: r64![0.0],
-            audio_ctx: Rc::new(AudioContext::new().report()?),
+    pub const SAMPLE_RATE: u32 = 44100;
+    pub const CHANNEL_COUNT: u32 = 2;
+    #[inline] pub fn new(event_emitter: Callback<AppEvent>) -> AppResult<Self> {
+        Ok(Self{playback_ctx: PlaybackContext::new()?,
             snap_step: r64![1.0],
             selected_tab: 0,
             undid_actions: 0,
             actions: vec![AppAction::Start],
             action_done: false,
+            playing: false,
             event_emitter})
     }
 
-    #[inline] pub fn bps(&self) -> R64 {self.bps}
-    /// If audio's not currently playing, positive infinity is returned.
-    #[inline] pub fn play_since(&self) -> R64 {self.play_since}
-    #[inline] pub fn now(&self) -> R64 {self.now}
-    #[inline] pub fn audio_ctx(&self) -> &Rc<AudioContext> {&self.audio_ctx}
+    #[inline] pub fn playback_ctx(&self) -> &PlaybackContext {&self.playback_ctx}
     #[inline] pub fn snap_step(&self) -> R64 {self.snap_step}
     #[inline] pub fn selected_tab(&self) -> usize {self.selected_tab}
     #[inline] pub fn actions(&self) -> &[AppAction] {&self.actions}
-
-    /// properties cannot be modified through a mutable reference, this is done to prevent
-    /// components from modifying global context while handling an event
-    #[inline] pub fn set_play_since(mut self, value: Secs) -> Self {
-        self.play_since = value;
-        self
-    }
-
     #[inline] pub fn event_emitter(&self) -> &Callback<AppEvent> {&self.event_emitter}
     #[inline] pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
+    #[inline] pub fn playing(&self) -> bool {self.playing}
 
     #[inline] pub fn register_action(&mut self, action: AppAction) {
         self.actions.drain(self.actions.len() - take(&mut self.undid_actions) ..);
@@ -315,36 +348,66 @@ impl AppContext {
         self.action_done = true;
     }
 
+    /// takes the flag and sets it to `false`
     #[inline] pub fn recent_action_done(&mut self) -> bool {self.action_done.take()}
 
-    pub fn handle_event(&mut self, event: &AppEvent) -> Option<()> {
-        Some(match event {
+    #[inline] pub fn params(&self) -> Html {
+        html!{
+            <div id="inputs">
+                <Slider key="tmp" name="Tempo"
+                setter={self.event_emitter.reform(AppEvent::Bpm)}
+                min={r64![30.0]} max={r64![240.0]}
+                postfix="BPM"
+                initial={self.playback_ctx.bps * 60}/>
+                <Slider key="gain" name="Master volume"
+                setter={self.event_emitter.reform(|x| AppEvent::MasterVolume(R32::from(x)))}
+                initial={self.playback_ctx.volume()}/>
+            </div>
+        }
+    }
+
+    pub fn handle_event(&mut self, event: &AppEvent) -> AppResult<()> {
+        Ok(match event {
             &AppEvent::Bpm(bpm) => {
                 let to = bpm / 60;
-                self.register_action(AppAction::SetTempo{from: self.bps, to}); 
-                self.bps = to
+                self.register_action(AppAction::SetTempo{from: self.playback_ctx.bps, to}); 
+                self.playback_ctx.bps = to
             }
 
-            &AppEvent::AudioStarted(at) =>
-                self.play_since = at,
+            &AppEvent::MasterVolume(to) => unsafe {
+                let gain = self.playback_ctx.gain.gain();
+                self.register_action(AppAction::SetMasterVolume{from: R32::new_unchecked(gain.value()), to});
+                gain.set_value(*to);
+            }
 
-            AppEvent::StopPlay =>
-                self.play_since = R64::INFINITY,
+            AppEvent::StartPlay => {
+                self.playback_ctx.prepare_for_playing()?;
+                self.playing = true
+            }
 
-            &AppEvent::Frame(now) =>
-                self.now = now / 1000u16,
+            AppEvent::StopPlay => {
+                self.playback_ctx.started_at = Secs::INFINITY;
+                self.playing = false;
+            }
+
+            &AppEvent::Frame(now) => {
+                self.playback_ctx.now = now / 1000u16;
+                if self.playing && self.playback_ctx.started_at.is_infinite() {
+                    self.playback_ctx.started_at = self.playback_ctx.now;
+                }
+            }
 
             &AppEvent::SnapStep(to) => {
                 self.register_action(AppAction::SetSnapStep{from: self.snap_step, to});
-                self.snap_step = to
+                self.snap_step = to;
             }
 
             AppEvent::Select(_) =>
                 self.selected_tab = 0,
 
-            &AppEvent::SetTab(id) => {
-                self.register_action(AppAction::SwitchTab{from: self.selected_tab, to: id});
-                self.selected_tab = id
+            &AppEvent::SetTab(to) => {
+                self.register_action(AppAction::SwitchTab{from: self.selected_tab, to});
+                self.selected_tab = to;
             }
 
             AppEvent::KeyPress(_, e) if &e.code() == "KeyZ" && e.meta_key() && !e.repeat() =>
@@ -362,7 +425,7 @@ impl AppContext {
 
             &AppEvent::Unwind(n) => {
                 let unwound = self.actions.get(self.actions.len() - n - self.undid_actions ..)
-                    .report_none()?
+                    .to_app_result()?
                     .iter().rev().cloned().collect();
                 self.undid_actions += n;
                 self.event_emitter.emit(AppEvent::Undo(unwound))
@@ -371,7 +434,7 @@ impl AppContext {
             &AppEvent::Rewind(n) => {
                 let len = self.actions.len();
                 let rewound = self.actions.get({let x = len - self.undid_actions; x .. x + n})
-                    .report_none()?.to_box();
+                    .to_app_result()?.to_box();
                 self.undid_actions -= n;
                 self.event_emitter.emit(AppEvent::Redo(rewound))
             }
@@ -385,10 +448,13 @@ impl AppContext {
                         self.selected_tab = prev_selected_tab,
 
                     AppAction::SetTempo{from, ..} =>
-                        self.bps = from,
+                        self.playback_ctx.bps = from,
 
                     AppAction::SetSnapStep{from, ..} =>
                         self.snap_step = from,
+
+                    AppAction::SetMasterVolume{from, ..} =>
+                        self.playback_ctx.gain.gain().set_value(*from),
 
                     _ => ()
                 }
@@ -403,10 +469,13 @@ impl AppContext {
                         self.selected_tab = 0,
 
                     AppAction::SetTempo{to, ..} =>
-                        self.bps = to,
+                        self.playback_ctx.bps = to,
 
                     AppAction::SetSnapStep{to, ..} =>
                         self.snap_step = to,
+
+                    AppAction::SetMasterVolume{to, ..} =>
+                        self.playback_ctx.gain.gain().set_value(*to),
 
                     _ => ()
                 }
@@ -433,11 +502,11 @@ impl Component for App {
     fn create(ctx: &Context<Self>) -> Self {
         let cb = ctx.link().callback(AppEvent::Frame);
         let ctx = AppContext::new(ctx.link().callback(|x| x)).unwrap_throw();
-        let sound_visualiser = SoundVisualiser::new(&ctx.audio_ctx).unwrap_throw();
+        let sound_visualiser = SoundVisualiser::new();
 
         let res = Self{selected_id: None,
             hint_handler: default(),
-            sequencer: Sequencer::new(&ctx.audio_ctx, Rc::clone(sound_visualiser.input())).unwrap_throw(),
+            sequencer: default(),
             frame_emitter: Closure::<dyn Fn(f64)>::new(move |x| cb.emit(R64::new_or(r64![0.0], x)))
                 .into_js_value().unchecked_into(),
             sound_visualiser, ctx};
@@ -446,10 +515,10 @@ impl Component for App {
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        let _: Option<_> = try {
+        let res: AppResult<!> = try {
             match msg {
                 AppEvent::Frame(_) =>
-                    _ = window().request_animation_frame(&self.frame_emitter).report()?,
+                    _ = window().request_animation_frame(&self.frame_emitter)?,
 
                 AppEvent::Select(id) => {
                     if id != self.selected_id {
@@ -461,8 +530,8 @@ impl Component for App {
                 }
 
                 AppEvent::Remove => {
-                    let mut pattern = self.sequencer.pattern().try_borrow_mut().report_fmt()?;
-                    let id = self.selected_id.take().report_none()?;
+                    let mut pattern = self.sequencer.pattern().try_borrow_mut().to_app_result()?;
+                    let id = self.selected_id.take().to_app_result()?;
                     let id = *unsafe{pattern.selection().get_unchecked(id)};
                     let mut removed = MaybeUninit::uninit();
                     pattern.remove_points(once(id), |(_, x)| _ = removed.write(x))?;
@@ -512,6 +581,7 @@ impl Component for App {
             self.forward_event(msg)?;
             return res | self.ctx.recent_action_done()
         };
+        res.report();
         false
     }
 
@@ -531,7 +601,7 @@ impl Component for App {
             }
         };
 
-        html! {<>
+        html!{<>
             <div id="main-panel">
                 <div id="ctrl-panel" class="dark-bg"
                 data-main-hint="Settings" data-aux-hint={block.as_ref().map_or(AttrValue::from("General"), |x| AttrValue::from(x.desc()))}>
@@ -562,18 +632,7 @@ impl Component for App {
                             </Button>
                         </div>
                     } else {
-                        // TODO: fix tilted edges of the borders of the tab menu
-                        <div id="tab-list"></div>
-                        <div id="inputs">
-                            <Slider key="tmp" name="Tempo"
-                                setter={setter.reform(AppEvent::Bpm)}
-                                min={r64![30.0]} max={r64![240.0]}
-                                postfix="BPM"
-                                initial={self.ctx.bps * 60}/>
-                            <Slider key="gain" name="Master gain level"
-                            setter={setter.reform(|x| AppEvent::MasterVolume(R32::from(x)))}
-                            initial={R64::from(self.sequencer.gain())}/>
-                        </div>
+                        {self.ctx.params()}
                     }
                 </div>
                 <GraphEditorCanvas<SoundBlock>
@@ -641,7 +700,7 @@ impl Component for App {
                         _ => 0
                     }}/>
                 </div>
-                if self.ctx.play_since.is_finite() {
+                if self.ctx.playing() {
                     <Button name="Stop"
                     setter={setter.reform(|_| AppEvent::StopPlay)}>
                         <svg viewBox="3 0 100 103" height="100%">
@@ -700,19 +759,17 @@ impl Component for App {
 }
 
 impl App {
-    fn forward_event(&mut self, event: AppEvent) -> Option<()> {
+    fn forward_event(&mut self, event: AppEvent) -> AppResult<()> {
         self.ctx.handle_event(&event)?;
         self.hint_handler.handle_event(&event, &self.ctx)?;
         self.sound_visualiser.handle_event(&event, &self.ctx)?;
         self.sequencer.handle_event(&event, &mut self.ctx)?;
 
-        let mut pattern = self.sequencer.pattern().try_borrow_mut().report_fmt()?;
-        Some(if let Some(&id) = pattern.selection().first() {
+        let mut pattern = self.sequencer.pattern().try_borrow_mut()?;
+        Ok(if let Some(&id) = pattern.selection().first() {
             let mut block = unsafe{pattern.get_unchecked_mut(id)};
-            let (prev, bps) = (self.ctx.play_since, self.ctx.bps);
-            self.ctx.play_since += block.offset.to_secs(bps);
-            block.inner().handle_event(&event, &mut self.ctx)?;
-            self.ctx.play_since = prev;
+            let offset = block.offset;
+            block.inner().handle_event(&event, &mut self.ctx, offset)?;
         })
     }
 }

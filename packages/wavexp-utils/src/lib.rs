@@ -9,13 +9,12 @@ use std::{
     ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Rem, RemAssign, Range},
     iter::{successors, Sum},
     error::Error,
-    collections::TryReserveError,
     cmp::Ordering,
-    any::type_name,
     array::from_fn,
     num::{TryFromIntError,
         NonZeroU8, NonZeroU16, NonZeroU32, NonZeroUsize, NonZeroU64,
-        NonZeroI8, NonZeroI16, NonZeroI32, NonZeroIsize, NonZeroI64}, backtrace::Backtrace, borrow::Cow
+        NonZeroI8, NonZeroI16, NonZeroI32, NonZeroIsize, NonZeroI64},
+    cell::{RefCell, Ref, RefMut, BorrowError, BorrowMutError}
 };
 pub use js_sys;
 pub use wasm_bindgen;
@@ -124,6 +123,8 @@ impl<'data, 'ids, T> Iterator for IterIndicesMut<'data, 'ids, T> {
 }
 
 pub trait ToIterIndicesMut<'data, 'ids, T> {
+    /// # Safety
+    /// all `ids` must be valid indices into `self`
     unsafe fn iter_indices_unchecked_mut(&'data mut self, ids: &'ids [usize])
     -> IterIndicesMut<'data, 'ids, T>;
     fn iter_indices_mut(&'data mut self, ids: &'ids [usize])
@@ -206,8 +207,7 @@ pub trait BoolExt {
     fn then_negate<T: Neg<Output=T>>(self, val: T) -> T;
     fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
     fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T>;
-    fn report_false(self) -> Option<()>;
-    fn to_js_result(self) -> JsResult<()>;
+    fn to_app_result(self) -> AppResult<()>;
 }
 
 impl BoolExt for bool {
@@ -235,13 +235,9 @@ impl BoolExt for bool {
         if self {f()} else {None}
     }
 
-    #[inline] fn report_false(self) -> Option<()> {
-        self.to_js_result().report()
-    }
-
-    #[inline] fn to_js_result(self) -> JsResult<()> {
+    #[inline] fn to_app_result(self) -> AppResult<()> {
         if self {Ok(())}
-        else {Err(js_sys::Error::new("expected `true`, found `false`").into())}
+        else {Err(AppError::new("expected `true`, found `false`"))}
     }
 }
 
@@ -398,6 +394,41 @@ impl<T> WasmCell<T> {
     pub const fn new(val: T) -> Self {Self(val)}
 }
 
+#[derive(Debug)]
+pub struct MaybeCell<T>(RefCell<Option<T>>);
+
+impl<T> Default for MaybeCell<T> {
+    #[inline] fn default() -> Self {Self(RefCell::new(None))}
+}
+
+impl<T> MaybeCell<T> {
+    #[inline] pub const fn new(x: Option<T>) -> Self {
+        Self(RefCell::new(x))
+    }
+
+    #[inline] pub fn get(&self) -> AppResult<Ref<'_, T>> {
+        self.0.try_borrow().to_app_result()
+            .and_then(|x| Ref::filter_map(x, Option::as_ref)
+                .explain_err("MaybeCell object is not initialised"))
+    }
+
+    #[inline] pub fn get_mut(&self) -> AppResult<RefMut<'_, T>> {
+        self.0.try_borrow_mut().to_app_result()
+            .and_then(|x| RefMut::filter_map(x, Option::as_mut)
+                .explain_err("MaybeCell object is not initialised"))
+    }
+
+    #[inline] pub fn set(&self, val: T) -> AppResult<RefMut<'_, T>> {
+        self.0.try_borrow_mut().to_app_result()
+            .map(|x| RefMut::map(x, |x| x.insert(val)))
+    }
+
+    #[inline] pub fn get_or_init(&self, f: impl FnOnce() -> T) -> AppResult<RefMut<'_, T>> {
+        self.0.try_borrow_mut().to_app_result()
+            .map(|x| RefMut::map(x, |x| x.get_or_insert(f())))
+    }
+}
+
 pub struct SliceRef<'a, T: ?Sized> {
     inner: &'a T,
     index: usize
@@ -413,6 +444,8 @@ impl<'a, T> SliceRef<'a, T> {
         slice.get(index).map(|inner| Self{inner, index}) 
     }
 
+    /// # Safety
+    /// `inner` must be a reference to the `index`-th item in its array
     #[inline] pub unsafe fn raw(inner: &'a T, index: usize) -> Self {Self{inner, index}}
 
     #[inline] pub fn index(&self) -> usize {self.index}
@@ -457,21 +490,6 @@ macro_rules! js_log {
 }
 
 #[macro_export]
-macro_rules! js_try {
-    (type = $r:ty : $($s:tt)*) => {
-        {let x: $crate::JsResult<$r> = try {
-            $($s)*
-        }; x}
-    };
-
-    ($($s:tt)*) => {
-        {let x: $crate::JsResult<_> = try {
-            $($s)*
-        }; x}
-    };
-}
-
-#[macro_export]
 macro_rules! js_assert {
     ($($s:tt)+) => {
         if !$($s)+ {
@@ -498,8 +516,8 @@ pub fn document() -> HtmlDocument {
 	unsafe{web_sys::window().unwrap_unchecked().document().unwrap_unchecked()}
 }
 
-pub fn report_err(err: JsValue) {
-    warn_1(&to_error_with_msg(err, &format!("{}", Backtrace::capture())));
+pub fn report_err(err: js_sys::Error) {
+    warn_1(&err);
     if let Some(x) = document().element_dyn_into::<HtmlElement>("error-sign") {
         x.set_hidden(false)
     } else {
@@ -507,66 +525,79 @@ pub fn report_err(err: JsValue) {
     }
 }
 
-#[inline] fn to_error_with_msg(err: JsValue, msg: &str) -> JsValue {
-    let s = format!("{}\n{}", msg, 
-        match err.dyn_into::<js_sys::Error>() {
-            Ok(val) => val.message(),
-            Err(val) => js_sys::Object::from(val).to_string()});
-    js_sys::Error::new(&s).into()
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppError(js_sys::Error);
+
+impl From<JsValue> for AppError {
+    #[inline] fn from(value: JsValue) -> Self {
+        match value.dyn_into() {
+            Ok(x) => Self(x),
+            Err(x) => Self::new(&String::from(js_sys::Object::from(x).to_string()))
+        }
+    }
 }
 
-pub type JsResult<T> = Result<T, JsValue>;
-
-pub trait ResultExt<T, E> {
-    fn to_js_result(self) -> JsResult<T> where E: Display;
-    fn report_fmt(self) -> Option<T> where E: Display;
-    fn report_as(self, msg: &str) -> Option<T>;
-    fn report_with(self, f: impl FnOnce() -> Cow<'static, str>) -> Option<T>;
+macro_rules! impl_into_app_error {
+    ($($t:ty)+) => {
+        $(
+            impl From<$t> for AppError {
+                #[inline] fn from(value: $t) -> Self {
+                    Self::new(&value.to_string())
+                }
+            }
+        )+
+    };
 }
 
-pub trait JsResultUtils<T>: Sized {
+impl_into_app_error!(BorrowError BorrowMutError);
+
+impl From<AppError> for js_sys::Error {
+    #[inline] fn from(value: AppError) -> Self {value.0}
+}
+
+impl AppError {
+    #[inline] pub fn new(msg: &str) -> Self {
+        Self(js_sys::Error::new(msg))
+    }
+}
+
+pub type AppResult<T> = Result<T, AppError>;
+
+pub trait AppResultUtils<T>: Sized {
 	fn report(self) -> Option<T>;
 }
 
-impl<T> JsResultUtils<T> for JsResult<T> {
+impl<T> AppResultUtils<T> for AppResult<T> {
     #[inline] fn report(self) -> Option<T> {
         match self {
             Ok(x) => Some(x),
-            Err(e) => {report_err(e); None}
+            Err(e) => {report_err(e.into()); None}
         }
     }
 }
 
+pub trait ResultExt<T, E> {
+    fn to_app_result(self) -> AppResult<T> where E: Display;
+    fn explain_err(self, msg: &str) -> AppResult<T>;
+    fn explain_err_with(self, f: impl FnOnce() -> String) -> AppResult<T>;
+}
+
 impl<T, E> ResultExt<T, E> for Result<T, E> {
-    #[inline] fn to_js_result(self) -> JsResult<T> where E: Display {
-        self.map_err(|e| e.to_string().into())
+    #[inline] fn to_app_result(self) -> AppResult<T> where E: Display {
+        self.map_err(|e| AppError::new(&e.to_string()))
     }
 
-    #[inline] fn report_fmt(self) -> Option<T> where E: Display {
-        match self {
-            Ok(x) => Some(x),
-            Err(e) => {report_err(js_sys::Error::new(&e.to_string()).into()); None}
-        }
+    #[inline] fn explain_err(self, msg: &str) -> AppResult<T> {
+        self.map_err(|_| AppError::new(msg))
     }
 
-    #[inline] fn report_as(self, msg: &str) -> Option<T> {
-        match self {
-            Ok(x) => Some(x),
-            Err(_) => {report_err(js_sys::Error::new(msg).into()); None}
-        }
-    }
-
-    #[inline] fn report_with(self, f: impl FnOnce() -> Cow<'static, str>) -> Option<T> {
-        match self {
-            Ok(x) => Some(x),
-            Err(_) => {report_err(js_sys::Error::new(&f()).into()); None}
-        }
+    #[inline] fn explain_err_with(self, f: impl FnOnce() -> String) -> AppResult<T> {
+        self.map_err(|_| AppError::new(&f()))
     }
 }
 
 pub trait OptionExt<T> {
-    fn to_js_result(self) -> JsResult<T>;
-    fn report_none(self) -> Self;
+    fn to_app_result(self) -> AppResult<T>;
     fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
     fn choose<U>(&self, on_some: U, on_none: U) -> U;
     fn drop(self) -> Option<()>;
@@ -574,15 +605,8 @@ pub trait OptionExt<T> {
 }
 
 impl<T> OptionExt<T> for Option<T> {
-    #[inline] fn to_js_result(self) -> JsResult<T> {
-        self.ok_or_else(|| js_sys::Error::new("`Option` contained the `None` value").into())
-    }
-
-    #[inline] fn report_none(self) -> Self {
-        if self.is_none() {
-            report_err(js_sys::Error::new("`Option` contained the `None` value").into())
-        }
-        self
+    #[inline] fn to_app_result(self) -> AppResult<T> {
+        self.ok_or_else(|| AppError::new("`Option` contained the `None` value"))
     }
 
     #[inline] fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
@@ -607,15 +631,15 @@ impl<T> OptionExt<T> for Option<T> {
 }
 
 pub trait HtmlCanvasExt {
-    fn get_2d_context(&self) -> Option<CanvasRenderingContext2d>;
+    fn get_2d_context(&self) -> AppResult<CanvasRenderingContext2d>;
     fn rect(&self) -> Rect;
     fn size(&self) -> [u32; 2];
     fn sync(&self);
 }
 
 impl HtmlCanvasExt for HtmlCanvasElement {
-    fn get_2d_context(&self) -> Option<CanvasRenderingContext2d> {
-        Some(self.get_context("2d").report()?.report_none()?.unchecked_into())
+    fn get_2d_context(&self) -> AppResult<CanvasRenderingContext2d> {
+        Ok(self.get_context("2d")?.to_app_result()?.unchecked_into())
     }
 
     fn rect(&self) -> Rect {
@@ -635,8 +659,7 @@ pub trait HtmlDocumentExt {
 
 impl HtmlDocumentExt for HtmlDocument {
     fn element_dyn_into<T: JsCast>(&self, id: &str) -> Option<T> {
-        self.get_element_by_id(id).to_js_result().report()?
-            .dyn_into::<T>().report_with(|| format!("#{id} is not of type {}", type_name::<T>()).into())
+        self.get_element_by_id(id)?.dyn_into::<T>().ok()
     }
 }
 
@@ -759,27 +782,33 @@ pub trait SliceExt<T> {
     fn get_saturating_mut(&mut self, id: usize) -> &mut T;
     fn get_wrapping(&self, id: usize) -> &T;
     fn get_wrapping_mut(&mut self, id: usize) -> &mut T;
-    fn get_var<'a>(&'a self, ids: &[usize]) -> Result<Vec<&'a T>, GetVarError>;
-    fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Result<Vec<&'a mut T>, GetVarError>;
+    fn get_var<'a>(&'a self, ids: &[usize]) -> Option<Vec<&'a T>>;
+    fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Option<Vec<&'a mut T>>;
+    /// # Safety
+    /// `index` must be a valid index into `self`
     unsafe fn reorder_unchecked(&mut self, index: usize) -> SliceMove
         where T: Ord;
     // unsafe fn reorder_unchecked_by<F>(&mut self, index: usize, f: F) -> usize
     //  where F: FnMut(&T, &T) -> Ordering
+    /// # Safety
+    /// `index` must be a valid index into `self`
     unsafe fn reorder_unchecked_by_key<K, F>(&mut self, index: usize, f: F) -> SliceMove
         where F: FnMut(&T) -> K, K: Ord;
-    fn reorder(&mut self, index: usize) -> Result<SliceMove, ReorderError>
+    fn reorder(&mut self, index: usize) -> AppResult<SliceMove>
         where T: Ord;
     // fn reorder_by<F>(&mut self, index: usize, f: F) -> Result<usize, ReorderError>
     //  where F: FnMut(&T, &T) -> Ordering
     // fn reorder_by_key<K, F>(&mut self, index: usize, f: F) -> Result<usize, ReorderError>
     //  where F: FnMut(&T) -> K, K: Ord
-    fn set_sorted(&mut self, index: usize, value: T) -> Result<SliceMove, SetSortedError>
+    fn set_sorted(&mut self, index: usize, value: T) -> AppResult<SliceMove>
         where T: Ord;
     // fn set_sorted_by<F>(&mut self, index: usize, value: T, f: F) -> Result<usize, SetSortedError>
     //  where F: FnMut(&T, &T) -> Ordering
     // fn set_sorted_by_key<K, F>(&mut self, index: usize, value: T, f: F) -> Result<usize, SetSortedError>
     //  where F: FnMut(&T) -> K, K: Ord
     fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>>;
+    /// # Safety
+    /// `index` must be a valid index into `self`
     unsafe fn get_unchecked_aware(&self, index: usize) -> SliceRef<'_, T>;
     fn iter_mut_with_ctx<'a>(&'a mut self) -> IterMutWithCtx<'a, T> where T: 'a + Copy;
 }
@@ -816,28 +845,24 @@ impl<T> SliceExt<T> for [T] {
     }
 
 
-    #[inline] fn get_var<'a>(&'a self, ids: &[usize]) -> Result<Vec<&'a T>, GetVarError> {
+    #[inline] fn get_var<'a>(&'a self, ids: &[usize]) -> Option<Vec<&'a T>> {
         let len = self.len();
         for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
-            if *id >= len {return Err(GetVarError::OutOfBounds(*id, len))}
-            if rest.contains(id) {return Err(GetVarError::Overlap(*id))}
+            if *id >= len || rest.contains(id) {return None}
         }
-        Ok(unsafe { // at this point, `ids` is guaranteed to contain unique valid indices into `self`
-            let base = self.as_ptr();
-            ids.iter().map(|x| &*base.add(*x)).collect::<Vec<_>>()
-        })
+        // at this point, `ids` is guaranteed to contain unique valid indices into `self`
+        let base = self.as_ptr();
+        Some(ids.iter().map(|x| unsafe{&*base.add(*x)}).collect())
     }
 
-    #[inline] fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Result<Vec<&'a mut T>, GetVarError> {
+    #[inline] fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Option<Vec<&'a mut T>> {
         let len = self.len();
         for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
-            if *id >= len {return Err(GetVarError::OutOfBounds(*id, len))}
-            if rest.contains(id) {return Err(GetVarError::Overlap(*id))}
+            if *id >= len || rest.contains(id) {return None}
         }
-        Ok(unsafe { // at this point, `ids` is guaranteed to contain unique valid indices into `self`
-            let base = self.as_mut_ptr();
-            ids.iter().map(|x| &mut*base.add(*x)).collect::<Vec<_>>()
-        })
+        // at this point, `ids` is guaranteed to contain unique valid indices into `self`
+        let base = self.as_mut_ptr();
+        Some(ids.iter().map(|x| unsafe{&mut *base.add(*x)}).collect())
     }
 
     unsafe fn reorder_unchecked(&mut self, index: usize) -> SliceMove where T: Ord {
@@ -848,7 +873,7 @@ impl<T> SliceExt<T> for [T] {
             self.get_unchecked_mut(new..=index).rotate_right(1);
             return SliceMove{from: index, to: new}
         }
-        let new = self.get_unchecked(index+1..).binary_search(element)
+        let new = self.get_unchecked(index + 1 ..).binary_search(element)
             .unwrap_or_else(|x| x) + index;
         if new > index {
             self.get_unchecked_mut(index..=new).rotate_left(1);
@@ -872,18 +897,18 @@ impl<T> SliceExt<T> for [T] {
         SliceMove{from: index, to: new}
     }
 
-    #[inline] fn reorder(&mut self, index: usize) -> Result<SliceMove, ReorderError> where T: Ord {
+    #[inline] fn reorder(&mut self, index: usize) -> AppResult<SliceMove> where T: Ord {
         let len = self.len();
         if index >= len {
-            return Err(ReorderError{index, len});
+            return Err(AppError::new(&format!("reorder index (is {index}) should be < len (is {len})")))
         }
         Ok(unsafe{self.reorder_unchecked(index)})
     }
 
-    #[inline] fn set_sorted(&mut self, index: usize, value: T) -> Result<SliceMove, SetSortedError> where T: Ord {
+    #[inline] fn set_sorted(&mut self, index: usize, value: T) -> AppResult<SliceMove> where T: Ord {
         let len = self.len();
         if index >= len {
-            return Err(SetSortedError{index, len});
+            return Err(AppError::new(&format!("reorder index (is {index}) should be < len (is {len})")))
         }
         Ok(unsafe {
             let dst = self.get_unchecked_mut(index);
@@ -906,16 +931,16 @@ impl<T> SliceExt<T> for [T] {
 
 #[test] fn slice_get_var() {
     let x = [1, 2, 4, 8, 16, 32, 64];
-    assert_eq!(x.get_var(&[1, 3, 6]), Ok(vec![&2, &8, &64]));
-    assert_eq!(x.get_var(&[1, 25]), Err(GetVarError::OutOfBounds(25, 7)));
-    assert_eq!(x.get_var(&[1, 4, 5, 1]), Err(GetVarError::Overlap(1)));
+    assert_eq!(x.get_var(&[1, 3, 6]), Some(vec![&2, &8, &64]));
+    assert_eq!(x.get_var(&[1, 25]), None);
+    assert_eq!(x.get_var(&[1, 4, 5, 1]), None);
 }
 
 #[test] fn slice_get_var_mut() {
     let mut x = [1, 2, 4, 8, 16, 32, 64];
-    assert_eq!(x.get_var_mut(&[1, 3, 6]), Ok(vec![&mut 2, &mut 8, &mut 64]));
-    assert_eq!(x.get_var_mut(&[1, 25]), Err(GetVarError::OutOfBounds(25, 7)));
-    assert_eq!(x.get_var_mut(&[1, 4, 5, 1]), Err(GetVarError::Overlap(1)));
+    assert_eq!(x.get_var_mut(&[1, 3, 6]), Some(vec![&mut 2, &mut 8, &mut 64]));
+    assert_eq!(x.get_var_mut(&[1, 25]), None);
+    assert_eq!(x.get_var_mut(&[1, 4, 5, 1]), None);
 }
 
 #[test] fn slice_reorder() {
@@ -930,48 +955,19 @@ impl<T> SliceExt<T> for [T] {
     assert_eq!(x.reorder(5), Ok(SliceMove{from: 5, to: 1}));
     // [1, 4, 8, 16, 17, 32, 64] > [1, 3, 4, 8, 16, 17, 64]
     let old_x = x;
-    assert_eq!(x.reorder(69), Err(ReorderError{index: 69, len: 7}));
+    assert!(x.reorder(69).is_err());
     assert_eq!(x, old_x);
     x[2] = 3;
     assert_eq!(x.reorder(2), Ok(SliceMove{from: 2, to: 2}));
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct RemoveError {
-    index: usize,
-    len: usize
-}
-
-impl Display for RemoveError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "removal index (is {}) should be < len (is {})", self.index, self.len)
-    }
-}
-
-impl Error for RemoveError {}
-
-#[derive(Debug)]
-pub enum InsertError {
-    Index{index: usize, len: usize},
-    Alloc(TryReserveError)
-}
-
-impl Display for InsertError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Index{index, len} => write!(f, "insertion index (is {}) should be <= len (is {})", index, len),
-            Self::Alloc(err) => Debug::fmt(err, f)
-        }
-    }
-}
-
-impl Error for InsertError {}
-
 pub trait VecExt<T> {
-    fn try_remove(&mut self, index: usize) -> Result<T, RemoveError>;
+    fn try_remove(&mut self, index: usize) -> AppResult<T>;
+    /// # Safety
+    /// `index` must be a valid index into `self`
     unsafe fn remove_unchecked(&mut self, index: usize) -> T;
-    fn try_swap_remove(&mut self, index: usize) -> Result<T, RemoveError>;
-    fn try_insert(&mut self, index: usize, element: T) -> Result<&mut T, InsertError>;
+    fn try_swap_remove(&mut self, index: usize) -> AppResult<T>;
+    fn try_insert(&mut self, index: usize, element: T) -> AppResult<&mut T>;
     fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool;
     fn push_sorted(&mut self, value: T) -> usize where T: Ord;
     fn push_sorted_by(&mut self, value: T, f: impl Fn(&T, &T) -> Ordering) -> usize;
@@ -979,10 +975,10 @@ pub trait VecExt<T> {
 }
 
 impl<T> VecExt<T> for Vec<T> {
-    #[inline] fn try_remove(&mut self, index: usize) -> Result<T, RemoveError> {
+    #[inline] fn try_remove(&mut self, index: usize) -> AppResult<T> {
         let len = self.len();
         if index >= len {
-            return Err(RemoveError{index, len})
+            return Err(AppError::new(&format!("removal index (is {index}) should be < len (is {len})")))
         }
         unsafe {
             let ptr = self.as_mut_ptr().add(index);
@@ -1002,10 +998,10 @@ impl<T> VecExt<T> for Vec<T> {
         ret
     }
 
-    #[inline] fn try_swap_remove(&mut self, index: usize) -> Result<T, RemoveError> {
+    #[inline] fn try_swap_remove(&mut self, index: usize) -> AppResult<T> {
         let len = self.len();
         if index >= len {
-            return Err(RemoveError{index, len});
+            return Err(AppError::new(&format!("removal index (is {index}) should be < len (is {len})")))
         }
         unsafe {
             let value = ptr::read(self.as_ptr().add(index));
@@ -1016,13 +1012,13 @@ impl<T> VecExt<T> for Vec<T> {
         }
     }
 
-    #[inline] fn try_insert(&mut self, index: usize, element: T) -> Result<&mut T, InsertError> {
+    #[inline] fn try_insert(&mut self, index: usize, element: T) -> AppResult<&mut T> {
         let len = self.len();
         if index > len {
-            return Err(InsertError::Index{index, len});
+            return Err(AppError::new(&format!("insertion index (is {index}) should be <= len (is {len})")))
         }
         if len == self.capacity() {
-            self.try_reserve(1).map_err(InsertError::Alloc)?;
+            self.try_reserve(1).to_app_result()?;
         }
         unsafe {
             let p = self.as_mut_ptr().add(index);
@@ -1160,33 +1156,33 @@ impl<D> ArrayFrom<Point, 2> for D where D: From<i32> {
 impl Add for Point {
     type Output = Self;
     #[inline] fn add(self, rhs: Self) -> Self::Output {
-        self.checked_add(rhs).report_none().unwrap_or(self)
+        self.checked_add(rhs).to_app_result().report().unwrap_or(self)
     }
 }
 
 impl AddAssign for Point {
     #[inline] fn add_assign(&mut self, rhs: Self) {
-        self.checked_add_assign(rhs).report_false();
+        self.checked_add_assign(rhs).to_app_result().report();
     }
 }
 
 impl Sub for Point {
     type Output = Self;
     #[inline] fn sub(self, rhs: Self) -> Self::Output {
-        self.checked_sub(rhs).report_none().unwrap_or(self)
+        self.checked_sub(rhs).to_app_result().report().unwrap_or(self)
     }
 }
 
 impl SubAssign for Point {
     #[inline] fn sub_assign(&mut self, rhs: Self) {
-        self.checked_sub_assign(rhs).report_false();
+        self.checked_sub_assign(rhs).to_app_result().report();
     }
 }
 
 impl Neg for Point {
     type Output = Self;
     #[inline] fn neg(self) -> Self::Output {
-        self.checked_neg().report_none().unwrap_or(self)
+        self.checked_neg().to_app_result().report().unwrap_or(self)
     }
 }
 
@@ -1278,15 +1274,6 @@ macro_rules! round_to_4ints {
 }
 
 round_to_4ints!(i8 u8 i16 u16 i32 u32 isize usize i64 u64);
-
-#[derive(Debug)]
-pub struct NanError;
-
-impl Display for NanError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "attempted to convert a NaN to a real")
-    }
-}
 
 macro_rules! real_from_unsigned_ints_impl {
     ($real:ty { $float:ty } : $($nonzero:ty{ $int:ty }),+) => {
@@ -1464,13 +1451,13 @@ macro_rules! real_float_operator_impl {
         $(
             impl_op!($op::$method(self: $real, rhs: $other_float) -> $real {
                 let res = self.0.$method(rhs as $float);
-                if res.is_nan() {report_err(js_sys::Error::new("result is NaN").into()); self}
+                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))).into()); self}
                 else {Self(res)}
             });
 
             impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $other_float) {
                 let res = self.0.$method(rhs as $float);
-                if res.is_nan() {report_err(js_sys::Error::new("result is NaN").into())}
+                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))).into())}
                 else {self.0 = res}
             });
         )+
@@ -1504,13 +1491,13 @@ macro_rules! real_real_operator_impl {
         $(
             impl_op!($op::$method(self: $real, rhs: $other_real) -> $real {
                 let res = self.0.$method(rhs.0 as $float);
-                if res.is_nan() {report_err(js_sys::Error::new("result is NaN").into()); self}
+                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))).into()); self}
                 else {Self(res)}
             });
 
             impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $other_real) {
                 let res = self.0.$method(rhs.0 as $float);
-                if res.is_nan() {report_err(js_sys::Error::new("result is NaN").into())}
+                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))).into())}
                 else {self.0 = res}
             });
         )+
@@ -1554,9 +1541,9 @@ macro_rules! real_impl {
         impl Eq for $real {}
 
         impl TryFrom<$float> for $real {
-            type Error = NanError;
+            type Error = AppError;
             #[inline] fn try_from(x: $float) -> Result<Self, Self::Error> {
-                Self::new(x).ok_or(NanError)
+                Self::new(x).ok_or(AppError::new("the value is NaN"))
             }
         }
 
@@ -1679,6 +1666,8 @@ macro_rules! real_impl {
                 if x.is_nan() {None} else {Some(Self(x))}
             }
 
+            /// # Safety
+            /// `x` must not be NaN
             #[inline] pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
 
             #[inline] pub const fn new_or(default: Self, x: $float) -> Self {
@@ -1711,6 +1700,8 @@ macro_rules! real_impl {
 
             #[inline] pub fn sin(self) -> Option<Self> {Self::new(self.0.sin())}
 
+            /// # Safety
+            /// `self` must be finite
             #[inline] pub unsafe fn sin_unchecked(self) -> Self {Self(self.0.sin())}
 
             #[inline] pub fn sin_or(self, default: Self) -> Self {
@@ -1719,6 +1710,8 @@ macro_rules! real_impl {
 
             #[inline] pub fn cos(self) -> Option<Self> {Self::new(self.0.cos())}
 
+            /// # Safety
+            /// `self` must be finite
             #[inline] pub unsafe fn cos_unchecked(self) -> Self {Self(self.0.cos())}
 
             #[inline] pub fn cos_or(self, default: Self) -> Self {

@@ -1,5 +1,6 @@
-use std::{ops::{Div, Mul, Add, Deref, DerefMut, Sub}, marker::PhantomData};
-use wasm_bindgen::JsValue;
+use std::{
+    ops::{Div, Mul, Add, Deref, DerefMut},
+    marker::PhantomData};
 use web_sys::{
     Element,
     HtmlCanvasElement,
@@ -19,18 +20,12 @@ use yew::{
     Properties,
     scheduler::Shared};
 use wavexp_utils::{
-    js_try,
-    HtmlCanvasExt,
-    OptionExt,
+    r64,
     R64,
     Point,
-    HtmlElementExt,
-    ResultExt,
     report_err,
-    Pipe,
     BoolExt,
-    default,
-    r64, JsResultUtils};
+    default, AppError, OptionExt, HtmlCanvasExt, HtmlElementExt, AppResult, AppResultUtils, ResultExt, Pipe};
 use crate::{
     visual::{GraphPoint, GraphEditor},
     global::AppEvent};
@@ -67,9 +62,9 @@ impl Add<&KeyboardEvent> for Cursor {
 }
 
 impl TryFrom<&MouseEvent> for Cursor {
-    type Error = JsValue;
+    type Error = AppError;
     fn try_from(value: &MouseEvent) -> Result<Self, Self::Error> {
-        let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result()?;
+        let canvas: HtmlCanvasElement = value.target_dyn_into().to_app_result()?;
         let point = Point{x: value.offset_x(), y: value.offset_y()}
             .normalise(canvas.client_rect(), canvas.rect());
         Ok(Self{point, buttons: Buttons{
@@ -80,9 +75,9 @@ impl TryFrom<&MouseEvent> for Cursor {
 }
 
 impl TryFrom<&PointerEvent> for Cursor {
-    type Error = JsValue;
+    type Error = AppError;
     fn try_from(value: &PointerEvent) -> Result<Self, Self::Error> {
-        let canvas: HtmlCanvasElement = value.target_dyn_into().to_js_result()?;
+        let canvas: HtmlCanvasElement = value.target_dyn_into().to_app_result()?;
         let point = Point{x: value.offset_x(), y: value.offset_y()}
             .normalise(canvas.client_rect(), canvas.rect());
         Ok(Self{point, buttons: Buttons{
@@ -130,31 +125,32 @@ impl Component for Slider {
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        let _: Option<!> = try {
+        let res: AppResult<!> = try {
             let SliderProps{setter, min, max, signed, ..} = ctx.props();
             match msg {
                 Cmd::Drag(e) => self.value = R64::from(e.movement_y())
-                    .div(-e.target_dyn_into::<Element>().report_none()?.client_height())
+                    .div(-e.target_dyn_into::<Element>().to_app_result()?.client_height())
                     .div(e.shift_key().choose(400u16, 2))
                     .mul(max - min)
                     .add(self.value)
                     .clamp(signed.choose(-*max, *min), *max),
 
                 Cmd::Focus(e) => {
-                    e.target_dyn_into::<Element>().report_none()?
-                        .set_pointer_capture(e.pointer_id()).report()?;
+                    e.target_dyn_into::<Element>().to_app_result()?
+                        .set_pointer_capture(e.pointer_id())?;
                     self.old_value = *self.value;
                 }
 
                 Cmd::Unfocus(e) => {
-                    e.target_dyn_into::<Element>().report_none()?
-                        .release_pointer_capture(e.pointer_id()).report()?;
+                    e.target_dyn_into::<Element>().to_app_result()?
+                        .release_pointer_capture(e.pointer_id())?;
                     if self.old_value != *self.value {setter.emit(self.value)}
                     self.old_value = f64::NAN;
                 }
             }
             return true
         };
+        res.report();
         false
     }
 
@@ -213,26 +209,26 @@ impl Component for Switch {
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        let _: Option<!> = try {
+        let res: AppResult<!> = try {
             let SwitchProps{options, setter, ..} = ctx.props();
             match msg {
                 Cmd::Drag(e) => self.value = R64::from(e.movement_y())
-                    .div(e.target_dyn_into::<Element>().report_none()?.client_height())
+                    .div(e.target_dyn_into::<Element>().to_app_result()?.client_height())
                     .mul(-4i8)
                     .div(options.len())
                     .add(self.value)
-                    .rem_euclid(options.len().into()).report_none()?,
+                    .rem_euclid(options.len().into()).to_app_result()?,
 
                 Cmd::Focus(e) => {
-                    e.target_dyn_into::<Element>().report_none()?
-                        .set_pointer_capture(e.pointer_id()).report()?;
+                    e.target_dyn_into::<Element>().to_app_result()?
+                        .set_pointer_capture(e.pointer_id())?;
                     self.focused = true;
                     self.old_value = self.value.into();
                 }
 
                 Cmd::Unfocus(e) => {
-                    e.target_dyn_into::<Element>().report_none()?
-                        .release_pointer_capture(e.pointer_id()).report()?;
+                    e.target_dyn_into::<Element>().to_app_result()?
+                        .release_pointer_capture(e.pointer_id())?;
                     let value = self.value.into();
                     if self.old_value != value {
                         setter.emit(value)
@@ -242,6 +238,7 @@ impl Component for Switch {
             }
             return true
         };
+        res.report();
         false
     }
 
@@ -342,7 +339,7 @@ impl<T: 'static + GraphPoint> Component for GraphEditorCanvas<T> {
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         let GraphEditorCanvasProps{emitter, editor, id} = ctx.props();
-        match editor.try_borrow().to_js_result() {
+        match editor.try_borrow().to_app_result() {
             Ok(editor) => {
                 let (canvas_id, id) = (*id, editor.id());
                 html!{<canvas ref={editor.canvas().clone()} id={canvas_id}
@@ -353,7 +350,7 @@ impl<T: 'static + GraphPoint> Component for GraphEditorCanvas<T> {
                     onpointerout={emitter.reform(move   |_| AppEvent::Leave(id))}/>}
             }
             Err(err) => {
-                report_err(err);
+                report_err(err.into());
                 html!{"Error"}
             }
         }
@@ -361,9 +358,9 @@ impl<T: 'static + GraphPoint> Component for GraphEditorCanvas<T> {
 
     #[inline] fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         if !first_render {return}
-        match ctx.props().editor.try_borrow_mut().to_js_result() {
+        match ctx.props().editor.try_borrow_mut().to_app_result() {
             Ok(mut x) => _ = x.init(),
-            Err(e) => report_err(e)
+            Err(e) => report_err(e.into())
         }
     }
 }
@@ -397,31 +394,32 @@ impl Component for Counter {
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        let _: Option<!> = try {
+        let res: AppResult<!> = try {
             let CounterProps{setter, coef, min, ..} = ctx.props();
             match msg {
                 Cmd::Drag(e) => self.value = R64::from(e.movement_y())
-                    .div(-e.target_dyn_into::<Element>().report_none()?.client_height())
+                    .div(-e.target_dyn_into::<Element>().to_app_result()?.client_height())
                     .mul(coef)
-                    .pipe_if(e.shift_key(), |x| x.div(200))
+                    .pipe_if(e.shift_key(), |x| x / 200)
                     .add(self.value)
                     .max(*min),
 
                 Cmd::Focus(e) => {
-                    e.target_dyn_into::<Element>().report_none()?
-                        .set_pointer_capture(e.pointer_id()).report()?;
+                    e.target_dyn_into::<Element>().to_app_result()?
+                        .set_pointer_capture(e.pointer_id())?;
                     self.old_value = *self.value;
                 }
 
                 Cmd::Unfocus(e) => {
-                    e.target_dyn_into::<Element>().report_none()?
-                        .release_pointer_capture(e.pointer_id()).report()?;
+                    e.target_dyn_into::<Element>().to_app_result()?
+                        .release_pointer_capture(e.pointer_id())?;
                     if self.old_value != *self.value {setter.emit(self.value)}
                     self.old_value = f64::NAN;
                 }
             }
             return true
         };
+        res.report();
         false
     }
 

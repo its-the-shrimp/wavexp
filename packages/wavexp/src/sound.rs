@@ -2,9 +2,8 @@ use std::{
     ops::{Add, Sub, Range, Deref, Not, DerefMut, AddAssign, SubAssign},
     fmt::{self, Display, Formatter},
     cmp::Ordering,
-    rc::Rc,
     borrow::Cow,
-    cell::{RefCell, LazyCell},
+    cell::LazyCell,
     iter::once,
     mem::{replace, variant_count, transmute},
     num::NonZeroUsize};
@@ -12,15 +11,10 @@ use js_sys::Math::random;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
-    AudioNode,
-    AudioContext,
-    AudioBuffer,
-    GainNode,
     Path2d,
-    DynamicsCompressorNode,
-    AnalyserNode,
     HtmlCanvasElement,
-    HtmlInputElement};
+    HtmlInputElement,
+    AudioBuffer};
 use yew::{
     html,
     Html,
@@ -28,8 +22,6 @@ use yew::{
     scheduler::Shared,
     TargetCast};
 use wavexp_utils::{
-    JsResult,
-    JsResultUtils,
     R64,
     R32,
     OptionExt,
@@ -38,19 +30,18 @@ use wavexp_utils::{
     VecExt,
     Take,
     default,
-    report_err,
     r32,
     r64,
-    js_try,
     ArrayExt,
     ArrayFrom,
     SliceExt,
-    BoolExt,
-    ResultExt, js_log};
+    AppResult,
+    AppResultUtils,
+    BoolExt};
 use crate::{
     input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas, Counter},
     visual::{GraphEditor, GraphPoint},
-    global::{AppContext, AppEvent, AppAction}};
+    global::{AppContext, AppEvent, AppAction, PlaybackContext}};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -85,26 +76,26 @@ impl Display for Note {
 impl Add<isize> for Note {
     type Output = Note;
     #[inline] fn add(self, rhs: isize) -> Self::Output {
-        self.checked_add(rhs).report_none().unwrap_or(self)
+        self.checked_add(rhs).to_app_result().report().unwrap_or(self)
     }
 }
 
 impl AddAssign<isize> for Note {
     #[inline] fn add_assign(&mut self, rhs: isize) {
-        self.checked_add_assign(rhs).report_false();
+        self.checked_add_assign(rhs).to_app_result().report();
     }
 }
 
 impl Sub<isize> for Note {
     type Output = Note;
     #[inline] fn sub(self, rhs: isize) -> Self::Output {
-        self.checked_sub(rhs).report_none().unwrap_or(self)
+        self.checked_sub(rhs).to_app_result().report().unwrap_or(self)
     }
 }
 
 impl SubAssign<isize> for Note {
     #[inline] fn sub_assign(&mut self, rhs: isize) {
-        self.checked_sub_assign(rhs).report_false();
+        self.checked_sub_assign(rhs).to_app_result().report();
     }
 }
 
@@ -246,8 +237,8 @@ impl GraphPoint for NoteBlock {
 
     type Inner = Beats;
     type Y = Note;
-    /// number of repetitions of the pattern
-    type VisualContext = NonZeroUsize;
+    /// (sound block offset, number of repetitions of the pattern)
+    type VisualContext = (Beats, NonZeroUsize);
 
     #[inline] fn inner(&self) -> &Self::Inner {&self.len}
     #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.len}
@@ -279,9 +270,9 @@ impl GraphPoint for NoteBlock {
         }
     }
 
-    #[inline] fn in_hitbox(&self, point: [R64; 2], _: Self::VisualContext) -> bool {
-        self.value.recip().index() == *point[1] as usize
-            && (self.offset .. self.offset + self.len).contains(&point[0])
+    #[inline] fn in_hitbox(&self, point: [R64; 2], _: &AppContext, _: Self::VisualContext) -> AppResult<bool> {
+        Ok(self.value.recip().index() == *point[1] as usize
+            && (self.offset .. self.offset + self.len).contains(&point[0]))
     }
 
     #[inline] fn fmt_loc(loc: [R64; 2]) -> String {
@@ -290,31 +281,32 @@ impl GraphPoint for NoteBlock {
 
     #[inline] fn on_move(
         editor: &mut GraphEditor<Self>,
-        ctx: &mut AppContext,
-        _: Cursor,
-        _: [R64; 2],
-        point: Option<usize>
-    ) {
+        ctx:    &mut AppContext,
+        _:      Cursor,
+        _:      [R64; 2],
+        point:  Option<usize>
+    ) -> AppResult<()> {
         let last = editor.len() - 1;
-        if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
+        Ok(if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
             ctx.emit_event(AppEvent::RedrawEditorPlane)
-        }
+        })
     }
 
     fn on_click(
-        editor: &mut GraphEditor<Self>,
-        ctx: &mut AppContext,
-        cursor: Cursor,
+        editor:        &mut GraphEditor<Self>,
+        ctx:           &mut AppContext,
+        cursor:        Cursor,
         pressed_at:    impl Deref<Target = [R64; 2]>,
         released_at:   impl Deref<Target = [R64; 2]>,
         old_selection: Option<&[usize]>
-    ) -> Option<AppAction> {
-        if !cursor.meta {return None}
+    ) -> AppResult<Option<AppAction>> {
+        if !cursor.meta {return Ok(None)}
 
         let delta = released_at.sub(&pressed_at);
-        if delta.all(|x| *x == 0) {
-            if !editor.selection().is_empty() || old_selection.map_or(false, |x| !x.is_empty()) {return None}
-
+        Ok(if delta.all(|x| *x == 0) {
+            if !editor.selection().is_empty() || old_selection.map_or(false, |x| !x.is_empty()) {
+                return Ok(None)
+            }
             let [offset, y] = *released_at;
             let value = Note::from_index(y.into()).recip();
             let block_id = editor.add_point(Self{offset, value, len: r64![1.0]});
@@ -334,7 +326,7 @@ impl GraphPoint for NoteBlock {
                 n if n == removed.capacity() => Some(AppAction::RemoveNoteBlocks(removed.into_boxed_slice())),
                 _ => Some(AppAction::StretchNoteBlocks{delta_x, delta_y, removed: removed.into_boxed_slice()})
             }
-        }
+        })
     }
 
     #[inline] fn on_plane_hover(
@@ -343,8 +335,8 @@ impl GraphPoint for NoteBlock {
         cursor: Cursor,
         _: impl Deref<Target = [R64; 2]>,
         first: bool
-    ) {
-        if !first && editor.last_cursor().is_some_and(|x| *x == *cursor) {return}
+    ) -> AppResult<()> {
+        if !first && editor.last_cursor().is_some_and(|x| *x == *cursor) {return Ok(())}
         let [m, a] = match *cursor {
             Buttons{left: false, shift: true, ..} =>
                 [Self::EDITOR_NAME.into(),
@@ -365,7 +357,7 @@ impl GraphPoint for NoteBlock {
                 [Cow::from(Self::EDITOR_NAME) + ": Selecting",
                 "Release to select".into()]
         };
-        ctx.emit_event(AppEvent::SetHint(m, a))
+        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
     #[inline] fn on_point_hover(
@@ -374,8 +366,8 @@ impl GraphPoint for NoteBlock {
         cursor: Cursor,
         point_id: usize,
         first: bool
-    ) {
-        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return}
+    ) -> AppResult<()> {
+        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return Ok(())}
         let m = Self::fmt_loc(unsafe{editor.get_unchecked(point_id)}.loc());
         let [m, a] = match *cursor {
             Buttons{left: false, ..} =>
@@ -385,7 +377,7 @@ impl GraphPoint for NoteBlock {
             Buttons{left: true, meta: true, ..} =>
                 [(m + ": Stretching").into(), "Release to stop".into()],
         };
-        ctx.emit_event(AppEvent::SetHint(m, a))
+        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
     #[inline] fn on_selection_hover(
@@ -393,8 +385,8 @@ impl GraphPoint for NoteBlock {
         ctx: &mut AppContext,
         cursor: Cursor,
         first: bool
-    ) {
-        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return}
+    ) -> AppResult<()> {
+        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return Ok(())}
         let m = {let n = editor.selection().len(); format!("{n} note{}", if n == 1 {""} else {"s"})};
         let [m, a] = match *cursor {
             Buttons{left: false, ..} =>
@@ -404,17 +396,17 @@ impl GraphPoint for NoteBlock {
             Buttons{left: true, meta: true, ..} =>
                 [(m + ": Stretching").into(), "Release to stop".into()],
         };
-        ctx.emit_event(AppEvent::SetHint(m, a))
+        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
     #[inline] fn on_undo(
         editor: &mut GraphEditor<Self>,
-        ctx: &mut AppContext,
+        ctx:    &mut AppContext,
         action: &AppAction
-    ) {
-        match action {
+    ) -> AppResult<()> {
+        Ok(match action {
             AppAction::AddNoteBlock{block_id, ..} => {
-                editor.remove_points(once(*block_id), drop);
+                editor.remove_points(once(*block_id), drop)?;
                 ctx.emit_event(AppEvent::RedrawEditorPlane)
             }
 
@@ -433,48 +425,48 @@ impl GraphPoint for NoteBlock {
                 for &(id, b) in removed.iter() {
                     unsafe{editor.insert_point(id, b)}
                 }
-                editor.expand_selection(removed.iter().map(|(id, _)| *id));
+                editor.expand_selection(removed.iter().map(|(id, _)| *id))?;
             }
 
             _ => (),
-        }
+        })
     }
 
     #[inline] fn on_redo(
         editor: &mut GraphEditor<Self>,
         ctx: &mut AppContext,
         action: &AppAction
-    ) {
-        match action {
+    ) -> AppResult<()> {
+        Ok(match action {
             &AppAction::AddNoteBlock{offset, value, block_id} => {
                 unsafe{editor.insert_point(block_id, NoteBlock{offset, value, len: r64![1.0]})};
                 ctx.emit_event(AppEvent::RedrawEditorPlane)
             }
 
             AppAction::RemoveNoteBlocks(blocks) => {
-                editor.remove_points(blocks.iter().map(|(id, _)| *id), drop);
+                editor.remove_points(blocks.iter().map(|(id, _)| *id), drop)?;
                 ctx.emit_event(AppEvent::RedrawEditorPlane)
             }
 
             &AppAction::StretchNoteBlocks{delta_x, delta_y, ref removed} => {
-                if editor.remove_points(removed.iter().map(|(id, _)| *id), drop).is_none() {return}
+                editor.remove_points(removed.iter().map(|(id, _)| *id), drop)?;
                 for mut b in editor.iter_selection_mut() {
                     *b.inner() += delta_x;
                     *b.y() -= delta_y;
                 }
             }
             _ => (),
-        }
+        })
     }
 
     fn on_redraw(
-        editor:      &mut GraphEditor<Self>,
-        ctx:         &mut AppContext,
-        canvas_size: &[R64; 2],
-        solid:       &Path2d,
-        _:           &Path2d,
-        n_reps:      Self::VisualContext
-    ) {
+        editor:                &mut GraphEditor<Self>,
+        ctx:                   &mut AppContext,
+        canvas_size:           &[R64; 2],
+        solid:                 &Path2d,
+        _:                     &Path2d,
+        (sb_offset, n_reps):   Self::VisualContext
+    ) -> AppResult<()> {
         let step = &canvas_size.div(&editor.scale());
         let offset = &R64::array_from(editor.offset());
         for block in editor.iter() {
@@ -482,15 +474,15 @@ impl GraphPoint for NoteBlock {
             solid.rect(*x, *y, *block.len * *step[0], *step[1]);
         }
 
-        let play_since = ctx.play_since();
+        let pctx = ctx.playback_ctx();
         let total_len = editor.last().map_or_default(|x| x.offset + x.len);
-        let x = (ctx.now() - play_since).secs_to_beats(ctx.bps());
-        if x < total_len * n_reps {
+        let x = (pctx.now - pctx.started_at).secs_to_beats(pctx.bps) + sb_offset;
+        Ok(if x < total_len * n_reps {
             editor.force_redraw();
             let x = R64::new_or(x, *x % *total_len) * step[0] - offset[0];
             solid.move_to(*x, 0.0);
             solid.line_to(*x, *canvas_size[1]);
-        }
+        })
     }
 }
 
@@ -521,8 +513,8 @@ impl GraphPoint for CustomBlock {
 
     type Inner = ();
     type Y = Note;
-    /// (number of repetitions of the pattern, audio duration)
-    type VisualContext = (NonZeroUsize, R64);
+    /// (sound block offset, number of repetitions of the pattern, audio duration)
+    type VisualContext = (Beats, NonZeroUsize, Beats);
 
     #[inline] fn inner(&self) -> &Self::Inner {&()}
     #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {unsafe{transmute(self)}}
@@ -536,15 +528,18 @@ impl GraphPoint for CustomBlock {
         match point {
             Ok(p) => {
                 p.offset += delta[0];
-                p.pitch += delta[1].into();
+                p.pitch -= delta[1].into();
             }
-            Err(p) => *p = p.add(&delta)
+            Err(p) => {
+                p[0] += delta[0];
+                p[1] -= delta[1];
+            }
         }
     }
 
-    #[inline] fn in_hitbox(&self, point: [R64; 2], (_, len): Self::VisualContext) -> bool {
-        self.pitch.recip().index() == *point[1] as usize
-            && (self.offset .. self.offset + len).contains(&point[0])
+    #[inline] fn in_hitbox(&self, point: [R64; 2], _: &AppContext, (.., len): Self::VisualContext) -> AppResult<bool> {
+        Ok(self.pitch.recip().index() == *point[1] as usize
+            && (self.offset .. self.offset + len).contains(&point[0]))
     }
 
     #[inline] fn fmt_loc(loc: [R64; 2]) -> String {
@@ -557,11 +552,11 @@ impl GraphPoint for CustomBlock {
         _: Cursor,
         _: [R64; 2],
         point: Option<usize>
-    ) {
+    ) -> AppResult<()> {
         let last = editor.len() - 1;
-        if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
+        Ok(if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
             ctx.emit_event(AppEvent::RedrawEditorPlane)
-        }
+        })
     }
 
     fn on_click(
@@ -571,13 +566,14 @@ impl GraphPoint for CustomBlock {
         pressed_at:    impl Deref<Target = [R64; 2]>,
         released_at:   impl Deref<Target = [R64; 2]>,
         old_selection: Option<&[usize]>
-    ) -> Option<AppAction> {
-        if !cursor.meta {return None}
+    ) -> AppResult<Option<AppAction>> {
+        if !cursor.meta {return Ok(None)}
 
         let delta = released_at.sub(&pressed_at);
-        if delta.all(|x| *x == 0) {
-            if !editor.selection().is_empty() || old_selection.map_or(false, |x| !x.is_empty()) {return None}
-
+        Ok(if delta.all(|x| *x == 0) {
+            if !editor.selection().is_empty() || old_selection.map_or(false, |x| !x.is_empty()) {
+                return Ok(None)
+            }
             let [offset, y] = *released_at;
             let block = Self{offset, pitch: Note::from_index(y.into()).recip()};
             let block_id = editor.add_point(block);
@@ -593,7 +589,7 @@ impl GraphPoint for CustomBlock {
             });
             editor.clear_selection_area();
             Some(AppAction::RemoveCustomBlocks(removed.into_boxed_slice()))
-        }
+        })
     }
 
     #[inline] fn on_plane_hover(
@@ -602,8 +598,8 @@ impl GraphPoint for CustomBlock {
         cursor: Cursor,
         _: impl Deref<Target = [R64; 2]>,
         first: bool
-    ) {
-        if !first && editor.last_cursor().is_some_and(|x| *x == *cursor) {return}
+    ) -> AppResult<()> {
+        if !first && editor.last_cursor().is_some_and(|x| *x == *cursor) {return Ok(())}
         let m = Self::EDITOR_NAME.into();
         let [m, a] = match *cursor {
             Buttons{left: false, shift: true, ..} =>
@@ -619,17 +615,17 @@ impl GraphPoint for CustomBlock {
             Buttons{left: true, meta: true, ..} =>
                 [m + ": Removing", "Release to remove blocks".into()]
         };
-        ctx.emit_event(AppEvent::SetHint(m, a))
+        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
     #[inline] fn on_point_hover(
-        editor: &mut GraphEditor<Self>,
-        ctx: &mut AppContext,
-        cursor: Cursor,
+        editor:   &mut GraphEditor<Self>,
+        ctx:      &mut AppContext,
+        cursor:   Cursor,
         point_id: usize,
-        first: bool
-    ) {
-        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return}
+        first:    bool
+    ) -> AppResult<()> {
+        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return Ok(())}
         let m = Self::fmt_loc(unsafe{editor.get_unchecked(point_id)}.loc()).into();
         let [m, a] = match *cursor {
             Buttons{left: false, ..} =>
@@ -639,16 +635,16 @@ impl GraphPoint for CustomBlock {
             Buttons{left: true, meta: true, ..} =>
                 [m + ": Removing", "Release to remove".into()],
         };
-        ctx.emit_event(AppEvent::SetHint(m, a))
+        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
     #[inline] fn on_selection_hover(
         editor: &mut GraphEditor<Self>,
-        ctx: &mut AppContext,
+        ctx:    &mut AppContext,
         cursor: Cursor,
-        first: bool
-    ) {
-        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return}
+        first:  bool
+    ) -> AppResult<()> {
+        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return Ok(())}
         let n = editor.selection().len();
         let m = format!("{n} note{}", if n == 1 {""} else {"s"}).into();
         let [m, a] = match *cursor {
@@ -659,17 +655,17 @@ impl GraphPoint for CustomBlock {
             Buttons{left: true, meta: true, ..} =>
                 [m + ": Removing", "Release to remove".into()],
         };
-        ctx.emit_event(AppEvent::SetHint(m, a))
+        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
     #[inline] fn on_undo(
         editor: &mut GraphEditor<Self>,
-        ctx: &mut AppContext,
+        ctx:    &mut AppContext,
         action: &AppAction
-    ) {
-        match action {
+    ) -> AppResult<()> {
+        Ok(match action {
             &AppAction::AddCustomBlock(at, _) => {
-                editor.remove_points(once(at), drop);
+                editor.remove_points(once(at), drop)?;
                 ctx.emit_event(AppEvent::RedrawEditorPlane)
             }
 
@@ -681,37 +677,38 @@ impl GraphPoint for CustomBlock {
             }
 
             _ => (),
-        }
+        })
     }
 
     #[inline] fn on_redo(
         editor: &mut GraphEditor<Self>,
-        ctx: &mut AppContext,
+        ctx:    &mut AppContext,
         action: &AppAction
-    ) {
-        match action {
+    ) -> AppResult<()> {
+        Ok(match action {
             &AppAction::AddCustomBlock(at, block) => {
                 unsafe{editor.insert_point(at, block)};
                 ctx.emit_event(AppEvent::RedrawEditorPlane)
             }
 
             AppAction::RemoveCustomBlocks(removed) => {
-                editor.remove_points(removed.iter().map(|(id, _)| *id), drop);
+                editor.remove_points(removed.iter().map(|(id, _)| *id), drop)?;
                 ctx.emit_event(AppEvent::RedrawEditorPlane)
             }
 
             _ => (),
-        }
+        })
     }
 
     fn on_redraw(
         editor:        &mut GraphEditor<Self>,
+        // TODO: define a view for `AppContext` to restrict modifying some parts of it
         ctx:           &mut AppContext,
         canvas_size:   &[R64; 2],
         solid:         &Path2d,
         _:             &Path2d,
-        (n_reps, len): Self::VisualContext
-    ) {
+        (sb_offset, n_reps, len): Self::VisualContext
+    ) -> AppResult<()> {
         let step = &canvas_size.div(&editor.scale());
         let offset = &R64::array_from(editor.offset());
         for block in editor.iter() {
@@ -719,15 +716,15 @@ impl GraphPoint for CustomBlock {
             solid.rect(*x, *y, *len * *step[0], *step[1]);
         }
 
-        let play_since = ctx.play_since();
+        let pctx = ctx.playback_ctx();
         let total_len = editor.last().map_or_default(|x| x.offset + len);
-        let x = (ctx.now() - play_since).secs_to_beats(ctx.bps());
-        if x < total_len * n_reps {
+        let x = (pctx.now - pctx.started_at).secs_to_beats(pctx.bps) - sb_offset;
+        Ok(if x < total_len * n_reps {
             editor.force_redraw();
             let x = R64::new_or(x, *x % *total_len) * step[0] - offset[0];
             solid.move_to(*x, 0.0);
             solid.line_to(*x, *canvas_size[1]);
-        }
+        })
     }
 }
 
@@ -746,38 +743,37 @@ pub enum Sound {
 }
 
 impl Sound {
-    pub const TYPES: [SoundType; variant_count::<SoundType>()] = [
+    pub const TYPES: [SoundType; variant_count::<Self>() - 1 /* None */] = [
         SoundType::Note,
         SoundType::Noise,
         SoundType::Custom
     ];
 
-    #[inline] pub fn new(sound_type: SoundType, ctx: &AudioContext) -> Option<Self> {
-        Some(match sound_type {
+    #[inline] pub fn new(sound_type: SoundType, ctx: &PlaybackContext) -> AppResult<Self> {
+        Ok(match sound_type {
             SoundType::Note =>
                 Self::Note{pattern: default(),
                     volume: r32![1.0], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2],
                     rep_count: NonZeroUsize::MIN},
 
             SoundType::Noise => {
-                let len = ctx.sample_rate();
-                let mut src_buf = vec![0.0f32; len as usize];
-                src_buf.fill_with(|| random() as f32 * 2.0 - 1.0);
-                let src = ctx.create_buffer(2, len as u32, len).report()?;
-                src.copy_to_channel(&src_buf, 0).report()?;
-                src.copy_to_channel(&src_buf, 1).report()?;
+                let mut buf = vec![0.0f32; AppContext::SAMPLE_RATE as usize];
+                buf.fill_with(|| random() as f32 * 2.0 - 1.0);
+                let src = ctx.audio_ctx
+                    .create_buffer(AppContext::CHANNEL_COUNT, AppContext::SAMPLE_RATE, AppContext::SAMPLE_RATE as f32)?;
+                for i in 0 .. AppContext::CHANNEL_COUNT as i32 {
+                    src.copy_to_channel(&buf, i)?;
+                }
                 Self::Noise{pattern: default(), src,
                     volume: r32![0.2], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2],
                     rep_count: NonZeroUsize::MIN}
             }
 
-            SoundType::Custom => {
-                let sample_rate = ctx.sample_rate();
-                let src = ctx.create_buffer(2, 1, sample_rate).report()?;
-                Self::Custom{pattern: default(), src,
+            SoundType::Custom => 
+                Self::Custom{pattern: default(),
+                    src: ctx.audio_ctx.create_buffer(AppContext::CHANNEL_COUNT, 1, AppContext::SAMPLE_RATE as f32)?,
                     volume: r32![1.0], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.0],
                     rep_count: NonZeroUsize::MIN, speed: r32![1.0]}
-            }
         })
     }
 
@@ -792,172 +788,163 @@ impl Sound {
 
     /// called before starting to play the sounds to reset their state and allow them to schedule
     /// their starting events
-    pub fn reset(&mut self, _: &AppContext, self_id: usize, self_offset: Beats, mut scheduler: impl FnMut(SoundEvent))
-    -> Option<()> {
-        Some(match *self {
+    pub fn reset(&mut self, pctx: &PlaybackContext, self_id: usize, self_offset: Beats, mut scheduler: impl FnMut(SoundEvent))
+    -> AppResult<()> {
+        Ok(match *self {
             Self::None => (),
 
-            Self::Note{ref pattern, rep_count, ..} | Self::Noise{ref pattern, rep_count, ..} => {
-                let p = pattern.try_borrow().report_fmt()?;
-                let Some(base) = p.first().map(|x| x.offset + self_offset) else {return Some(())};
-                let len = self.len();
+            Self::Note{ref pattern, rep_count, ..} => {
+                let pat = pattern.try_borrow()?;
+                let Some(when) = pat.first().map(|x| x.offset + self_offset) else {return Ok(())};
+                let vol = pctx.audio_ctx.create_gain()?;
+                vol.connect_with_audio_node(&pctx.gain)?;
+
+                let len = {let x = pat.last().to_app_result()?; x.offset + x.len + when};
                 for i in 0 .. rep_count.get() {
-                    scheduler(SoundEvent::BlockStart{id: self_id, state: 0, when: base + len * i})
+                    scheduler(SoundEvent::Start{id: self_id, when: when + len * i, state: 0})
                 }
             }
 
-            Self::Custom{ref pattern, rep_count, ..} => {
-                let p = pattern.try_borrow().report_fmt()?;
-                let Some(base) = p.first().map(|x| x.offset + self_offset) else {return Some(())};
-                let len = self.len();
+            Self::Noise{ref pattern, rep_count, ..} => {
+                let pat = pattern.try_borrow()?;
+                let Some(when) = pat.first().map(|x| x.offset + self_offset) else {return Ok(())};
+                let len = {let x = pat.last().to_app_result()?; x.offset + x.len + when};
                 for i in 0 .. rep_count.get() {
-                    scheduler(SoundEvent::BlockStart{id: self_id, state: 0, when: base + len * i})
+                    scheduler(SoundEvent::Start{id: self_id, when: when + len * i, state: 0})
+                }
+            }
+
+            Self::Custom{ref pattern, ref src, rep_count, ..} => {
+                let pat = pattern.try_borrow()?;
+                let Some(when) = pat.first().map(|x| x.offset + self_offset) else {return Ok(())};
+                let len = when
+                    + pat.last().to_app_result()?.offset
+                    + unsafe{Secs::new_unchecked(src.duration())}.secs_to_beats(pctx.bps);
+                for i in 0 .. rep_count.get() {
+                    scheduler(SoundEvent::Start{id: self_id, when: when + len * i, state: 0})
                 }
             }
         })
     }
 
-    pub fn poll(&mut self, plug: &AudioNode, ctx: &AppContext, event: SoundEvent, mut scheduler: impl FnMut(SoundEvent))
-    -> Option<()> {
-        Some(match *self {
+    // TODO: check the difference between `when` + `play_since` and `now` to see if there's any
+    // error between them
+    // TODO: fix screwed up translation from beats to seconds somewhere here
+    pub fn poll(&mut self, ctx: &PlaybackContext, event: SoundEvent, mut scheduler: impl FnMut(SoundEvent))
+    -> AppResult<()> {
+        Ok(match *self {
             Self::None => (),
 
-            Self::Note{volume, ref pattern, attack, decay, mut sustain, release, ..} => match event {
-                SoundEvent::BlockStart{id, when, mut state} => {
-                    let pattern = pattern.try_borrow().report_fmt()?;
-                    let cur = unsafe{pattern.get_unchecked(state)};
-                    let block_core = ctx.audio_ctx().create_oscillator().report()?;
-                    let block = ctx.audio_ctx().create_gain().report()?;
-                    block_core.frequency().set_value(*cur.value.freq());
-                    block_core.start().report()?;
-                    block_core.connect_with_audio_node(&block).report()?
-                        .connect_with_audio_node(plug).report()?;
+            Self::Note{volume, ref pattern, attack, decay, mut sustain, release, ..} => {
+                let SoundEvent::Start{id, when, mut state} = event;
+                let pattern = pattern.try_borrow()?;
+                let cur = unsafe{pattern.get_unchecked(state)};
+                let block = ctx.audio_ctx.create_gain()?;
+                let gain = block.gain();
+                let mut at = ctx.now;
+                gain.set_value_at_time(f32::MIN_POSITIVE, *at)?;
+                at += attack.to_secs(ctx.bps);
+                gain.linear_ramp_to_value_at_time(*volume, *at)?;
+                at += decay.to_secs(ctx.bps);
+                sustain *= volume;
+                gain.linear_ramp_to_value_at_time(*sustain, *at)?;
+                at = ctx.now + cur.len.to_secs(ctx.bps);
+                gain.set_value_at_time(*sustain, *at)?;
+                at += release.to_secs(ctx.bps);
+                gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at)?;
 
-                    let now = ctx.now();
-                    let mut at = now;
-                    let gain = block.gain();
-                    let bps = ctx.bps();
-                    gain.set_value_at_time(f32::MIN_POSITIVE, *at).report()?;
-                    at += attack.to_secs(bps);
-                    gain.linear_ramp_to_value_at_time(*volume, *at).report()?;
-                    at += decay.to_secs(bps);
-                    sustain *= volume;
-                    gain.linear_ramp_to_value_at_time(*sustain, *at).report()?;
-                    at = now + cur.len.to_secs(bps);
-                    gain.set_value_at_time(*sustain, *at).report()?;
-                    at += release.to_secs(bps);
-                    gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at).report()?;
+                let block_core = ctx.audio_ctx.create_oscillator()?;
+                block_core.frequency().set_value(*cur.value.freq());
+                block_core.start()?;
+                block_core.connect_with_audio_node(&block)?
+                    .connect_with_audio_node(&ctx.gain)?;
 
-                    scheduler(SoundEvent::BlockEnd{id, when: when + cur.len + *release + r64![0.1].secs_to_beats(bps), block});
-
-                    state += 1;
-                    if let Some(next) = pattern.get(state) {
-                        scheduler(SoundEvent::BlockStart{id, when: when + next.offset - cur.offset, state})
-                    }
+                state += 1;
+                if let Some(next) = pattern.get(state) {
+                    scheduler(SoundEvent::Start{id, when: when + next.offset - cur.offset, state})
                 }
-
-                SoundEvent::BlockEnd{block, ..} => block.disconnect().report()?,
             }
 
-            Self::Noise{ref pattern, ref src, volume, attack, decay, mut sustain, release, ..} => match event {
-                SoundEvent::BlockStart{id, when, mut state} => {
-                    let pattern = pattern.try_borrow().report_fmt()?;
-                    let cur = unsafe{pattern.get_unchecked(state)};
-                    let block_core = ctx.audio_ctx().create_buffer_source().report()?;
-                    let block = ctx.audio_ctx().create_gain().report()?;
-                    block_core.set_buffer(Some(src));
-                    block_core.set_loop(true);
-                    block_core.start().report()?;
-                    block_core.connect_with_audio_node(&block).report()?
-                        .connect_with_audio_node(plug).report()?;
-                    js_log!("eee");
+            Self::Noise{ref pattern, ref src, volume, attack, decay, mut sustain, release, ..} => {
+                let SoundEvent::Start{id, when, mut state} = event;
+                let pattern = pattern.try_borrow()?;
+                let cur = unsafe{pattern.get_unchecked(state)};
+                let block = ctx.audio_ctx.create_gain()?;
+                let gain = block.gain();
+                let mut at = ctx.now;
+                gain.set_value(0.0);
+                gain.set_value_at_time(0.0, *at)?;
+                at += attack.to_secs(ctx.bps);
+                gain.linear_ramp_to_value_at_time(*volume, *at)?;
+                at += decay.to_secs(ctx.bps);
+                sustain *= volume;
+                gain.linear_ramp_to_value_at_time(*sustain, *at)?;
+                at = ctx.now + cur.len.to_secs(ctx.bps);
+                gain.set_value_at_time(*sustain, *at)?;
+                at += release.to_secs(ctx.bps);
+                gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at)?;
 
-                    let bps = ctx.bps();
-                    let now = when.to_secs(bps) + ctx.play_since();
-                    let mut at = now;
-                    let gain = block.gain();
-                    gain.set_value(0.0);
-                    gain.set_value_at_time(0.0, *at).report()?;
-                    at += attack.to_secs(bps);
-                    gain.linear_ramp_to_value_at_time(*volume, *at).report()?;
-                    at += decay.to_secs(bps);
-                    sustain *= volume;
-                    gain.linear_ramp_to_value_at_time(*sustain, *at).report()?;
-                    at = now + cur.len.to_secs(bps);
-                    gain.set_value_at_time(*sustain, *at).report()?;
-                    at += release.to_secs(bps);
-                    gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at).report()?;
+                let block_core = ctx.audio_ctx.create_buffer_source()?;
+                block_core.set_buffer(Some(src));
+                block_core.set_loop(true);
+                block_core.connect_with_audio_node(&block)?
+                    .connect_with_audio_node(&ctx.gain)?;
+                block_core.start()?;
 
-                    scheduler(SoundEvent::BlockEnd{id, when: when + cur.len + *release + r64![0.1].secs_to_beats(bps), block});
-
-                    state += 1;
-                    if let Some(next) = pattern.get(state) {
-                        scheduler(SoundEvent::BlockStart{id, when: when + next.offset - cur.offset, state})
-                    }
+                state += 1;
+                if let Some(next) = pattern.get(state) {
+                    scheduler(SoundEvent::Start{id, state, when: when + next.offset - cur.offset})
                 }
-
-                SoundEvent::BlockEnd{block, ..} => block.disconnect().report()?,
             }
 
-            Self::Custom{ref pattern, ref src, volume, attack, decay, mut sustain, release, speed, ..} => match event {
-                SoundEvent::BlockStart{id, when, mut state} => {
-                    let bps = ctx.bps();
-                    let now = ctx.now();
-                    let len = Secs::try_from(src.duration()).report_fmt()? / speed;
-                    let pattern = pattern.try_borrow().report_fmt()?;
-                    let audio_ctx = ctx.audio_ctx();
-                    let block_core = audio_ctx.create_constant_source().report()?;
-                    let shaper = audio_ctx.create_wave_shaper().report()?;
-                    let block = ctx.audio_ctx().create_gain().report()?;
-                    shaper.set_curve(Some(&mut src.get_channel_data(0).report()?));
-                    block_core.connect_with_audio_node(&shaper).report()?
-                        .connect_with_audio_node(&block).report()?
-                        .connect_with_audio_node(plug).report()?;
+            Self::Custom{ref pattern, ref src, volume, attack, decay, mut sustain, release, speed, ..} => {
+                let SoundEvent::Start{id, when, mut state} = event;
+                let pattern = pattern.try_borrow()?;
+                let cur = unsafe{pattern.get_unchecked(state)};
+                let len = Secs::try_from(src.duration())? / speed;
+                let block = ctx.audio_ctx.create_gain()?;
+                let gain = block.gain();
+                let mut at = ctx.now;
+                gain.set_value(0.0);
+                gain.set_value_at_time(0.0, *at)?;
+                at += attack.to_secs(ctx.bps);
+                gain.linear_ramp_to_value_at_time(*volume, *at)?;
+                at += decay.to_secs(ctx.bps);
+                sustain *= volume;
+                gain.linear_ramp_to_value_at_time(*sustain, *at)?;
+                at = ctx.now + len;
+                gain.set_value_at_time(*sustain, *at)?;
+                at += release.to_secs(ctx.bps);
+                gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at)?;
 
-                    let mut at = now;
-                    let gain = block.gain();
-                    let offset = block_core.offset();
-                    gain.set_value(0.0);
-                    offset.set_value(-1.0);
-                    gain.set_value_at_time(0.0, *at).report()?;
-                    offset.set_value_at_time(-1.0, *at).report()?;
-                    at += attack.to_secs(bps);
-                    gain.linear_ramp_to_value_at_time(*volume, *at).report()?;
-                    at += decay.to_secs(bps);
-                    sustain *= volume;
-                    gain.linear_ramp_to_value_at_time(*sustain, *at).report()?;
-                    at = now + len;
-                    gain.set_value_at_time(*sustain, *at).report()?;
-                    offset.linear_ramp_to_value_at_time(1.0, *at).report()?;
-                    at += release.to_secs(bps);
-                    gain.linear_ramp_to_value_at_time(f32::MIN_POSITIVE, *at).report()?;
-                    block_core.start().report()?;
+                let block_core = ctx.audio_ctx.create_buffer_source()?;
+                block_core.set_buffer(Some(src));
+                block_core.playback_rate().set_value(*speed);
+                block_core.connect_with_audio_node(&block)?
+                    .connect_with_audio_node(&ctx.gain)?;
+                block_core.start()?;
 
-                    scheduler(SoundEvent::BlockEnd{id, when: when + len.secs_to_beats(bps) + *release + 1, block});
-
-                    state += 1;
-                    if let Some(next) = pattern.get(state) {
-                        scheduler(SoundEvent::BlockStart{id,
-                            when: when + next.offset - unsafe{pattern.get_unchecked(state - 1)}.offset, state})
-                    }
+                state += 1;
+                if let Some(next) = pattern.get(state) {
+                    scheduler(SoundEvent::Start{id, state, when: when + next.offset - cur.offset})
                 }
-
-                SoundEvent::BlockEnd{block, ..} => block.disconnect().report()?,
             }
         })
     }
 
-    #[inline] pub fn len(&self) -> Beats {
-        match self {
+    #[inline] pub fn len(&self, pctx: &PlaybackContext) -> AppResult<Beats> {
+        Ok(match self {
             Self::None => r64![1.0],
 
             Self::Note {pattern, ..} |
-            Self::Noise{pattern, ..} => pattern.try_borrow().report_fmt()
-                .map_or_default(|p| p.last().map_or_default(|x| x.offset + x.len)),
+            Self::Noise{pattern, ..} => pattern.try_borrow()?
+                .last().map_or_default(|x| x.offset + x.len),
 
-            Self::Custom{pattern, src, speed, ..} => pattern.try_borrow().report_fmt()
-                .map_or_default(|p| p.last().map_or_default(|x| x.offset + src.duration() / **speed as f64))
-        }
+            Self::Custom{pattern, src, speed, ..} => match pattern.try_borrow()?.last() {
+                Some(x) => x.offset + R64::try_from(src.duration())?.secs_to_beats(pctx.bps) / speed,
+                None => default()
+            }
+        })
     }
     
     #[inline] pub fn rep_count(&self) -> NonZeroUsize {
@@ -978,6 +965,7 @@ impl Sound {
         }
     }
 
+    // TODO: fix display of values in counters
     pub fn params(&self, ctx: &AppContext, setter: Callback<AppEvent>) -> Html {
         match self {
             Self::None => html!{<div class="horizontal-menu">
@@ -1073,18 +1061,18 @@ impl Sound {
         }
     }
 
-    pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> Option<()> {
-        Some(match self {
+    pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext, offset: Beats) -> AppResult<()> {
+        Ok(match self {
             Sound::None => match event {
                 &AppEvent::SetBlockType(ty) => {
-                    *self = Self::new(ty, ctx.audio_ctx())?;
+                    *self = Self::new(ty, ctx.playback_ctx())?;
                     ctx.register_action(AppAction::SetBlockType(ty));
                     ctx.emit_event(AppEvent::RedrawEditorPlane)
                 }
 
                 AppEvent::Redo(actions) => for action in actions.iter() {
                     if let &AppAction::SetBlockType(ty) = action {
-                        *self = Self::new(ty, ctx.audio_ctx())?;
+                        *self = Self::new(ty, ctx.playback_ctx())?;
                         ctx.emit_event(AppEvent::RedrawEditorPlane)
                     }
                 }
@@ -1106,8 +1094,8 @@ impl Sound {
 
                 e => {
                     let pattern = if ctx.selected_tab() == 2 {
-                        let mut p = pattern.try_borrow_mut().report_fmt()?;
-                        p.handle_event(e, ctx, || *rep_count)?;
+                        let mut p = pattern.try_borrow_mut()?;
+                        p.handle_event(e, ctx, || (offset, *rep_count))?;
                         Some(p)
                     } else {None};
 
@@ -1169,19 +1157,15 @@ impl Sound {
                 }
 
                 AppEvent::AudioUploaded(e) => {
-                    let target: HtmlInputElement = e.target_dyn_into().report_none()?;
+                    let target: HtmlInputElement = e.target_dyn_into().to_app_result()?;
                     let emitter = ctx.event_emitter().clone();
-                    let ctx = Rc::clone(ctx.audio_ctx());
+                    let ctx = ctx.playback_ctx().audio_ctx.clone();
 
                     spawn_local(async move {
-                        let _: Option<!> = try {
-                            let file = target.files().report_none()?.get(0).report_none()?;
-                            let buf = JsFuture::from(file.array_buffer())
-                                .await.report()?
-                                .dyn_into().report()?;
-                            let buf = JsFuture::from(ctx.decode_audio_data(&buf).report()?)
-                                .await.report()?
-                                .dyn_into().report()?;
+                        let _: AppResult<!> = try {
+                            let file = target.files().to_app_result()?.get(0).to_app_result()?;
+                            let raw = JsFuture::from(file.array_buffer()).await?.dyn_into()?;
+                            let buf = JsFuture::from(ctx.decode_audio_data(&raw)?).await?.dyn_into()?;
                             emitter.emit(AppEvent::AudioProcessed(buf));
                             return
                         };
@@ -1195,9 +1179,9 @@ impl Sound {
 
                 e => {
                     if ctx.selected_tab() == 2 {
-                        pattern.try_borrow_mut().report_fmt()?
+                        pattern.try_borrow_mut()?
                             .handle_event(e, ctx, ||
-                                (*rep_count, R64::new(src.duration() / **speed as f64).report_none().unwrap_or_default()))?;
+                                (offset, *rep_count, unsafe{R64::new_unchecked(src.duration())} / *speed))?;
                     }
 
                     match e {
@@ -1319,10 +1303,10 @@ impl GraphPoint for SoundBlock {
         }
     }
 
-    #[inline] fn in_hitbox(&self, point: [R64; 2], _: Self::VisualContext) -> bool {
-        self.layer == *point[1] as i32
-            && (self.offset .. self.offset + self.sound.len().max(r64![0.1]))
-                .contains(&point[0])
+    #[inline] fn in_hitbox(&self, point: [R64; 2], ctx: &AppContext, _: Self::VisualContext) -> AppResult<bool> {
+        Ok(self.layer == *point[1] as i32
+            && (self.offset .. self.offset + self.sound.len(ctx.playback_ctx())?.max(r64![0.1]))
+                .contains(&point[0]))
     }
 
     #[inline] fn fmt_loc(loc: [R64; 2]) -> String {
@@ -1336,9 +1320,9 @@ impl GraphPoint for SoundBlock {
         pressed_at:    impl Deref<Target = [R64; 2]>,
         released_at:   impl Deref<Target = [R64; 2]>,
         old_selection: Option<&[usize]>
-    ) -> Option<AppAction> {
+    ) -> AppResult<Option<AppAction>> {
         let sel_is_empty = LazyCell::new(|| editor.selection().is_empty());
-        if cursor.meta && *sel_is_empty && old_selection.map_or(true, |x| x.is_empty()) && *pressed_at == *released_at {
+        Ok(if cursor.meta && *sel_is_empty && old_selection.map_or(true, |x| x.is_empty()) && *pressed_at == *released_at {
             let [offset, y] = *released_at;
             let layer = y.into();
             let block_id = editor.add_point(SoundBlock{sound: default(), layer, offset});
@@ -1346,7 +1330,7 @@ impl GraphPoint for SoundBlock {
         } else {
             ctx.emit_event(AppEvent::Select(sel_is_empty.not().then_some(0)));
             None
-        }
+        })
     }
 
     #[inline] fn on_plane_hover(
@@ -1355,8 +1339,8 @@ impl GraphPoint for SoundBlock {
         cursor: Cursor,
         _: impl Deref<Target = [R64; 2]>,
         first: bool
-    ) {
-        if !first && Some(&*cursor) == editor.last_cursor().as_deref() {return}
+    ) -> AppResult<()> {
+        if !first && Some(&*cursor) == editor.last_cursor().as_deref() {return Ok(())}
         let [m, a] = match *cursor {
             Buttons{left: false, shift: true, ..} =>
                 [Self::EDITOR_NAME.into(),
@@ -1377,7 +1361,7 @@ impl GraphPoint for SoundBlock {
                 [Cow::from(Self::EDITOR_NAME) + ": Selecting",
                 "Release to select".into()]
         };
-        ctx.emit_event(AppEvent::SetHint(m, a))
+        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
     #[inline] fn on_point_hover(
@@ -1386,14 +1370,14 @@ impl GraphPoint for SoundBlock {
         cursor: Cursor,
         point_id: usize,
         first: bool
-    ) {
+    ) -> AppResult<()> {
         let m = || unsafe{editor.get_unchecked(point_id)}.desc().into();
         let [m, a] = if cursor.left {
             [m() + ": moving", "Release to stop".into()]
         } else if first {
             [m(), "Hold & drag to move".into()]
-        } else {return};
-        ctx.emit_event(AppEvent::SetHint(m, a))
+        } else {return Ok(())};
+        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
     #[inline] fn on_selection_hover(
@@ -1401,35 +1385,35 @@ impl GraphPoint for SoundBlock {
         ctx: &mut AppContext,
         cursor: Cursor,
         first: bool
-    ) {
-        if !first {return}
+    ) -> AppResult<()> {
+        if !first {return Ok(())}
         let m = editor.selection().len().pipe(|l| format!("{l} block{}", if l == 1 {""} else {"s"}));
         let [m, a] = if cursor.left {
             [(m + ": moving").into(), "Release to stop".into()]
         } else {
             [m.into(), "Hold & drag to move".into()]
         };
-        ctx.emit_event(AppEvent::SetHint(m, a))
+        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
     #[inline] fn on_undo(
         editor: &mut GraphEditor<Self>,
         _: &mut AppContext,
         action: &AppAction
-    ) {
+    ) -> AppResult<()> {
         if let &AppAction::AddSoundBlock{block_id, ..} = action {
-            editor.remove_points(once(block_id), drop);
-        }
+            editor.remove_points(once(block_id), drop)
+        } else {Ok(())}
     }
 
     #[inline] fn on_redo(
         editor: &mut GraphEditor<Self>,
         _: &mut AppContext,
         action: &AppAction
-    ) {
-        if let &AppAction::AddSoundBlock{offset, layer, block_id} = action {
+    ) -> AppResult<()> {
+        Ok(if let &AppAction::AddSoundBlock{offset, layer, block_id} = action {
             unsafe{editor.insert_point(block_id, SoundBlock{sound: default(), layer, offset})}
-        }
+        })
     }
 
     fn on_redraw(
@@ -1439,13 +1423,13 @@ impl GraphPoint for SoundBlock {
         solid:       &Path2d,
         dotted:      &Path2d,
         _:           Self::VisualContext
-    ) {
+    ) -> AppResult<()> {
         let step = &canvas_size.div(&editor.scale());
         let offset = &R64::array_from(editor.offset());
         for block in editor.iter() {
             let [mut x, y] = block.loc().mul(step).sub(offset).map(|x| *x);
             let n_reps = block.rep_count().get();
-            let w = *block.len() * *step[0];
+            let w = *block.len(ctx.playback_ctx())? * *step[0];
             solid.rect(x, y, w, *step[1]);
             for _ in 1 .. n_reps {
                 x += w;
@@ -1453,19 +1437,19 @@ impl GraphPoint for SoundBlock {
             }
         }
 
-        let play_since = ctx.play_since();
-        if play_since.is_finite() {
+        let pctx = ctx.playback_ctx();
+        Ok(if pctx.started_at.is_finite() {
             editor.force_redraw();
-            let x = (ctx.now() - play_since).secs_to_beats(ctx.bps()) * step[0] - offset[0];
+            let x = (pctx.now - pctx.started_at).secs_to_beats(pctx.bps) * step[0] - offset[0];
             solid.move_to(*x, 0.0);
             solid.line_to(*x, *canvas_size[1]);
-        }
+        })
     }
 
-    #[inline] fn canvas_coords(canvas: &HtmlCanvasElement) -> JsResult<[u32; 2]> {
+    #[inline] fn canvas_coords(canvas: &HtmlCanvasElement) -> AppResult<[u32; 2]> {
         let doc = document();
-        let w = doc.body().to_js_result()?.client_width()
-            - canvas.previous_element_sibling().to_js_result()?
+        let w = doc.body().to_app_result()?.client_width()
+            - canvas.previous_element_sibling().to_app_result()?
             .client_width();
         let h = canvas.client_height();
         Ok([w as u32, h as u32])
@@ -1480,9 +1464,9 @@ impl SoundBlock {
 
 /// all the `when` fields are offsets from the start in beats
 #[derive(Debug, Clone, PartialEq, Eq)]
+// TODO: handle deallocation of audio nodes and see if it's actually needed
 pub enum SoundEvent {
-    BlockStart{id: usize, when: Beats, state: usize},
-    BlockEnd{id: usize, when: Beats, block: GainNode}
+    Start{id: usize, when: Beats, state: usize},
 }
 
 impl PartialOrd for SoundEvent {
@@ -1499,98 +1483,52 @@ impl Ord for SoundEvent {
 
 impl SoundEvent {
     #[inline] fn target(&self) -> usize {
-        match self {
-            SoundEvent::BlockStart{id, ..}
-            | SoundEvent::BlockEnd{id, ..} => *id
-        }
+        let Self::Start{id, ..} = self;
+        *id
     }
 
     #[inline] fn when(&self) -> Secs {
-        match self {
-            SoundEvent::BlockStart{when, ..} 
-            | SoundEvent::BlockEnd{when, ..} => *when,
-        }
+        let Self::Start{when, ..} = self;
+        *when
     }
 }
 
+#[derive(Debug, Default)]
 pub struct Sequencer {
     pattern: Shared<GraphEditor<SoundBlock>>,
-    pending: Vec<SoundEvent>,
-    plug: DynamicsCompressorNode,
-    gain: GainNode,
-    playing: bool,
-    used_to_play: bool
+    pending: Vec<SoundEvent>
 }
 
 impl Sequencer {
-    #[inline] pub fn new(audio_ctx: &AudioContext, visualiser: Rc<AnalyserNode>) -> Option<Self> {
-        let plug = DynamicsCompressorNode::new(audio_ctx).report()?;
-        plug.ratio().set_value(20.0);
-        plug.release().set_value(1.0);
-        let gain = GainNode::new(audio_ctx).report()?;
-        gain.gain().set_value(0.2);
-
-        plug.connect_with_audio_node(&gain).report()?
-            .connect_with_audio_node(&visualiser).report()?
-            .connect_with_audio_node(&audio_ctx.destination()).report()?;
-
-        Some(Self{plug, gain,
-            pattern: Rc::new(RefCell::new(GraphEditor::new(vec![]))), pending: vec![],
-            playing: false, used_to_play: false})
-    }
-
-    #[inline] pub fn gain(&self) -> R32 {
-        R32::new_or(R32::ZERO, self.gain.gain().value())
-    }
-
     #[inline] pub fn pattern(&self) -> &Shared<GraphEditor<SoundBlock>> {
         &self.pattern
     }
 
-    pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> Option<()> {
-        Some(match event {
+    pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> AppResult<()> {
+        Ok(match event {
             AppEvent::StartPlay => {
                 self.pending.clear();
-                let mut pattern = self.pattern.try_borrow_mut().report_fmt()?;
+                let mut pattern = self.pattern.try_borrow_mut()?;
+                let pctx = ctx.playback_ctx();
                 for (id, mut block) in pattern.iter_mut().enumerate() {
                     let offset = block.offset;
-                    block.inner().reset(ctx, id, offset,
+                    block.inner().reset(pctx, id, offset,
                         |x| _ = self.pending.push_sorted(x))?;
                 }
-                self.playing = true;
             }
 
-            AppEvent::StopPlay => {
-                self.pending.clear();
-                self.plug.disconnect().report()?;
-                self.plug = ctx.audio_ctx().create_dynamics_compressor().report()?;
-                self.plug.ratio().set_value(20.0);
-                self.plug.release().set_value(1.0);
-                self.plug.connect_with_audio_node(&self.gain).report()?;
-                self.playing = false;
-                self.used_to_play = false;
-            }
+            AppEvent::StopPlay => self.pending.clear(),
 
-            AppEvent::RedrawEditorPlane => self.pattern
-                .try_borrow_mut().report_fmt()?.force_redraw(),
-
-            &AppEvent::MasterVolume(to) => {
-                ctx.register_action(AppAction::SetMasterVolume{from: self.gain(), to});
-                self.gain.gain().set_value(*to)
-            }
+            AppEvent::RedrawEditorPlane => self.pattern.try_borrow_mut()?
+                .force_redraw(),
 
             AppEvent::Frame(_) => {
-                let mut pattern = self.pattern.try_borrow_mut().report_fmt()?;
-                if self.playing {
-                    let (ctx, now) = if self.used_to_play {
-                        (Cow::Borrowed(ctx), (ctx.now() - ctx.play_since()).secs_to_beats(ctx.bps()))
-                    } else {
-                        self.used_to_play = true;
-                        pattern.force_redraw();
-                        ctx.emit_event(AppEvent::AudioStarted(ctx.now()));
-                        (Cow::Owned(ctx.clone().set_play_since(ctx.now())), r64![0.0])
-                    };
-                    let n_due = self.pending.iter().position(|x| x.when() > now).unwrap_or(self.pending.len());
+                let mut pattern = self.pattern.try_borrow_mut()?;
+                if ctx.playing() {
+                    let pctx = ctx.playback_ctx();
+                    let now = (pctx.now - pctx.started_at).secs_to_beats(pctx.bps);
+                    let n_due = self.pending.iter().position(|x| x.when() > now)
+                        .unwrap_or(self.pending.len());
                     for event in self.pending.drain(..n_due).collect::<Vec<_>>() {
                         let id = event.target();
                         let mut block = unsafe{pattern.get_unchecked_mut(id)};
@@ -1598,7 +1536,7 @@ impl Sequencer {
 
                         while !due_now.is_empty() {
                             for event in due_now.take() {
-                                block.inner().poll(&self.plug, &ctx, event, |new| if new.when() > now {
+                                block.inner().poll(pctx, event, |new| if new.when() > now {
                                     self.pending.push_sorted(new);
                                 } else {
                                     due_now.push(new);
@@ -1610,25 +1548,7 @@ impl Sequencer {
                 pattern.handle_event(event, ctx, || ())?
             }
 
-            e => {
-                self.pattern.try_borrow_mut().report_fmt()?.handle_event(e, ctx, || ())?;
-
-                match e {
-                    AppEvent::Undo(actions) => for action in actions.iter() {
-                        if let AppAction::SetMasterVolume{from, ..} = *action {
-                            self.gain.gain().set_value(*from)
-                        }
-                    }
-
-                    AppEvent::Redo(actions) => for action in actions.iter() {
-                        if let AppAction::SetMasterVolume{to, ..} = *action {
-                            self.gain.gain().set_value(*to)
-                        }
-                    }
-
-                    _ => ()
-                }
-            }
+            e => self.pattern.try_borrow_mut()?.handle_event(e, ctx, || ())?
         })
     }
 }
