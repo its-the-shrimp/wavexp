@@ -8,7 +8,6 @@ use std::{
     fmt::{self, Debug, Formatter, Display},
     ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Rem, RemAssign, Range},
     iter::{successors, Sum},
-    error::Error,
     cmp::Ordering,
     array::from_fn,
     num::{TryFromIntError,
@@ -25,7 +24,7 @@ use web_sys::{
     CanvasRenderingContext2d,
     HtmlCanvasElement,
     Element,
-    console::warn_1,
+    console::{warn_1, warn_2},
     HtmlElement};
 use yew::html::IntoPropValue;
 
@@ -478,6 +477,14 @@ macro_rules! js_obj {
 	}
 }
 
+#[macro_export]
+macro_rules! js_function {
+    (move || $f:expr) => {
+        $crate::wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || $f).into_js_value()
+            .unchecked_into::<$crate::js_sys::Function>()
+    };
+}
+
 pub use web_sys::console::log_1;
 #[macro_export]
 macro_rules! js_log {
@@ -517,7 +524,8 @@ pub fn document() -> HtmlDocument {
 }
 
 pub fn report_err(err: js_sys::Error) {
-    warn_1(&err);
+    warn_2(&err,
+        &js_sys::Reflect::get(err.as_ref(), &"stack".into()).unwrap_or_else(|e| e));
     if let Some(x) = document().element_dyn_into::<HtmlElement>("error-sign") {
         x.set_hidden(false)
     } else {
@@ -678,39 +686,6 @@ impl HtmlElementExt for Element {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum GetVarError {
-    OutOfBounds(usize, usize),
-    Overlap(usize)
-}
-
-impl Display for GetVarError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            GetVarError::OutOfBounds(x, len) =>
-                write!(f, "index #{x} is out of bounds for a slice of length {len}"),
-            GetVarError::Overlap(x) =>
-                write!(f, "index #{x} appeared more than once")}
-    }
-}
-
-impl Error for GetVarError {}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct ReorderError {
-    index: usize,
-    len: usize
-}
-
-impl Display for ReorderError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "SliceExt::reorder: index #{} is out of bounds for a slice of length {}",
-            self.index, self.len)
-    }
-}
-
-impl Error for ReorderError {}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SliceMove {pub from: usize, pub to: usize}
 
@@ -732,21 +707,6 @@ impl SliceMove {
         }
     }
 }
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct SetSortedError {
-    index: usize,
-    len: usize
-}
-
-impl Display for SetSortedError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "SliceExt::set_sorted: index #{} is out of bounds for a slice of length {}",
-            self.index, self.len)
-    }
-}
-
-impl Error for SetSortedError {}
 
 pub struct IterMutWithCtx<'a, T: 'a + Copy> {
     slice: &'a mut [T],
@@ -1451,13 +1411,13 @@ macro_rules! real_float_operator_impl {
         $(
             impl_op!($op::$method(self: $real, rhs: $other_float) -> $real {
                 let res = self.0.$method(rhs as $float);
-                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))).into()); self}
+                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method)))); self}
                 else {Self(res)}
             });
 
             impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $other_float) {
                 let res = self.0.$method(rhs as $float);
-                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))).into())}
+                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))))}
                 else {self.0 = res}
             });
         )+
@@ -1465,7 +1425,7 @@ macro_rules! real_float_operator_impl {
 }
 
 macro_rules! real_int_operator_impl {
-    ($real:ty { $float:ty }, $nonzero:ty { $int:ty } : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
+    (infallible $op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident for $real:ty { $float:ty } and $($nonzero:ty { $int:ty } ),+) => {
         $(
             impl_op!($op::$method(self: $real, rhs: $int) -> $real {
                 Self(self.0.$method(rhs as $float))
@@ -1484,6 +1444,30 @@ macro_rules! real_int_operator_impl {
             });
         )+
     };
+
+    (fallible $op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident for $real:ty { $float:ty } and $($nonzero:ty { $int:ty } ),+) => {
+        $(
+            impl_op!($op::$method(self: $real, rhs: $int) -> $real {
+                let res = self.0.$method(rhs as $float);
+                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method)))); self}
+                else {Self(res)}
+            });
+
+            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $int) {
+                let res = self.0.$method(rhs as $float);
+                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))))}
+                else {self.0 = res}
+            });
+
+            impl_op!($op::$method(self: $real, rhs: $nonzero) -> $real {
+                Self(self.0.$method(rhs.get() as $float))
+            });
+
+            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $nonzero) {
+                self.0.$assign_method(rhs.get() as $float)
+            });
+        )+
+    };
 }
 
 macro_rules! real_real_operator_impl {
@@ -1491,13 +1475,13 @@ macro_rules! real_real_operator_impl {
         $(
             impl_op!($op::$method(self: $real, rhs: $other_real) -> $real {
                 let res = self.0.$method(rhs.0 as $float);
-                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))).into()); self}
+                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method)))); self}
                 else {Self(res)}
             });
 
             impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $other_real) {
                 let res = self.0.$method(rhs.0 as $float);
-                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))).into())}
+                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))))}
                 else {self.0 = res}
             });
         )+
@@ -1596,46 +1580,21 @@ macro_rules! real_impl {
         real_from_signed_ints_impl!($real{$float}:
             NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
 
-        real_int_operator_impl!($real{$float}, NonZeroU8{u8}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, NonZeroI8{i8}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, NonZeroU16{u16}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, NonZeroI16{i16}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, NonZeroU32{u32}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, NonZeroI32{i32}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, NonZeroUsize{usize}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, NonZeroIsize{isize}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, NonZeroU64{u64}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_int_operator_impl!($real{$float}, NonZeroI64{i64}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
+        real_int_operator_impl!(infallible Add::add|AddAssign::add_assign for $real{$float} and
+            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
+        real_int_operator_impl!(infallible Sub::sub|SubAssign::sub_assign for $real{$float} and
+            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
+        real_int_operator_impl!(fallible Mul::mul|MulAssign::mul_assign for $real{$float} and
+            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
+        real_int_operator_impl!(fallible Div::div|DivAssign::div_assign for $real{$float} and
+            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
+        real_int_operator_impl!(fallible Rem::rem|RemAssign::rem_assign for $real{$float} and
+            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
 
         real_float_operator_impl!($real{$float}, $float:
             Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,

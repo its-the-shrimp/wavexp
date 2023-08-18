@@ -18,14 +18,23 @@ use yew::{
     AttrValue,
     Callback,
     Properties,
-    scheduler::Shared};
+    scheduler::Shared,
+    NodeRef};
 use wavexp_utils::{
     r64,
     R64,
     Point,
     report_err,
     BoolExt,
-    default, AppError, OptionExt, HtmlCanvasExt, HtmlElementExt, AppResult, AppResultUtils, ResultExt, Pipe};
+    default,
+    AppError,
+    OptionExt,
+    HtmlCanvasExt,
+    HtmlElementExt,
+    AppResult,
+    AppResultUtils,
+    ResultExt,
+    Pipe};
 use crate::{
     visual::{GraphPoint, GraphEditor},
     global::AppEvent};
@@ -96,7 +105,8 @@ pub enum Cmd {
 
 pub struct Slider {
     old_value: f64,
-    value: R64
+    value: R64,
+    target: NodeRef
 }
 
 #[derive(PartialEq, yew::Properties)]
@@ -120,29 +130,29 @@ impl Component for Slider {
     type Message = Cmd;
     type Properties = SliderProps;
 
-    fn create(ctx: &Context<Self>) -> Self {
-        Self{value: ctx.props().initial, old_value: f64::NAN}
+    #[inline] fn create(ctx: &Context<Self>) -> Self {
+        Self{value: ctx.props().initial, old_value: f64::NAN, target: default()}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         let res: AppResult<!> = try {
             let SliderProps{setter, min, max, signed, ..} = ctx.props();
-            match msg {
+            match &msg {
                 Cmd::Drag(e) => self.value = R64::from(e.movement_y())
-                    .div(-e.target_dyn_into::<Element>().to_app_result()?.client_height())
+                    .div(-self.target.cast::<Element>().to_app_result()?.client_height())
                     .div(e.shift_key().choose(400u16, 2))
                     .mul(max - min)
                     .add(self.value)
                     .clamp(signed.choose(-*max, *min), *max),
 
                 Cmd::Focus(e) => {
-                    e.target_dyn_into::<Element>().to_app_result()?
+                    self.target.cast::<Element>().to_app_result()?
                         .set_pointer_capture(e.pointer_id())?;
                     self.old_value = *self.value;
                 }
 
                 Cmd::Unfocus(e) => {
-                    e.target_dyn_into::<Element>().to_app_result()?
+                    self.target.cast::<Element>().to_app_result()?
                         .release_pointer_capture(e.pointer_id())?;
                     if self.old_value != *self.value {setter.emit(self.value)}
                     self.old_value = f64::NAN;
@@ -166,7 +176,7 @@ impl Component for Slider {
         let SliderProps{name, postfix, max, min, fmt, ..} = ctx.props();
         let scope = ctx.link();
         html!{
-            <svg viewBox="0 0 100 100" class="input slider" data-main-hint={name}
+            <svg ref={self.target.clone()} viewBox="0 0 100 100" class="input slider" data-main-hint={name}
             onpointerdown={scope.callback(Cmd::Focus)}
             onpointerup={scope.callback(Cmd::Unfocus)}
             onpointermove={(!self.old_value.is_nan()).then(|| scope.callback(Cmd::Drag))}>
@@ -190,6 +200,7 @@ pub struct Switch {
     value: R64,
     old_value: usize,
     focused: bool,
+    target: NodeRef
 }
 
 #[derive(PartialEq, yew::Properties)]
@@ -205,7 +216,7 @@ impl Component for Switch {
     type Properties = SwitchProps;
 
     #[inline] fn create(ctx: &Context<Self>) -> Self {
-        Self{value: ctx.props().initial.into(), old_value: 0, focused: false}
+        Self{value: ctx.props().initial.into(), old_value: 0, focused: false, target: default()}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -213,21 +224,21 @@ impl Component for Switch {
             let SwitchProps{options, setter, ..} = ctx.props();
             match msg {
                 Cmd::Drag(e) => self.value = R64::from(e.movement_y())
-                    .div(e.target_dyn_into::<Element>().to_app_result()?.client_height())
+                    .div(self.target.cast::<Element>().to_app_result()?.client_height())
                     .mul(-4i8)
                     .div(options.len())
                     .add(self.value)
                     .rem_euclid(options.len().into()).to_app_result()?,
 
                 Cmd::Focus(e) => {
-                    e.target_dyn_into::<Element>().to_app_result()?
+                    self.target.cast::<Element>().to_app_result()?
                         .set_pointer_capture(e.pointer_id())?;
                     self.focused = true;
                     self.old_value = self.value.into();
                 }
 
                 Cmd::Unfocus(e) => {
-                    e.target_dyn_into::<Element>().to_app_result()?
+                    self.target.cast::<Element>().to_app_result()?
                         .release_pointer_capture(e.pointer_id())?;
                     let value = self.value.into();
                     if self.old_value != value {
@@ -254,7 +265,7 @@ impl Component for Switch {
         let SwitchProps{name, options, ..} = ctx.props();
         let scope = ctx.link();
         html!{
-            <svg viewBox="0 0 100 100" class="input switch" data-main-hint={name}
+            <svg ref={self.target.clone()} viewBox="0 0 100 100" class="input switch" data-main-hint={name}
             onpointerdown={scope.callback(Cmd::Focus)}
             onpointerup={scope.callback(Cmd::Unfocus)}
             onpointermove={self.focused.then(|| scope.callback(Cmd::Drag))}>
@@ -367,7 +378,8 @@ impl<T: 'static + GraphPoint> Component for GraphEditorCanvas<T> {
 
 pub struct Counter {
     value: R64,
-    old_value: f64
+    old_value: f64,
+    target: NodeRef
 }
 
 #[derive(PartialEq, yew::Properties)]
@@ -390,7 +402,7 @@ impl Component for Counter {
     type Properties = CounterProps;
 
     #[inline] fn create(ctx: &Context<Self>) -> Self {
-        Self{value: ctx.props().initial, old_value: f64::NAN}
+        Self{value: ctx.props().initial, old_value: f64::NAN, target: default()}
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -398,20 +410,20 @@ impl Component for Counter {
             let CounterProps{setter, coef, min, ..} = ctx.props();
             match msg {
                 Cmd::Drag(e) => self.value = R64::from(e.movement_y())
-                    .div(-e.target_dyn_into::<Element>().to_app_result()?.client_height())
+                    .div(-self.target.cast::<Element>().to_app_result()?.client_height())
                     .mul(coef)
                     .pipe_if(e.shift_key(), |x| x / 200)
                     .add(self.value)
                     .max(*min),
 
                 Cmd::Focus(e) => {
-                    e.target_dyn_into::<Element>().to_app_result()?
+                    self.target.cast::<Element>().to_app_result()?
                         .set_pointer_capture(e.pointer_id())?;
                     self.old_value = *self.value;
                 }
 
                 Cmd::Unfocus(e) => {
-                    e.target_dyn_into::<Element>().to_app_result()?
+                    self.target.cast::<Element>().to_app_result()?
                         .release_pointer_capture(e.pointer_id())?;
                     if self.old_value != *self.value {setter.emit(self.value)}
                     self.old_value = f64::NAN;
@@ -427,14 +439,14 @@ impl Component for Counter {
         let CounterProps{name, fmt, postfix, min, ..} = ctx.props();
         let scope = ctx.link();
         html!{
-            <svg viewBox="0 0 100 100" class="input counter" data-main-hint={name}
+            <svg ref={self.target.clone()} viewBox="0 0 100 100" class="input counter" data-main-hint={name}
             onpointerdown={scope.callback(Cmd::Focus)}
             onpointerup={scope.callback(Cmd::Unfocus)}
             onpointermove={(!self.old_value.is_nan()).then(|| scope.callback(Cmd::Drag))}>
                 <polygon class="upper" points="6,16 40,16 50,6 60,16 94,16"/>
                 <text x="50" y="50">{fmt.emit(self.value)}</text>
                 if !postfix.is_empty() {
-                    <text x="50" y="50">{postfix}</text>
+                    <text x="50" y="70">{postfix}</text>
                 }
                 if self.value != *min {
                     <polygon class="lower" points="6,84 40,84 50,94 60,84 94,84"/>

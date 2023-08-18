@@ -16,6 +16,7 @@ mod visual;
 mod input;
 mod sound;
 mod global;
+mod sequencer;
 
 pub use wavexp_utils;
 pub use js_sys;
