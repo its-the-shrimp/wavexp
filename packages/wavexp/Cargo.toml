@@ -19,7 +19,6 @@ web-sys = { version = "0.3.64", features = [
 	"OscillatorType",
 	"AnalyserNode",
 	"GainNode",
-	"DynamicsCompressorNode",
 	"AudioContext",
 	"AudioParam",
 	"TextMetrics",
@@ -33,6 +32,9 @@ web-sys = { version = "0.3.64", features = [
 	"OfflineAudioContext",
 	"AudioContextOptions",
 	"Performance",
-	"AudioBufferOptions"
+	"AudioBufferOptions",
+	"AudioWorklet",
+	"AudioWorkletNode",
+	"AudioParamMap"
 ]}
 yew = { version = "0.20.0", features = ["csr"] }

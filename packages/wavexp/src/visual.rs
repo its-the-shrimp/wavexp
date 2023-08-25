@@ -523,7 +523,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         for i in (0 .. self.selection.len()).rev() {
             unsafe {
                 let selected_id = *self.selection.get_unchecked(i);
-                if to_remove((selected_id, self.get_unchecked(selected_id))) {
+                if !to_remove((selected_id, self.get_unchecked(selected_id))) {
                     sink((selected_id, self.data.remove_unchecked(selected_id)));
                     self.selection.remove_unchecked(i);
                     self.redraw = true;
@@ -1041,48 +1041,35 @@ impl<T: GraphPoint> GraphEditor<T> {
                 let (grid, original_scale) = self.inner.grid
                     .get_or_try_insert(|| Self::draw_grid(size, *step, self.inner.scale))?;
                 let grid_scale = original_scale.div(&self.inner.scale);
-                let repetitions = self.inner.scale.sub(&[offset_x, offset_y].div(step))
+                let reps = self.inner.scale.sub(&[offset_x, offset_y].div(step))
                     .div(original_scale)
                     .map(|x| usize::from(x.ceil()));
 
                 canvas_ctx.set_fill_style(&AnyGraphEditor::MG_STYLE.into());
                 canvas_ctx.transform(*grid_scale[0], 0.0, 0.0, *grid_scale[1], *offset_x, *offset_y)?;
 
-                for _ in 0 .. repetitions[1] {
-                    for _ in 0 .. repetitions[0] {
+                for _ in 0 .. reps[1] {
+                    for _ in 0 .. reps[0] {
                         canvas_ctx.fill_with_path_2d(grid);
                         canvas_ctx.translate(*size[0], 0.0)?;
                     }
-                    canvas_ctx.translate(-*size[0] * repetitions[0] as f64, *size[1])?;
+                    canvas_ctx.translate(-*size[0] * reps[0] as f64, *size[1])?;
                 }
                 canvas_ctx.reset_transform()?;
 
                 let solid = Path2d::new()?;
                 let dotted = Path2d::new()?;
-                T::on_redraw(self, ctx, sequencer, &size, &solid, &dotted, visual_ctx())?;
-
                 let [x, y] = self.selection_src.mul(step).sub(offset);
                 let [w, h] = self.selection_size.mul(step);
                 dotted.rect(*x, *y, *w, *h);
 
-                canvas_ctx.set_stroke_style(&AnyGraphEditor::FG_STYLE.into());
-                canvas_ctx.fill_with_path_2d(&solid);
-                canvas_ctx.stroke_with_path(&solid);
-                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0]))?;
-                canvas_ctx.fill_with_path_2d(&dotted);
-                canvas_ctx.stroke_with_path(&dotted);
-                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![]))?;
-
                 match self.focus {
                     Focus::Zoom{pivot, init_offset, ..} => if self.last_cursor.left {
                         let [x, y] = (pivot - init_offset).map(|x| x as f64);
-                        canvas_ctx.begin_path();
-                        canvas_ctx.move_to(x - 10.0, y);
-                        canvas_ctx.line_to(x + 10.0, y);
-                        canvas_ctx.move_to(x, y - 10.0);
-                        canvas_ctx.line_to(x, y + 10.0);
-                        canvas_ctx.set_stroke_style(&AnyGraphEditor::FG_STYLE.into());
-                        canvas_ctx.stroke();
+                        solid.move_to(x - 10.0, y);
+                        solid.line_to(x + 10.0, y);
+                        solid.move_to(x, y - 10.0);
+                        solid.line_to(x, y + 10.0);
                     } else {
                         canvas_ctx.set_text_align("left");
                         canvas_ctx.set_text_baseline("bottom");
@@ -1093,23 +1080,27 @@ impl<T: GraphPoint> GraphEditor<T> {
                     Focus::Plane{origin, ..} if self.last_cursor.meta => if self.last_cursor.left {
                         let cur = to_aligned_canvas(self.last_cursor.point);
                         let origin = origin.mul(step).sub(offset).map(|x| *x);
-                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0]))?;
-                        canvas_ctx.stroke_rect(origin[0], origin[1], cur.x as f64 - origin[0], cur.y as f64 - origin[1]);
-                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![]))?;
+                        dotted.rect(origin[0], origin[1], cur.x as f64 - origin[0], cur.y as f64 - origin[1]);
                     } else {
                         let [x, y] = self.last_cursor.point.map(|x| x as f64);
-                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0]))?;
-                        canvas_ctx.begin_path();
-                        canvas_ctx.move_to(-*size[0], y);
-                        canvas_ctx.line_to( *size[0], y);
-                        canvas_ctx.move_to(x, -*size[1]);
-                        canvas_ctx.line_to(x,  *size[1]);
-                        canvas_ctx.stroke();
-                        canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![]))?;
+                        dotted.move_to(-*size[0], y);
+                        dotted.line_to( *size[0], y);
+                        dotted.move_to(x, -*size[1]);
+                        dotted.line_to(x,  *size[1]);
                     }
                     
                     _ => ()
                 }
+
+                T::on_redraw(self, ctx, sequencer, &size, &solid, &dotted, visual_ctx())?;
+
+                canvas_ctx.set_stroke_style(&AnyGraphEditor::FG_STYLE.into());
+                canvas_ctx.fill_with_path_2d(&solid);
+                canvas_ctx.stroke_with_path(&solid);
+                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0]))?;
+                canvas_ctx.fill_with_path_2d(&dotted);
+                canvas_ctx.stroke_with_path(&dotted);
+                canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![]))?;
             }
 
             _ => (),

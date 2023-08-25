@@ -39,7 +39,7 @@ use crate::{
     input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas, Counter},
     visual::{GraphEditor, GraphPoint},
     global::{AppContext, AppEvent, AppAction},
-    sequencer::Sequencer};
+    sequencer::Sequencer, time_stretcher::TimeStretcherNode};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -263,7 +263,7 @@ impl GraphPoint for NoteBlock {
                 if !meta {
                     point[0] += delta[0];
                 }
-                point[1] -= delta[1];
+                point[1] += delta[1];
             }
         }
     }
@@ -290,7 +290,7 @@ impl GraphPoint for NoteBlock {
         _:      [R64; 2],
         point:  Option<usize>
     ) -> AppResult<()> {
-        let last = editor.len() - 1;
+        let Some(last) = editor.len().checked_sub(1) else {return Ok(())};
         Ok(if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
             ctx.emit_event(AppEvent::RedrawEditorPlane)
         })
@@ -564,7 +564,7 @@ impl GraphPoint for CustomBlock {
         _:      [R64; 2],
         point:  Option<usize>
     ) -> AppResult<()> {
-        let last = editor.len() - 1;
+        let Some(last) = editor.len().checked_sub(1) else {return Ok(())};
         Ok(if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
             ctx.emit_event(AppEvent::RedrawEditorPlane)
         })
@@ -712,14 +712,15 @@ impl GraphPoint for CustomBlock {
     }
 
     fn on_redraw(
-        editor:        &mut GraphEditor<Self>,
-        ctx:           &AppContext,
-        sequencer:     &Sequencer,
-        canvas_size:   &[R64; 2],
-        solid:         &Path2d,
-        _:             &Path2d,
+        editor:                   &mut GraphEditor<Self>,
+        ctx:                      &AppContext,
+        sequencer:                &Sequencer,
+        canvas_size:              &[R64; 2],
+        solid:                    &Path2d,
+        _:                        &Path2d,
         (sb_offset, n_reps, len): Self::VisualContext
     ) -> AppResult<()> {
+        let len = len.secs_to_beats(sequencer.bps());
         let step = &canvas_size.div(&editor.scale());
         let offset = &R64::array_from(editor.offset());
         for block in editor.iter() {
@@ -844,14 +845,14 @@ impl Sound {
             Sound::Noise{ref pattern, ref src, volume, attack, decay, mut sustain, release, rep_count} => {
                 let pat = pattern.try_borrow()?;
                 let Some(last) = pat.last() else {return Ok(())};
-                let pat_len = (last.offset + last.len + self_offset).to_secs(bps);
+                let pat_len = (last.offset + last.len).to_secs(bps);
 
                 for rep in 0 .. rep_count.get() {
                     // TODO: handle `value`
                     for NoteBlock{offset, len, ..} in pat.iter() {
                         let block = ctx.create_gain()?;
                         let gain = block.gain();
-                        let start = now + pat_len * rep + offset.to_secs(bps);
+                        let start = now + self_offset + pat_len * rep + offset.to_secs(bps);
                         let mut at = start;
                         gain.set_value(0.0);
                         at += attack.to_secs(bps);
@@ -884,15 +885,15 @@ impl Sound {
             Sound::Custom{ref pattern, ref src, volume, attack, decay, mut sustain, release, rep_count, speed} => {
                 let pat = pattern.try_borrow()?;
                 let Some(last) = pat.last() else {return Ok(())};
-                let len = unsafe{R64::new_unchecked(src.duration())}.to_secs(bps) / speed;
-                let pat_len = (last.offset + len + self_offset).to_secs(bps);
+                let len = unsafe{R64::new_unchecked(src.duration())} / speed;
+                let pat_len = last.offset.to_secs(bps) + len;
 
                 for rep in 0 .. rep_count.get() {
                     // TODO: handle `pitch`
                     for CustomBlock{offset, ..} in pat.iter() {
                         let block = ctx.create_gain()?;
                         let gain = block.gain();
-                        let start = now + pat_len * rep + offset.to_secs(bps);
+                        let start = now + self_offset + pat_len * rep + offset.to_secs(bps);
                         let mut at = start;
                         gain.set_value(0.0);
                         at += attack.to_secs(bps);
@@ -905,14 +906,24 @@ impl Sound {
                         at += release.to_secs(bps);
                         gain.linear_ramp_to_value_at_time(0.0, *at)?;
 
+                        let stretcher = TimeStretcherNode::new(&ctx)?;
+                        stretcher.rate().set_value(1.0 / *speed);
+
                         let block_core = ctx.create_buffer_source()?;
                         block_core.set_buffer(Some(src));
-                        block_core.connect_with_audio_node(&block)?
+                        //block_core.playback_rate().set_value(*speed);
+                        block_core
+                            .connect_with_audio_node(&stretcher)?
+                            .connect_with_audio_node(&block)?
                             .connect_with_audio_node(plug)?;
                         block_core.start_with_when(*start)?;
                         block_core.clone().set_onended(Some(&js_function!(move || {
-                            block.disconnect().map_err(AppError::from).report();
-                            block_core.disconnect().map_err(AppError::from).report();
+                            let res: AppResult<_> = try {
+                                block.disconnect()?;
+                                stretcher.disconnect()?;
+                                block_core.disconnect()?;
+                            };
+                            res.report();
                         })));
                     }
                 }
@@ -1166,13 +1177,13 @@ impl Sound {
                     let ctx = sequencer.audio_ctx().clone();
 
                     spawn_local(async move {
-                        let _: AppResult<!> = try {
+                        let res: AppResult<!> = try {
                             let file = target.files().to_app_result()?.get(0).to_app_result()?;
                             let raw = JsFuture::from(file.array_buffer()).await?.dyn_into()?;
                             let buf = JsFuture::from(ctx.decode_audio_data(&raw)?).await?.dyn_into()?;
-                            emitter.emit(AppEvent::AudioProcessed(buf));
-                            return
+                            return emitter.emit(AppEvent::AudioProcessed(buf))
                         };
+                        res.report();
                     })
                 }
 

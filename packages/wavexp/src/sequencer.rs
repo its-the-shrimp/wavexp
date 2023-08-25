@@ -5,6 +5,7 @@ use std::{
     borrow::Cow,
     iter::once};
 use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::spawn_local;
 use wavexp_utils::{
     R64,
     r64,
@@ -17,7 +18,7 @@ use wavexp_utils::{
     OptionExt,
     window,
     Check,
-    R32};
+    R32, AppResultUtils};
 use web_sys::{
     Path2d,
     HtmlCanvasElement,
@@ -35,7 +36,7 @@ use crate::{
     sound::{Sound, Beats, Secs, FromBeats},
     visual::{GraphPoint, GraphEditor},
     global::{AppContext, AppAction, AppEvent},
-    input::{Cursor, Buttons, Slider}};
+    input::{Cursor, Buttons, Slider}, time_stretcher::TimeStretcherNode};
 
 #[derive(Debug, Clone)]
 pub struct SoundBlock {
@@ -347,21 +348,33 @@ impl Sequencer {
 
     pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> AppResult<()> {
         Ok(match event {
+            AppEvent::PreparePlay => if self.audio_ctx.is_instance_of::<AudioContext>() {
+                ctx.emit_event(AppEvent::StartPlay)
+            } else {
+                let volume = self.volume();
+                self.audio_ctx = AudioContext::new()?.into();
+                self.analyser = self.audio_ctx.create_analyser()?;
+                self.gain = self.audio_ctx.create_gain()?;
+                self.gain.gain().set_value(*volume);
+                self.gain.connect_with_audio_node(&self.analyser)?
+                    .connect_with_audio_node(&self.audio_ctx.destination())?;
+                let perf = window().performance().to_app_result()?;
+                self.ctx_created_at = unsafe{R64::new_unchecked(perf.now()) / 1000};
+
+                let audio_ctx = self.audio_ctx.clone();
+                let emitter = ctx.event_emitter().clone();
+                spawn_local(async move {
+                    let res: AppResult<!> = try {
+                        TimeStretcherNode::register(audio_ctx.audio_worklet()?).await?;
+                        return emitter.emit(AppEvent::StartPlay)
+                    };
+                    res.report();
+                });
+            }
+
             AppEvent::StartPlay => {
                 let perf = window().performance().to_app_result()?;
-                let now = if !self.audio_ctx.is_instance_of::<AudioContext>() {
-                    let volume = self.volume();
-                    self.audio_ctx = AudioContext::new()?.into();
-                    self.analyser = self.audio_ctx.create_analyser()?;
-                    self.gain = self.audio_ctx.create_gain()?;
-                    self.gain.gain().set_value(*volume);
-                    self.gain.connect_with_audio_node(&self.analyser)?
-                        .connect_with_audio_node(&self.audio_ctx.destination())?;
-                    self.ctx_created_at = unsafe{R64::new_unchecked(perf.now()) / 1000};
-                    R64::ZERO
-                } else {
-                    unsafe{R64::new_unchecked(perf.now()) / 1000 - self.ctx_created_at}
-                };
+                let now = unsafe{R64::new_unchecked(perf.now()) / 1000 - self.ctx_created_at};
                 let mut pattern = self.pattern.try_borrow_mut()?;
                 for mut block in pattern.iter_mut() {
                     let offset = block.offset.to_secs(self.bps);

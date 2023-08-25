@@ -54,6 +54,8 @@ pub enum AppEvent {
     /// emitted when the viewport of the app changes its dimensions
     Resize,
     /// emitted when the user starts playing by clicking the `Play` button
+    PreparePlay,
+    /// emitted when the app is ready to start playing
     StartPlay,
     /// emitted when the user stops playing by clicking the `Play` button
     StopPlay,
@@ -613,7 +615,7 @@ impl Component for App {
                     </Button>
                 } else {
                     <Button name="Play"
-                    setter={setter.reform(|_| AppEvent::StartPlay)}>
+                    setter={setter.reform(|_| AppEvent::PreparePlay)}>
                         <svg viewBox="3 0 100 103" height="100%">
                             <polygon points="25,25 75,50 25,75"/>
                         </svg>
