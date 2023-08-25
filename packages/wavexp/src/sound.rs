@@ -16,7 +16,6 @@ use web_sys::{
 use yew::{
     html,
     Html,
-    Callback,
     scheduler::Shared,
     TargetCast};
 use wavexp_utils::{
@@ -39,7 +38,8 @@ use crate::{
     input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas, Counter},
     visual::{GraphEditor, GraphPoint},
     global::{AppContext, AppEvent, AppAction},
-    sequencer::Sequencer, time_stretcher::TimeStretcherNode};
+    sequencer::Sequencer,
+    sound_internals::TimeStretcherNode};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -52,13 +52,8 @@ pub trait FromBeats {
 }
 
 impl FromBeats for Beats {
-    #[inline]
     fn to_secs(self, bps: Self) -> Secs {self / bps}
-
-    #[inline]
     fn to_msecs(self, bps: Self) -> MSecs {self * 1000u16 / bps}
-
-    #[inline]
     fn secs_to_beats(self, bps: Self) -> Beats {self * bps}
 }
 
@@ -66,33 +61,33 @@ impl FromBeats for Beats {
 pub struct Note(u8);
 
 impl Display for Note {
-    #[inline] fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(unsafe{Self::NAMES.get_unchecked(self.0 as usize)}, f)
     }
 }
 
 impl Add<isize> for Note {
     type Output = Note;
-    #[inline] fn add(self, rhs: isize) -> Self::Output {
+    fn add(self, rhs: isize) -> Self::Output {
         self.checked_add(rhs).to_app_result().report().unwrap_or(self)
     }
 }
 
 impl AddAssign<isize> for Note {
-    #[inline] fn add_assign(&mut self, rhs: isize) {
+    fn add_assign(&mut self, rhs: isize) {
         self.checked_add_assign(rhs).to_app_result().report();
     }
 }
 
 impl Sub<isize> for Note {
     type Output = Note;
-    #[inline] fn sub(self, rhs: isize) -> Self::Output {
+    fn sub(self, rhs: isize) -> Self::Output {
         self.checked_sub(rhs).to_app_result().report().unwrap_or(self)
     }
 }
 
 impl SubAssign<isize> for Note {
-    #[inline] fn sub_assign(&mut self, rhs: isize) {
+    fn sub_assign(&mut self, rhs: isize) {
         self.checked_sub_assign(rhs).to_app_result().report();
     }
 }
@@ -147,46 +142,42 @@ impl Note {
         "A4", "A#4",
         "B4"];
 
-    #[inline] pub fn checked_add(self, rhs: isize) -> Option<Self> {
+    pub fn checked_add(self, rhs: isize) -> Option<Self> {
         let new = self.0 as isize + rhs;
         if new >= 0 && new < Self::N_NOTES as isize {Some(Self(new as u8))}
         else {None}
     }
 
-    #[inline] pub fn checked_add_assign(&mut self, rhs: isize) -> bool {
+    pub fn checked_add_assign(&mut self, rhs: isize) -> bool {
         if let Some(x) = self.checked_add(rhs) {*self = x; true} else {false}
     }
 
-    #[inline] pub fn checked_sub(self, rhs: isize) -> Option<Self> {
+    pub fn checked_sub(self, rhs: isize) -> Option<Self> {
         let new = self.0 as isize - rhs;
         if new >= 0 && new < Self::N_NOTES as isize {Some(Self(new as u8))}
         else {None}
     }
 
-    #[inline] pub fn checked_sub_assign(&mut self, rhs: isize) -> bool {
+    pub fn checked_sub_assign(&mut self, rhs: isize) -> bool {
         if let Some(x) = self.checked_sub(rhs) {*self = x; true} else {false}
     }
 
-    #[inline] pub const fn from_index(value: usize) -> Self {
+    pub const fn from_index(value: usize) -> Self {
         if value >= Self::FREQS.len() {Self::MAX}
         else {Self(value as u8)}
     }
 
-    #[inline] pub const fn index(&self) -> usize {
+    pub const fn index(&self) -> usize {
         self.0 as usize
     }
 
-    #[inline] pub fn freq(&self) -> R32 {
+    pub fn freq(&self) -> R32 {
         unsafe{*Self::FREQS.get_unchecked(self.0 as usize)}
     }
 
-    #[inline] pub const fn recip(self) -> Self {
+    pub const fn recip(self) -> Self {
         Self(Self::MAX.0 - self.0)
     }
-}
-
-pub struct TabInfo {
-    pub name: &'static str
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,7 +188,7 @@ pub enum SoundType {
 }
 
 impl SoundType {
-    #[inline] pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::Note => "Simple Wave",
             Self::Noise => "White Noise",
@@ -214,41 +205,47 @@ pub struct NoteBlock {
 }
 
 impl PartialOrd for NoteBlock {
-    #[inline] fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.offset.cmp(&other.offset))
     }
 }
 
 impl Ord for NoteBlock {
-    #[inline] fn cmp(&self, other: &Self) -> Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.offset.cmp(&other.offset)
     }
 }
 
 impl GraphPoint for NoteBlock {
     const EDITOR_NAME: &'static str = "Note Editor";
-    // TODO: make this generic over the number of defined notes
-    const Y_BOUND: Range<R64> = r64![0.0] .. r64![36.0];
-    const SCALE_Y_BOUND: Range<R64> = r64![40.0] .. r64![40.0];
-    const OFFSET_Y_BOUND: Range<R64> = r64![-2.0] .. r64![-2.0];
-    const Y_SNAP: R64 = r64![1.0];
+    const Y_BOUND: Range<R64> =
+        r64![0] .. r64![Note::N_NOTES];
+    const SCALE_Y_BOUND: Range<R64> = {
+        let x = r64![10 - (Note::N_NOTES - 1) % 10 + Note::N_NOTES - 1];
+        x .. x
+    };
+    const OFFSET_Y_BOUND: Range<R64> = {
+        let x = r64![(10 - Note::N_NOTES as i8 % 10) / -2];
+        x .. x
+    };
+    const Y_SNAP: R64 = r64![1];
 
     type Inner = Beats;
     type Y = Note;
     /// (sound block offset, number of repetitions of the pattern)
     type VisualContext = (Beats, NonZeroUsize);
 
-    #[inline] fn inner(&self) -> &Self::Inner {&self.len}
-    #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.len}
+    fn inner(&self) -> &Self::Inner {&self.len}
+    fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.len}
 
-    #[inline] fn y(&self) -> &Self::Y {&self.value}
-    #[inline] fn y_mut(&mut self) -> &mut Self::Y {&mut self.value}
+    fn y(&self) -> &Self::Y {&self.value}
+    fn y_mut(&mut self) -> &mut Self::Y {&mut self.value}
 
-    #[inline] fn loc(&self) -> [R64; 2] {
+    fn loc(&self) -> [R64; 2] {
         [self.offset, self.value.recip().index().into()]
     }
 
-    #[inline] fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], meta: bool) {
+    fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], meta: bool) {
         match point {
             Ok(NoteBlock{offset, value, len}) => {
                 if meta {
@@ -268,7 +265,7 @@ impl GraphPoint for NoteBlock {
         }
     }
 
-    #[inline] fn in_hitbox(
+    fn in_hitbox(
         &self,
         point: [R64; 2],
         _:     &AppContext,
@@ -279,11 +276,11 @@ impl GraphPoint for NoteBlock {
             && (self.offset .. self.offset + self.len).contains(&point[0]))
     }
 
-    #[inline] fn fmt_loc(loc: [R64; 2]) -> String {
+    fn fmt_loc(loc: [R64; 2]) -> String {
         format!("{:.3}, {}", loc[0], Note::from_index(loc[1].into()).recip())
     }
 
-    #[inline] fn on_move(
+    fn on_move(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         _:      Cursor,
@@ -313,7 +310,7 @@ impl GraphPoint for NoteBlock {
             }
             let [offset, y] = *released_at;
             let value = Note::from_index(y.into()).recip();
-            let block_id = editor.add_point(Self{offset, value, len: r64![1.0]});
+            let block_id = editor.add_point(Self{offset, value, len: r64![1]});
             ctx.emit_event(AppEvent::RedrawEditorPlane);
             Some(AppAction::AddNoteBlock{block_id, offset, value})
         } else {
@@ -333,7 +330,7 @@ impl GraphPoint for NoteBlock {
         })
     }
 
-    #[inline] fn on_plane_hover(
+    fn on_plane_hover(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         cursor: Cursor,
@@ -364,7 +361,7 @@ impl GraphPoint for NoteBlock {
         Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
-    #[inline] fn on_point_hover(
+    fn on_point_hover(
         editor:   &mut GraphEditor<Self>,
         ctx:      &mut AppContext,
         cursor:   Cursor,
@@ -384,7 +381,7 @@ impl GraphPoint for NoteBlock {
         Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
-    #[inline] fn on_selection_hover(
+    fn on_selection_hover(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         cursor: Cursor,
@@ -403,7 +400,7 @@ impl GraphPoint for NoteBlock {
         Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
-    #[inline] fn on_undo(
+    fn on_undo(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         action: &AppAction
@@ -436,14 +433,14 @@ impl GraphPoint for NoteBlock {
         })
     }
 
-    #[inline] fn on_redo(
+    fn on_redo(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         action: &AppAction
     ) -> AppResult<()> {
         Ok(match action {
             &AppAction::AddNoteBlock{offset, value, block_id} => {
-                unsafe{editor.insert_point(block_id, NoteBlock{offset, value, len: r64![1.0]})};
+                unsafe{editor.insert_point(block_id, NoteBlock{offset, value, len: r64![1]})};
                 ctx.emit_event(AppEvent::RedrawEditorPlane)
             }
 
@@ -498,13 +495,13 @@ pub struct CustomBlock {
 }
 
 impl PartialOrd for CustomBlock {
-    #[inline] fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.offset.cmp(&other.offset))
     }
 }
 
 impl Ord for CustomBlock {
-    #[inline] fn cmp(&self, other: &Self) -> Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.offset.cmp(&other.offset)
     }
 }
@@ -521,13 +518,13 @@ impl GraphPoint for CustomBlock {
     /// (sound block offset, number of repetitions of the pattern, audio duration)
     type VisualContext = (Beats, NonZeroUsize, Beats);
 
-    #[inline] fn inner(&self) -> &Self::Inner {&()}
-    #[inline] fn inner_mut(&mut self) -> &mut Self::Inner {unsafe{transmute(self)}}
+    fn inner(&self) -> &Self::Inner {&()}
+    fn inner_mut(&mut self) -> &mut Self::Inner {unsafe{transmute(self)}}
 
-    #[inline] fn y(&self) -> &Self::Y {&self.pitch}
-    #[inline] fn y_mut(&mut self) -> &mut Self::Y {&mut self.pitch}
+    fn y(&self) -> &Self::Y {&self.pitch}
+    fn y_mut(&mut self) -> &mut Self::Y {&mut self.pitch}
 
-    #[inline] fn loc(&self) -> [R64; 2] {[self.offset, self.pitch.recip().index().into()]}
+    fn loc(&self) -> [R64; 2] {[self.offset, self.pitch.recip().index().into()]}
 
     fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], _: bool) {
         match point {
@@ -542,7 +539,7 @@ impl GraphPoint for CustomBlock {
         }
     }
 
-    #[inline] fn in_hitbox(
+    fn in_hitbox(
         &self,
         point:     [R64; 2],
         _:         &AppContext,
@@ -553,11 +550,11 @@ impl GraphPoint for CustomBlock {
             && (self.offset .. self.offset + len).contains(&point[0]))
     }
 
-    #[inline] fn fmt_loc(loc: [R64; 2]) -> String {
+    fn fmt_loc(loc: [R64; 2]) -> String {
         format!("{:.3}, {}", loc[0], Note::from_index(loc[1].into()).recip())
     }
 
-    #[inline] fn on_move(
+    fn on_move(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         _:      Cursor,
@@ -603,7 +600,7 @@ impl GraphPoint for CustomBlock {
         })
     }
 
-    #[inline] fn on_plane_hover(
+    fn on_plane_hover(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         cursor: Cursor,
@@ -629,7 +626,7 @@ impl GraphPoint for CustomBlock {
         Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
-    #[inline] fn on_point_hover(
+    fn on_point_hover(
         editor:   &mut GraphEditor<Self>,
         ctx:      &mut AppContext,
         cursor:   Cursor,
@@ -649,7 +646,7 @@ impl GraphPoint for CustomBlock {
         Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
-    #[inline] fn on_selection_hover(
+    fn on_selection_hover(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         cursor: Cursor,
@@ -669,7 +666,7 @@ impl GraphPoint for CustomBlock {
         Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
-    #[inline] fn on_undo(
+    fn on_undo(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         action: &AppAction
@@ -691,7 +688,7 @@ impl GraphPoint for CustomBlock {
         })
     }
 
-    #[inline] fn on_redo(
+    fn on_redo(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         action: &AppAction
@@ -761,15 +758,15 @@ impl Sound {
         SoundType::Custom
     ];
 
-    #[inline] pub fn new(sound_type: SoundType) -> AppResult<Self> {
+    pub fn new(sound_type: SoundType) -> AppResult<Self> {
         Ok(match sound_type {
             SoundType::Note =>
                 Self::Note{pattern: default(),
-                    volume: r32![1.0], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2],
+                    volume: r32![1], attack: r64![0], decay: r64![0], sustain: r32![1], release: r64![0],
                     rep_count: NonZeroUsize::MIN},
 
             SoundType::Noise => {
-                let mut buf = vec![0.0f32; Sequencer::SAMPLE_RATE as usize]; // 1 second of noise
+                let mut buf = vec![0.0; Sequencer::SAMPLE_RATE as usize]; // 1 second of noise
                 buf.fill_with(|| random() as f32 * 2.0 - 1.0);
                 let src = AudioBufferOptions::new(Sequencer::SAMPLE_RATE, Sequencer::SAMPLE_RATE as f32)
                     .number_of_channels(Sequencer::CHANNEL_COUNT)
@@ -778,7 +775,7 @@ impl Sound {
                     src.copy_to_channel(&buf, i)?;
                 }
                 Self::Noise{pattern: default(), src,
-                    volume: r32![0.2], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.2],
+                    volume: r32![0.2], attack: r64![0], decay: r64![0], sustain: r32![1], release: r64![0.2],
                     rep_count: NonZeroUsize::MIN}
             }
 
@@ -787,12 +784,12 @@ impl Sound {
                     src: AudioBufferOptions::new(1, Sequencer::SAMPLE_RATE as f32)
                         .number_of_channels(Sequencer::CHANNEL_COUNT)
                         .pipe(|x| AudioBuffer::new(x))?,
-                    volume: r32![1.0], attack: r64![0.0], decay: r64![0.0], sustain: r32![1.0], release: r64![0.0],
-                    rep_count: NonZeroUsize::MIN, speed: r32![1.0]}
+                    volume: r32![1], attack: r64![0], decay: r64![0], sustain: r32![1], release: r64![0],
+                    rep_count: NonZeroUsize::MIN, speed: r32![1]}
         })
     }
 
-    #[inline] pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::None => "Undefined",
             Self::Note{..} => "Simple Wave",
@@ -931,9 +928,9 @@ impl Sound {
         })
     }
 
-    #[inline] pub fn len(&self, bps: Beats) -> AppResult<Beats> {
+    pub fn len(&self, bps: Beats) -> AppResult<Beats> {
         Ok(match self {
-            Self::None => r64![1.0],
+            Self::None => r64![1],
 
             Self::Note {pattern, ..} |
             Self::Noise{pattern, ..} => pattern.try_borrow()?
@@ -945,8 +942,8 @@ impl Sound {
             }
         })
     }
-    
-    #[inline] pub fn rep_count(&self) -> NonZeroUsize {
+
+    pub fn rep_count(&self) -> NonZeroUsize {
         match *self {
             Self::None => NonZeroUsize::MIN,
             Self::Note  {rep_count, ..} |
@@ -955,16 +952,8 @@ impl Sound {
         }
     }
 
-    #[inline] pub fn tabs(&self) -> &'static [TabInfo] {
-        match self {
-            Self::None =>
-                &[TabInfo{name: "Choose Sound Type"}],
-            Self::Note{..} | Self::Noise{..} | Self::Custom{..} =>
-                &[TabInfo{name: "General"}, TabInfo{name: "Envelope"}, TabInfo{name: "Pattern"}]
-        }
-    }
-
-    pub fn params(&self, ctx: &AppContext, setter: Callback<AppEvent>) -> Html {
+    pub fn params(&self, ctx: &AppContext) -> Html {
+        let setter = ctx.event_emitter();
         match self {
             Self::None => html!{<div class="horizontal-menu">
                 {for Sound::TYPES.iter().map(|x| html!{
@@ -986,7 +975,7 @@ impl Sound {
                     setter={setter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
                     fmt={|x| format!("{}", usize::from(x))}
                     name="Number Of Pattern Repetitions"
-                    min={r64![1.0]}
+                    min={r64![1]}
                     initial={*rep_count}/>
                 </div>},
                 1 /* Envelope */ => html!{<div id="inputs">
@@ -1023,7 +1012,7 @@ impl Sound {
                     setter={setter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
                     fmt={|x| format!("{}", usize::from(x))}
                     name="Number Of Pattern Repetitions"
-                    min={r64![1.0]}
+                    min={r64![1]}
                     initial={*rep_count}/>
                     <input type="file"
                     onchange={setter.reform(AppEvent::AudioUploaded)}/>

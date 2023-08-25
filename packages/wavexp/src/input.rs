@@ -19,7 +19,7 @@ use yew::{
     Callback,
     Properties,
     scheduler::Shared,
-    NodeRef};
+    NodeRef, function_component};
 use wavexp_utils::{
     r64,
     R64,
@@ -54,16 +54,16 @@ pub struct Cursor {
 
 impl Deref for Cursor {
     type Target = Buttons;
-    #[inline] fn deref(&self) -> &Self::Target {&self.buttons}
+    fn deref(&self) -> &Self::Target {&self.buttons}
 }
 
 impl DerefMut for Cursor {
-    #[inline] fn deref_mut(&mut self) -> &mut Self::Target {&mut self.buttons}
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.buttons}
 }
 
 impl Add<&KeyboardEvent> for Cursor {
     type Output = Self;
-    #[inline] fn add(mut self, rhs: &KeyboardEvent) -> Self::Output {
+    fn add(mut self, rhs: &KeyboardEvent) -> Self::Output {
         self.shift = rhs.shift_key();
         self.meta = rhs.meta_key();
         self
@@ -130,7 +130,7 @@ impl Component for Slider {
     type Message = Cmd;
     type Properties = SliderProps;
 
-    #[inline] fn create(ctx: &Context<Self>) -> Self {
+    fn create(ctx: &Context<Self>) -> Self {
         Self{value: ctx.props().initial, old_value: f64::NAN, target: default()}
     }
 
@@ -186,7 +186,7 @@ impl Component for Slider {
                 } else {
                     let p = ((self.value - min) / (max - min) - 0.5f32) * R64::TAU;
                     format!("M 50 12 A 38 38 0 {} 0 {} {}",
-                        (p > 0) as u8, p.sin_or(r64![0.0]) * 38 + 50, p.cos_or(r64![0.0]) * 38 + 50).into()
+                        (p > 0) as u8, p.sin_or(r64![0]) * 38 + 50, p.cos_or(r64![0]) * 38 + 50).into()
                 }}/>
                 <circle class="inner" cx="50" cy="50" r="38"/>
                 <text x="50" y="50">{fmt.emit(self.value)}</text>
@@ -215,7 +215,7 @@ impl Component for Switch {
     type Message = Cmd;
     type Properties = SwitchProps;
 
-    #[inline] fn create(ctx: &Context<Self>) -> Self {
+    fn create(ctx: &Context<Self>) -> Self {
         Self{value: ctx.props().initial.into(), old_value: 0, focused: false, target: default()}
     }
 
@@ -253,7 +253,7 @@ impl Component for Switch {
         false
     }
 
-    #[inline] fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
+    fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
         let new_initial = ctx.props().initial;
         if old_props.initial != new_initial {
             self.value = new_initial.into();
@@ -276,8 +276,8 @@ impl Component for Switch {
                     let src = (v / n_opts - 0.5f32) * R64::TAU;
                     let dst = ((v + 1u8) / n_opts - 0.5f32) * R64::TAU;
                     format!("M {} {} A 38 38 0 0 0 {} {}",
-                        src.sin_or(r64![0.0]) * 38 + 50, src.cos_or(r64![0.0]) * 38 + 50,
-                        dst.sin_or(r64![0.0]) * 38 + 50, dst.cos_or(r64![0.0]) * 38 + 50)
+                        src.sin_or(r64![0]) * 38 + 50, src.cos_or(r64![0]) * 38 + 50,
+                        dst.sin_or(r64![0]) * 38 + 50, dst.cos_or(r64![0]) * 38 + 50)
                 }}/>
                 <circle class="inner" cx="50" cy="50" r="38"/>
                 <text x="50" y="50">{unsafe{options.get_unchecked(usize::from(self.value))}}</text>
@@ -292,6 +292,7 @@ pub struct Button;
 pub struct ButtonProps {
     pub name: AttrValue,
     pub children: Children,
+    #[prop_or_default]
     pub setter: Callback<()>,
     #[prop_or(false)]
     pub svg: bool,
@@ -305,9 +306,9 @@ impl Component for Button {
     type Message = ();
     type Properties = ButtonProps;
 
-    #[inline] fn create(_: &Context<Self>) -> Self {Self}
+    fn create(_: &Context<Self>) -> Self {Self}
 
-    #[inline] fn update(&mut self, _: &Context<Self>, _: Self::Message) -> bool {false}
+    fn update(&mut self, _: &Context<Self>, _: Self::Message) -> bool {false}
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         let ButtonProps{name, children, svg, class, setter, help} = ctx.props();
@@ -346,7 +347,7 @@ impl<T: 'static + GraphPoint> Component for GraphEditorCanvas<T> {
     type Message = ();
     type Properties = GraphEditorCanvasProps<T>;
 
-    #[inline] fn create(_: &Context<Self>) -> Self {Self(default())}
+    fn create(_: &Context<Self>) -> Self {Self(default())}
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         let GraphEditorCanvasProps{emitter, editor, id} = ctx.props();
@@ -367,7 +368,7 @@ impl<T: 'static + GraphPoint> Component for GraphEditorCanvas<T> {
         }
     }
 
-    #[inline] fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
+    fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         if !first_render {return}
         match ctx.props().editor.try_borrow_mut().to_app_result() {
             Ok(mut x) => _ = x.init(),
@@ -401,7 +402,7 @@ impl Component for Counter {
     type Message = Cmd;
     type Properties = CounterProps;
 
-    #[inline] fn create(ctx: &Context<Self>) -> Self {
+    fn create(ctx: &Context<Self>) -> Self {
         Self{value: ctx.props().initial, old_value: f64::NAN, target: default()}
     }
 
@@ -453,5 +454,26 @@ impl Component for Counter {
                 }
             </svg>
         }
+    }
+}
+
+#[derive(PartialEq, Properties)]
+pub struct TabProps {
+    pub name: AttrValue,
+    pub desc: AttrValue,
+    pub selected: bool,
+    #[prop_or_default]
+    pub setter: Callback<()>
+}
+
+#[function_component]
+pub fn Tab(props: &TabProps) -> Html {
+    let TabProps{name, desc, setter, selected} = props;
+    html!{
+        <div id={selected.then_some("selected-tab")}
+        onpointerup={setter.reform(|_| ())}
+        data-main-hint={name} data-aux-hint={desc}>
+            <p>{name}</p>
+        </div>
     }
 }

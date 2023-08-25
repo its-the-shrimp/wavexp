@@ -26,7 +26,7 @@ use web_sys::{
     Element,
     console::{warn_1, warn_2},
     HtmlElement};
-use yew::html::IntoPropValue;
+use yew::{html::IntoPropValue, AttrValue};
 
 pub struct EveryNth<'a, T> {
     iter: &'a [T],
@@ -85,10 +85,10 @@ pub trait ToEveryNth<T> {
 }
 
 impl<T> ToEveryNth<T> for [T] {
-    #[inline] fn every_nth(&self, n: usize) -> EveryNth<'_, T> {
+    fn every_nth(&self, n: usize) -> EveryNth<'_, T> {
         EveryNth {iter: self, n, state: 0, off: 0}
     }
-    #[inline] fn every_nth_mut(&mut self, n: usize) -> EveryNthMut<'_, T> {
+    fn every_nth_mut(&mut self, n: usize) -> EveryNthMut<'_, T> {
         EveryNthMut {iter: self, n, state: 0, off: 0}
     }
 }
@@ -111,7 +111,7 @@ pub struct IterIndicesMut<'data, 'ids, T> {
 
 impl<'data, 'ids, T> Iterator for IterIndicesMut<'data, 'ids, T> {
     type Item = &'data mut T;
-    #[inline] fn next(&mut self) -> Option<Self::Item> {
+    fn next(&mut self) -> Option<Self::Item> {
         if let Some(&id) = self.ids.get(self.state) {
             self.state += 1;
             unsafe {
@@ -131,12 +131,12 @@ pub trait ToIterIndicesMut<'data, 'ids, T> {
 }
 
 impl<'data, 'ids, T> ToIterIndicesMut<'data, 'ids, T> for [T] {
-    #[inline] unsafe fn iter_indices_unchecked_mut(&'data mut self, ids: &'ids [usize])
+    unsafe fn iter_indices_unchecked_mut(&'data mut self, ids: &'ids [usize])
     -> IterIndicesMut<'data, 'ids, T> {
         IterIndicesMut{data: self, ids, state: 0}
     }
     
-    #[inline] fn iter_indices_mut(&'data mut self, ids: &'ids [usize])
+    fn iter_indices_mut(&'data mut self, ids: &'ids [usize])
     -> Option<IterIndicesMut<'data, 'ids, T>> {
         let len = self.len();
         if ids.iter().any(|&i| i >= len) {return None}
@@ -156,20 +156,20 @@ pub struct Alias<'a, T: ?Sized>(pub &'a T);
 
 impl<'a, T: ?Sized + Deref> Deref for Alias<'a, T> {
     type Target = T::Target;
-    #[inline] fn deref(&self) -> &Self::Target {self.0.deref()}
+    fn deref(&self) -> &Self::Target {self.0.deref()}
 }
 
 pub trait Check: Sized {
-	#[inline] fn check(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
+	fn check(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
 		if f(&self) {Ok(self)} else {Err(self)}
 	}
 
-    #[inline] fn check_in<R>(self, range: R) -> Result<Self, Self>
+    fn check_in<R>(self, range: R) -> Result<Self, Self>
 	where Self: PartialOrd, R: RangeBounds<Self> {
 		if range.contains(&self) {Ok(self)} else {Err(self)}
 	}
 
-	#[inline] fn check_not_in<R>(self, range: R) -> Result<Self, Self>
+	fn check_not_in<R>(self, range: R) -> Result<Self, Self>
 	where Self: PartialOrd, R: RangeBounds<Self> {
 		if !range.contains(&self) {Ok(self)} else {Err(self)}
 	}
@@ -177,23 +177,34 @@ pub trait Check: Sized {
 impl<T> Check for T {}
 
 pub trait Tee: Sized {
-	#[inline] fn tee(self, f: impl FnOnce(&Self)) -> Self {
+	fn tee(self, f: impl FnOnce(&Self)) -> Self {
         f(&self); self
 	}
 
-    #[inline] fn js_log(self, label: &str) -> Self 
+    fn js_log(self, label: &str) -> Self 
     where Self: Debug {
         js_log!("{}{:?}", label, &self); self
     }
 }
 impl<T> Tee for T {}
 
+/// like `ToString`, but for `AttrValue`
+pub trait ToAttrValue {
+    fn to_attr_value(&self) -> AttrValue;
+}
+
+impl<T: ToString> ToAttrValue for T {
+    fn to_attr_value(&self) -> AttrValue {
+        AttrValue::from(self.to_string())
+    }
+}
+
 pub trait Pipe: Sized {
-	#[inline] fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
+	fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
         f(self)
     }
 
-    #[inline] fn pipe_if(self, cond: bool, f: impl FnOnce(Self) -> Self) -> Self {
+    fn pipe_if(self, cond: bool, f: impl FnOnce(Self) -> Self) -> Self {
         if cond {f(self)} else {self}
     }
 }
@@ -210,33 +221,33 @@ pub trait BoolExt {
 }
 
 impl BoolExt for bool {
-    #[inline] fn choose<T>(self, on_true: T, on_false: T) -> T {
+    fn choose<T>(self, on_true: T, on_false: T) -> T {
         if self {on_true} else {on_false}
     }
 
-    #[inline] fn then_or<T>(self, default: T, f: impl FnOnce() -> T) -> T {
+    fn then_or<T>(self, default: T, f: impl FnOnce() -> T) -> T {
         if self {f()} else {default}
     }
 
-    #[inline] fn then_or_else<T>(self, default: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T {
+    fn then_or_else<T>(self, default: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T {
         if self {f()} else {default()}
     }
 
-    #[inline] fn then_negate<T: Neg<Output=T>>(self, val: T) -> T {
+    fn then_negate<T: Neg<Output=T>>(self, val: T) -> T {
         if self {-val} else {val}
     }
 
-    #[inline] fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E> {
+    fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E> {
         self.then(f).transpose()
     }
 
-    #[inline] fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T> {
+    fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T> {
         if self {f()} else {None}
     }
 
-    #[inline] fn to_app_result(self) -> AppResult<()> {
+    fn to_app_result(self) -> AppResult<()> {
         if self {Ok(())}
-        else {Err(AppError::new("expected `true`, found `false`"))}
+        else {Err(app_error!("expected `true`, found `false`"))}
     }
 }
 
@@ -266,58 +277,58 @@ pub trait ArrayExt<T, const N: usize>: Sized {
 }
 
 impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
-    #[inline] fn zip<O, R>(self, other: [O; N], mut f: impl FnMut(T, O) -> R) -> [R; N] {
+    fn zip<O, R>(self, other: [O; N], mut f: impl FnMut(T, O) -> R) -> [R; N] {
         let (mut d, mut s) = (self.into_iter(), other.into_iter());
         from_fn(|_| unsafe{f(d.next().unwrap_unchecked(), s.next().unwrap_unchecked())})
     }
 
-    #[inline] fn zip_fold<O, R>(self, init: R, other: [O; N], mut f: impl FnMut(R, T, O) -> R) -> R {
+    fn zip_fold<O, R>(self, init: R, other: [O; N], mut f: impl FnMut(R, T, O) -> R) -> R {
         self.into_iter().zip(other).fold(init, |r, (x, y)| f(r, x, y))
     }
 
-    #[inline] fn add<'a, O>(mut self, other: &'a [O; N]) -> Self where T: AddAssign<&'a O> {
+    fn add<'a, O>(mut self, other: &'a [O; N]) -> Self where T: AddAssign<&'a O> {
         for (dst, src) in self.iter_mut().zip(other.iter()) {*dst += src}
         self
     }
 
-    #[inline] fn sub<'a, O>(mut self, other: &'a [O; N]) -> Self where T: SubAssign<&'a O> {
+    fn sub<'a, O>(mut self, other: &'a [O; N]) -> Self where T: SubAssign<&'a O> {
         for (dst, src) in self.iter_mut().zip(other.iter()) {*dst -= src}
         self
     }
 
-    #[inline] fn mul<'a, O>(mut self, other: &'a [O; N]) -> Self where T: MulAssign<&'a O> {
+    fn mul<'a, O>(mut self, other: &'a [O; N]) -> Self where T: MulAssign<&'a O> {
         for (dst, src) in self.iter_mut().zip(other.iter()) {*dst *= src}
         self
     }
 
-    #[inline] fn div<'a, O>(mut self, other: &'a [O; N]) -> Self where T: DivAssign<&'a O> {
+    fn div<'a, O>(mut self, other: &'a [O; N]) -> Self where T: DivAssign<&'a O> {
         for (d, s) in self.iter_mut().zip(other.iter()) {*d /= s}
         self
     }
 
-    #[inline] fn rem<'a, O>(mut self, other: &'a [O; N]) -> Self where T: RemAssign<&'a O> {
+    fn rem<'a, O>(mut self, other: &'a [O; N]) -> Self where T: RemAssign<&'a O> {
         for (d, s) in self.iter_mut().zip(other.iter()) {*d %= s}
         self
     }
 
-    #[inline] fn floor_to(mut self, other: Self) -> Self where T: RoundTo {
+    fn floor_to(mut self, other: Self) -> Self where T: RoundTo {
         for (d, s) in self.iter_mut().zip(other) {modify(d, |d| d.floor_to(s))}
         self
     }
 
-    #[inline] fn ceil_to(mut self, other: Self) -> Self where T: RoundTo {
+    fn ceil_to(mut self, other: Self) -> Self where T: RoundTo {
         for (d, s) in self.iter_mut().zip(other) {modify(d, |d| d.ceil_to(s))}
         self
     }
 
-    #[inline] fn sum<R>(self) -> R where R: Sum<T> {self.into_iter().sum()}
+    fn sum<R>(self) -> R where R: Sum<T> {self.into_iter().sum()}
 
-    #[inline] fn array_check_in<R, O>(self, ranges: &[R; N]) -> Option<Self>
+    fn array_check_in<R, O>(self, ranges: &[R; N]) -> Option<Self>
     where T: PartialOrd<O>, O: PartialOrd<T>, R: RangeBounds<O> {
         self.iter().zip(ranges).all(|(i, r)| r.contains(i)).then_some(self)
     }
 
-    #[inline] fn fit<R, O>(&self, mut values: [R; N]) -> [R; N]
+    fn fit<R, O>(&self, mut values: [R; N]) -> [R; N]
     where T: RangeExt<O>, O: Clone + PartialOrd<R>, R: Clone + From<O> {
         for (i, r) in values.iter_mut().zip(self) {
             *i = r.fit(i.clone());
@@ -331,7 +342,7 @@ pub trait ArrayFrom<T, const N: usize>: Sized {
 }
 
 impl<S, D, const N: usize> ArrayFrom<[S; N], N> for D where D: From<S> {
-    #[inline] fn array_from(x: [S; N]) -> [Self; N] {x.map(D::from)}
+    fn array_from(x: [S; N]) -> [Self; N] {x.map(D::from)}
 }
 
 pub trait IntoArray<T, const N: usize> {
@@ -339,7 +350,7 @@ pub trait IntoArray<T, const N: usize> {
 }
 
 impl<T, U, const N: usize> IntoArray<U, N> for T where U: ArrayFrom<T, N> {
-    #[inline] fn into_array(self) -> [U; N] {U::array_from(self)}
+    fn into_array(self) -> [U; N] {U::array_from(self)}
 }
 
 pub trait FlippedArray<T, const OUTER: usize, const INNER: usize> {
@@ -397,32 +408,32 @@ impl<T> WasmCell<T> {
 pub struct MaybeCell<T>(RefCell<Option<T>>);
 
 impl<T> Default for MaybeCell<T> {
-    #[inline] fn default() -> Self {Self(RefCell::new(None))}
+    fn default() -> Self {Self(RefCell::new(None))}
 }
 
 impl<T> MaybeCell<T> {
-    #[inline] pub const fn new(x: Option<T>) -> Self {
+    pub const fn new(x: Option<T>) -> Self {
         Self(RefCell::new(x))
     }
 
-    #[inline] pub fn get(&self) -> AppResult<Ref<'_, T>> {
+    pub fn get(&self) -> AppResult<Ref<'_, T>> {
         self.0.try_borrow().to_app_result()
             .and_then(|x| Ref::filter_map(x, Option::as_ref)
                 .explain_err("MaybeCell object is not initialised"))
     }
 
-    #[inline] pub fn get_mut(&self) -> AppResult<RefMut<'_, T>> {
+    pub fn get_mut(&self) -> AppResult<RefMut<'_, T>> {
         self.0.try_borrow_mut().to_app_result()
             .and_then(|x| RefMut::filter_map(x, Option::as_mut)
                 .explain_err("MaybeCell object is not initialised"))
     }
 
-    #[inline] pub fn set(&self, val: T) -> AppResult<RefMut<'_, T>> {
+    pub fn set(&self, val: T) -> AppResult<RefMut<'_, T>> {
         self.0.try_borrow_mut().to_app_result()
             .map(|x| RefMut::map(x, |x| x.insert(val)))
     }
 
-    #[inline] pub fn get_or_init(&self, f: impl FnOnce() -> T) -> AppResult<RefMut<'_, T>> {
+    pub fn get_or_init(&self, f: impl FnOnce() -> T) -> AppResult<RefMut<'_, T>> {
         self.0.try_borrow_mut().to_app_result()
             .map(|x| RefMut::map(x, |x| x.get_or_insert(f())))
     }
@@ -435,19 +446,19 @@ pub struct SliceRef<'a, T: ?Sized> {
 
 impl<'a, T> Deref for SliceRef<'a, T> {
     type Target = T;
-    #[inline] fn deref(&self) -> &Self::Target {self.inner}
+    fn deref(&self) -> &Self::Target {self.inner}
 }
 
 impl<'a, T> SliceRef<'a, T> {
-    #[inline] pub fn new(slice: &'a [T], index: usize) -> Option<Self> {
+    pub fn new(slice: &'a [T], index: usize) -> Option<Self> {
         slice.get(index).map(|inner| Self{inner, index}) 
     }
 
     /// # Safety
     /// `inner` must be a reference to the `index`-th item in its array
-    #[inline] pub unsafe fn raw(inner: &'a T, index: usize) -> Self {Self{inner, index}}
+    pub unsafe fn raw(inner: &'a T, index: usize) -> Self {Self{inner, index}}
 
-    #[inline] pub fn index(&self) -> usize {self.index}
+    pub fn index(&self) -> usize {self.index}
 }
 
 #[allow(non_camel_case_types)]
@@ -537,7 +548,7 @@ pub fn report_err(err: js_sys::Error) {
 pub struct AppError(js_sys::Error);
 
 impl From<JsValue> for AppError {
-    #[inline] fn from(value: JsValue) -> Self {
+    fn from(value: JsValue) -> Self {
         match value.dyn_into() {
             Ok(x) => Self(x),
             Err(x) => Self::new(&String::from(js_sys::Object::from(x).to_string()))
@@ -545,11 +556,22 @@ impl From<JsValue> for AppError {
     }
 }
 
+/// `format!`-like macro to create an `AppError`
+#[macro_export]
+macro_rules! app_error {
+    ($x:literal) => {
+        $crate::AppError::new($x)
+    };
+    ($x:literal, $($arg:tt)+) => {
+        $crate::AppError::new(&format!($x, $($arg)+))
+    };
+}
+
 macro_rules! impl_into_app_error {
     ($($t:ty)+) => {
         $(
             impl From<$t> for AppError {
-                #[inline] fn from(value: $t) -> Self {
+                fn from(value: $t) -> Self {
                     Self::new(&value.to_string())
                 }
             }
@@ -560,11 +582,11 @@ macro_rules! impl_into_app_error {
 impl_into_app_error!(BorrowError BorrowMutError);
 
 impl From<AppError> for js_sys::Error {
-    #[inline] fn from(value: AppError) -> Self {value.0}
+    fn from(value: AppError) -> Self {value.0}
 }
 
 impl AppError {
-    #[inline] pub fn new(msg: &str) -> Self {
+    pub fn new(msg: &str) -> Self {
         Self(js_sys::Error::new(msg))
     }
 }
@@ -576,7 +598,7 @@ pub trait AppResultUtils<T>: Sized {
 }
 
 impl<T> AppResultUtils<T> for AppResult<T> {
-    #[inline] fn report(self) -> Option<T> {
+    fn report(self) -> Option<T> {
         match self {
             Ok(x) => Some(x),
             Err(e) => {report_err(e.into()); None}
@@ -591,15 +613,15 @@ pub trait ResultExt<T, E> {
 }
 
 impl<T, E> ResultExt<T, E> for Result<T, E> {
-    #[inline] fn to_app_result(self) -> AppResult<T> where E: Display {
+    fn to_app_result(self) -> AppResult<T> where E: Display {
         self.map_err(|e| AppError::new(&e.to_string()))
     }
 
-    #[inline] fn explain_err(self, msg: &str) -> AppResult<T> {
+    fn explain_err(self, msg: &str) -> AppResult<T> {
         self.map_err(|_| AppError::new(msg))
     }
 
-    #[inline] fn explain_err_with(self, f: impl FnOnce() -> String) -> AppResult<T> {
+    fn explain_err_with(self, f: impl FnOnce() -> String) -> AppResult<T> {
         self.map_err(|_| AppError::new(&f()))
     }
 }
@@ -613,24 +635,24 @@ pub trait OptionExt<T> {
 }
 
 impl<T> OptionExt<T> for Option<T> {
-    #[inline] fn to_app_result(self) -> AppResult<T> {
-        self.ok_or_else(|| AppError::new("`Option` contained the `None` value"))
+    fn to_app_result(self) -> AppResult<T> {
+        self.ok_or_else(|| app_error!("`Option` contained the `None` value"))
     }
 
-    #[inline] fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
+    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
         match self {Some(x) => f(x), None => U::default()}
     }
 
-    #[inline] fn choose<U>(&self, on_some: U, on_none: U) -> U {
+    fn choose<U>(&self, on_some: U, on_none: U) -> U {
         if self.is_some() {on_some} else {on_none}
     }
 
     #[allow(clippy::manual_map)]
-    #[inline] fn drop(self) -> Option<()> {
+    fn drop(self) -> Option<()> {
         match self {Some(_) => Some(()), None => None}
     }
 
-    #[inline] fn get_or_try_insert<E>(&mut self, f: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E> {
+    fn get_or_try_insert<E>(&mut self, f: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E> {
         if self.is_none() {
             *self = Some(f()?);
         }
@@ -715,23 +737,23 @@ pub struct IterMutWithCtx<'a, T: 'a + Copy> {
 
 impl<'a, T: 'a + Copy> Iterator for IterMutWithCtx<'a, T> {
     type Item = (&'a mut [T], T);
-    #[inline] fn next(&mut self) -> Option<Self::Item> {
+    fn next(&mut self) -> Option<Self::Item> {
         self.slice.get(self.state).copied().map(|x| unsafe {
             self.state += 1;
             ((self.slice as *mut [T]).as_mut().unwrap_unchecked(), x)})
     }
 
-    #[inline] fn size_hint(&self) -> (usize, Option<usize>) {
+    fn size_hint(&self) -> (usize, Option<usize>) {
         self.slice.len().pipe(|x| (x, Some(x)))
     }
 }
 
 impl<'a, T: 'a + Copy> ExactSizeIterator for IterMutWithCtx<'a, T> {
-    #[inline] fn len(&self) -> usize {self.slice.len()}
+    fn len(&self) -> usize {self.slice.len()}
 }
 
 impl<'a, T: 'a + Copy> IterMutWithCtx<'a, T> {
-    #[inline] fn new(slice: &'a mut [T]) -> Self {Self{slice, state: 0}}
+    fn new(slice: &'a mut [T]) -> Self {Self{slice, state: 0}}
 }
 
 pub trait SliceExt<T> {
@@ -774,38 +796,38 @@ pub trait SliceExt<T> {
 }
 
 impl<T> SliceExt<T> for [T] {
-    #[inline] fn any(&self, mut f: impl FnMut(&T) -> bool) -> bool {
+    fn any(&self, mut f: impl FnMut(&T) -> bool) -> bool {
         let mut res = false;
         for i in self {res |= f(i)}
         res
     }
 
-    #[inline] fn all(&self, mut f: impl FnMut(&T) -> bool) -> bool {
+    fn all(&self, mut f: impl FnMut(&T) -> bool) -> bool {
         let mut res = true;
         for i in self {res &= f(i)}
         res
     }
 
-    #[inline] fn to_box(&self) -> Box<Self> where T: Clone {self.into()}
+    fn to_box(&self) -> Box<Self> where T: Clone {self.into()}
 
-    #[inline] fn get_saturating(&self, id: usize) -> &T {
+    fn get_saturating(&self, id: usize) -> &T {
         unsafe{self.get_unchecked(id.min(self.len() - 1))}
     }
 
-    #[inline] fn get_saturating_mut(&mut self, id: usize) -> &mut T {
+    fn get_saturating_mut(&mut self, id: usize) -> &mut T {
         unsafe{self.get_unchecked_mut(id.min(self.len() - 1))}
     }
 
-    #[inline] fn get_wrapping(&self, id: usize) -> &T {
+    fn get_wrapping(&self, id: usize) -> &T {
         unsafe{self.get_unchecked(id % self.len())}
     }
 
-    #[inline] fn get_wrapping_mut(&mut self, id: usize) -> &mut T {
+    fn get_wrapping_mut(&mut self, id: usize) -> &mut T {
         unsafe{self.get_unchecked_mut(id % self.len())}
     }
 
 
-    #[inline] fn get_var<'a>(&'a self, ids: &[usize]) -> Option<Vec<&'a T>> {
+    fn get_var<'a>(&'a self, ids: &[usize]) -> Option<Vec<&'a T>> {
         let len = self.len();
         for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
             if *id >= len || rest.contains(id) {return None}
@@ -815,7 +837,7 @@ impl<T> SliceExt<T> for [T] {
         Some(ids.iter().map(|x| unsafe{&*base.add(*x)}).collect())
     }
 
-    #[inline] fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Option<Vec<&'a mut T>> {
+    fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Option<Vec<&'a mut T>> {
         let len = self.len();
         for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
             if *id >= len || rest.contains(id) {return None}
@@ -857,7 +879,7 @@ impl<T> SliceExt<T> for [T] {
         SliceMove{from: index, to: new}
     }
 
-    #[inline] fn reorder(&mut self, index: usize) -> AppResult<SliceMove> where T: Ord {
+    fn reorder(&mut self, index: usize) -> AppResult<SliceMove> where T: Ord {
         let len = self.len();
         if index >= len {
             return Err(AppError::new(&format!("reorder index (is {index}) should be < len (is {len})")))
@@ -865,7 +887,7 @@ impl<T> SliceExt<T> for [T] {
         Ok(unsafe{self.reorder_unchecked(index)})
     }
 
-    #[inline] fn set_sorted(&mut self, index: usize, value: T) -> AppResult<SliceMove> where T: Ord {
+    fn set_sorted(&mut self, index: usize, value: T) -> AppResult<SliceMove> where T: Ord {
         let len = self.len();
         if index >= len {
             return Err(AppError::new(&format!("reorder index (is {index}) should be < len (is {len})")))
@@ -878,13 +900,13 @@ impl<T> SliceExt<T> for [T] {
         })
     }
 
-    #[inline] fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>> {SliceRef::new(self, index)}
+    fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>> {SliceRef::new(self, index)}
 
-    #[inline] unsafe fn get_unchecked_aware(&self, index: usize) -> SliceRef<'_, T> {
+    unsafe fn get_unchecked_aware(&self, index: usize) -> SliceRef<'_, T> {
         SliceRef::raw(self.get_unchecked(index), index)
     }
 
-    #[inline] fn iter_mut_with_ctx<'a>(&'a mut self) -> IterMutWithCtx<'a, T> where T: 'a + Copy {
+    fn iter_mut_with_ctx<'a>(&'a mut self) -> IterMutWithCtx<'a, T> where T: 'a + Copy {
         IterMutWithCtx::new(self)
     }
 }
@@ -935,7 +957,7 @@ pub trait VecExt<T> {
 }
 
 impl<T> VecExt<T> for Vec<T> {
-    #[inline] fn try_remove(&mut self, index: usize) -> AppResult<T> {
+    fn try_remove(&mut self, index: usize) -> AppResult<T> {
         let len = self.len();
         if index >= len {
             return Err(AppError::new(&format!("removal index (is {index}) should be < len (is {len})")))
@@ -949,7 +971,7 @@ impl<T> VecExt<T> for Vec<T> {
         }
     }
 
-    #[inline] unsafe fn remove_unchecked(&mut self, index: usize) -> T {
+    unsafe fn remove_unchecked(&mut self, index: usize) -> T {
         let len = self.len();
         let ptr = self.as_mut_ptr().add(index);
         let ret = ptr::read(ptr);
@@ -958,7 +980,7 @@ impl<T> VecExt<T> for Vec<T> {
         ret
     }
 
-    #[inline] fn try_swap_remove(&mut self, index: usize) -> AppResult<T> {
+    fn try_swap_remove(&mut self, index: usize) -> AppResult<T> {
         let len = self.len();
         if index >= len {
             return Err(AppError::new(&format!("removal index (is {index}) should be < len (is {len})")))
@@ -972,7 +994,7 @@ impl<T> VecExt<T> for Vec<T> {
         }
     }
 
-    #[inline] fn try_insert(&mut self, index: usize, element: T) -> AppResult<&mut T> {
+    fn try_insert(&mut self, index: usize, element: T) -> AppResult<&mut T> {
         let len = self.len();
         if index > len {
             return Err(AppError::new(&format!("insertion index (is {index}) should be <= len (is {len})")))
@@ -1016,7 +1038,7 @@ impl<T> VecExt<T> for Vec<T> {
 
 pub trait Take: Default {
     /// replaces the value with a default one and returns the previous value
-    #[inline] fn take(&mut self) -> Self {take(self)}
+    fn take(&mut self) -> Self {take(self)}
 }
 impl<T: Default> Take for T {}
 
@@ -1037,43 +1059,43 @@ pub trait RangeExt<T> {
 }
 
 impl<T> RangeExt<T> for Range<T> {
-    #[inline] fn ordered(self) -> Self where T: Ord {
+    fn ordered(self) -> Self where T: Ord {
         if self.start > self.end {self.end .. self.start} else {self}
     }
 
-    #[inline] fn overlap<O>(&self, other: &Range<O>) -> bool
+    fn overlap<O>(&self, other: &Range<O>) -> bool
     where O: PartialOrd<T>, T: PartialOrd<O> {
         self.contains(&other.start)
             || self.contains(&other.end)
             || other.contains(&self.start)
     }
 
-    #[inline] fn loose_contain<O, I>(&self, item: I, offset: O) -> bool
+    fn loose_contain<O, I>(&self, item: I, offset: O) -> bool
     where O: Copy,
     I: PartialOrd<T> + Add<O, Output=I> + Sub<O, Output=I> + Copy,
     T: PartialOrd<I> {
         self.overlap(&(item - offset .. item + offset))
     }
 
-    #[inline] fn fit<R>(&self, item: R) -> R
+    fn fit<R>(&self, item: R) -> R
     where T: Clone + Into<R> + PartialOrd<R> {
         if      self.end  <= item {self.end.clone().into()}
         else if self.start > item {self.start.clone().into()}
         else                       {item}
     }
 
-    #[inline] fn extend<R>(self, value: R) -> Self
+    fn extend<R>(self, value: R) -> Self
     where T: PartialOrd<R> + From<R> {
         if      self.start > value {value.into() .. self.end}
         else if self.end  <= value {self.start .. value.into()}
         else {self}
     }
 
-    #[inline] fn map<R>(self, mut f: impl FnMut(T) -> R) -> Range<R> {
+    fn map<R>(self, mut f: impl FnMut(T) -> R) -> Range<R> {
         f(self.start) .. f(self.end)
     }
 
-    #[inline] fn to_pair(self) -> [T; 2] {[self.start, self.end]}
+    fn to_pair(self) -> [T; 2] {[self.start, self.end]}
 }
 
 #[test]
@@ -1088,14 +1110,14 @@ fn range_overlap() {
 
 pub trait LooseEq<O = Self> {
     fn loose_eq(&self, value: Self, off: O) -> bool;
-    #[inline] fn loose_ne(&self, value: Self, off: O) -> bool
+    fn loose_ne(&self, value: Self, off: O) -> bool
     where Self: Sized {
         !self.loose_eq(value, off)
     }
 }
 
 impl<O: Copy, T: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Self> + Copy> LooseEq<O> for T {
-    #[inline] fn loose_eq(&self, value: Self, off: O) -> bool {
+    fn loose_eq(&self, value: Self, off: O) -> bool {
         (value - off .. value + off).contains(self)
     }
 }
@@ -1104,61 +1126,61 @@ impl<O: Copy, T: PartialOrd + Add<O, Output=Self> + Sub<O, Output=Self> + Copy> 
 pub struct Point {pub x: i32, pub y: i32}
 
 impl From<[R64; 2]> for Point {
-    #[inline] fn from(value: [R64; 2]) -> Self {
+    fn from(value: [R64; 2]) -> Self {
         Self{x: value[0].into(), y: value[1].into()}
     }
 }
 
 impl<D> ArrayFrom<Point, 2> for D where D: From<i32> {
-    #[inline] fn array_from(x: Point) -> [Self; 2] {[x.x.into(), x.y.into()]}
+    fn array_from(x: Point) -> [Self; 2] {[x.x.into(), x.y.into()]}
 }
 
 impl Add for Point {
     type Output = Self;
-    #[inline] fn add(self, rhs: Self) -> Self::Output {
+    fn add(self, rhs: Self) -> Self::Output {
         self.checked_add(rhs).to_app_result().report().unwrap_or(self)
     }
 }
 
 impl AddAssign for Point {
-    #[inline] fn add_assign(&mut self, rhs: Self) {
+    fn add_assign(&mut self, rhs: Self) {
         self.checked_add_assign(rhs).to_app_result().report();
     }
 }
 
 impl Sub for Point {
     type Output = Self;
-    #[inline] fn sub(self, rhs: Self) -> Self::Output {
+    fn sub(self, rhs: Self) -> Self::Output {
         self.checked_sub(rhs).to_app_result().report().unwrap_or(self)
     }
 }
 
 impl SubAssign for Point {
-    #[inline] fn sub_assign(&mut self, rhs: Self) {
+    fn sub_assign(&mut self, rhs: Self) {
         self.checked_sub_assign(rhs).to_app_result().report();
     }
 }
 
 impl Neg for Point {
     type Output = Self;
-    #[inline] fn neg(self) -> Self::Output {
+    fn neg(self) -> Self::Output {
         self.checked_neg().to_app_result().report().unwrap_or(self)
     }
 }
 
 impl LooseEq for Point {
-    #[inline] fn loose_eq(&self, value: Self, off: Self) -> bool {
+    fn loose_eq(&self, value: Self, off: Self) -> bool {
         self.x.loose_eq(value.x, off.x)
             && self.y.loose_eq(value.y, off.y)
     }
 }
 
 impl RoundTo for Point {
-    #[inline] fn floor_to(self, step: Self) -> Self {
+    fn floor_to(self, step: Self) -> Self {
         Self{x: self.x.floor_to(step.x), y: self.y.floor_to(step.y)}
     }
 
-    #[inline] fn ceil_to(self, step: Self) -> Self {
+    fn ceil_to(self, step: Self) -> Self {
         Self{x: self.x.ceil_to(step.x), y: self.y.ceil_to(step.y)}
     }
 }
@@ -1166,10 +1188,10 @@ impl RoundTo for Point {
 impl Point {
     pub const ZERO: Self = Self{x:0, y:0};
 
-    #[inline] pub fn is_zero(&self) -> bool {self.x == 0 && self.y == 0}
-    #[inline] pub fn nonzero(self) -> Option<Self> {if self.is_zero() {None} else {Some(self)}}
+    pub fn is_zero(&self) -> bool {self.x == 0 && self.y == 0}
+    pub fn nonzero(self) -> Option<Self> {if self.is_zero() {None} else {Some(self)}}
 
-    #[inline] pub fn normalise(mut self, old_space: Rect, new_space: Rect) -> Self {
+    pub fn normalise(mut self, old_space: Rect, new_space: Rect) -> Self {
         self.y = (((self.y - old_space.bottom()) as f32 / old_space.height() as f32)
             * new_space.height() as f32) as i32 + new_space.bottom();
         self.x = (((self.x - old_space.left()) as f32 / old_space.width() as f32)
@@ -1177,33 +1199,33 @@ impl Point {
         self
     }
 
-    #[inline] pub fn map<T>(self, mut f: impl FnMut(i32) -> T) -> [T; 2] {
+    pub fn map<T>(self, mut f: impl FnMut(i32) -> T) -> [T; 2] {
         [f(self.x), f(self.y)]
     }
 
-    #[inline] pub fn checked_add(self, rhs: Self) -> Option<Self> {
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
         Some(Self{x: self.x.checked_add(rhs.x)?, y: self.y.checked_add(rhs.y)?})
     }
 
-    #[inline] pub fn checked_add_assign(&mut self, rhs: Self) -> bool {
+    pub fn checked_add_assign(&mut self, rhs: Self) -> bool {
         if let Some(x) = self.checked_add(rhs) {*self = x; true}
         else {false}
     }
 
-    #[inline] pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
         Some(Self{x: self.x.checked_sub(rhs.x)?, y: self.y.checked_sub(rhs.y)?})
     }
 
-    #[inline] pub fn checked_sub_assign(&mut self, rhs: Self) -> bool {
+    pub fn checked_sub_assign(&mut self, rhs: Self) -> bool {
         if let Some(x) = self.checked_sub(rhs) {*self = x; true}
         else {false}
     }
 
-    #[inline] pub fn checked_neg(self) -> Option<Self> {
+    pub fn checked_neg(self) -> Option<Self> {
         Some(Self{x: self.x.checked_neg()?, y: self.y.checked_neg()?})
     }
 
-    #[inline] pub fn checked_neg_assign(&mut self) -> bool {
+    pub fn checked_neg_assign(&mut self) -> bool {
         if let Some(x) = self.checked_neg() {*self = x; true}
         else {false}
     }
@@ -1213,10 +1235,10 @@ impl Point {
 pub struct Rect(Point, Point);
 
 impl Rect {
-    #[inline] fn    left(&self) -> i32 {self.0.x}
-    #[inline] fn  bottom(&self) -> i32 {self.1.y}
-    #[inline] fn   width(&self) -> i32 {self.1.x - self.0.x}
-    #[inline] fn  height(&self) -> i32 {self.1.y - self.0.y}
+    fn    left(&self) -> i32 {self.0.x}
+    fn  bottom(&self) -> i32 {self.1.y}
+    fn   width(&self) -> i32 {self.1.x - self.0.x}
+    fn  height(&self) -> i32 {self.1.y - self.0.y}
 }
 
 pub trait RoundTo {
@@ -1227,8 +1249,8 @@ pub trait RoundTo {
 macro_rules! round_to_4ints {
     ($($int:ty)+) => {$(
         impl RoundTo for $int {
-            #[inline] fn floor_to(self, step: Self) -> Self {self - self % step}
-            #[inline] fn  ceil_to(self, step: Self) -> Self {step - (self - 1) % step + self - 1}
+            fn floor_to(self, step: Self) -> Self {self - self % step}
+            fn  ceil_to(self, step: Self) -> Self {step - (self - 1) % step + self - 1}
         }
     )+};
 }
@@ -1239,15 +1261,15 @@ macro_rules! real_from_unsigned_ints_impl {
     ($real:ty { $float:ty } : $($nonzero:ty{ $int:ty }),+) => {
         $(
             impl From<$int> for $real {
-                #[inline] fn from(x: $int) -> Self {Self(x as $float)}
+                fn from(x: $int) -> Self {Self(x as $float)}
             }
 
             impl IntoPropValue<$real> for $int {
-                #[inline] fn into_prop_value(self) -> $real {self.into()}
+                fn into_prop_value(self) -> $real {self.into()}
             }
 
             impl From<$real> for $int {
-                #[inline] fn from(x: $real) -> Self {
+                fn from(x: $real) -> Self {
                     if      *x >= <$int>::MAX as $float {<$int>::MAX}
                     else if *x <= <$int>::MIN as $float {<$int>::MIN}
                     else {*x as $int}
@@ -1255,31 +1277,31 @@ macro_rules! real_from_unsigned_ints_impl {
             }
 
             impl IntoPropValue<$int> for $real {
-                #[inline] fn into_prop_value(self) -> $int {self.into()}
+                fn into_prop_value(self) -> $int {self.into()}
             }
 
             impl PartialEq<$int> for $real {
-                #[inline] fn eq(&self, other: &$int) -> bool {
+                fn eq(&self, other: &$int) -> bool {
                     PartialEq::eq(&self.0, &(*other as $float))
                 }
             }
 
             impl PartialOrd<$int> for $real {
-                #[inline] fn partial_cmp(&self, other: &$int) -> Option<Ordering> {
+                fn partial_cmp(&self, other: &$int) -> Option<Ordering> {
                     PartialOrd::partial_cmp(&self.0, &(*other as $float))
                 }
             }
 
             impl From<$nonzero> for $real {
-                #[inline] fn from(x: $nonzero) -> Self {Self(x.get() as $float)}
+                fn from(x: $nonzero) -> Self {Self(x.get() as $float)}
             }
 
             impl IntoPropValue<$real> for $nonzero {
-                #[inline] fn into_prop_value(self) -> $real {self.into()}
+                fn into_prop_value(self) -> $real {self.into()}
             }
 
             impl From<$real> for $nonzero {
-                #[inline] fn from(x: $real) -> Self {
+                fn from(x: $real) -> Self {
                     if      *x >= <$int>::MAX as $float {<$nonzero>::MAX}
                     else if *x <= 1.0 {<$nonzero>::MIN}
                     else {unsafe{<$nonzero>::new_unchecked(*x as $int)}}
@@ -1287,17 +1309,17 @@ macro_rules! real_from_unsigned_ints_impl {
             }
 
             impl IntoPropValue<$nonzero> for $real {
-                #[inline] fn into_prop_value(self) -> $nonzero {self.into()}
+                fn into_prop_value(self) -> $nonzero {self.into()}
             }
 
             impl PartialEq<$nonzero> for $real {
-                #[inline] fn eq(&self, other: &$nonzero) -> bool {
+                fn eq(&self, other: &$nonzero) -> bool {
                     PartialEq::eq(&self.0, &(other.get() as $float))
                 }
             }
 
             impl PartialOrd<$nonzero> for $real {
-                #[inline] fn partial_cmp(&self, other: &$nonzero) -> Option<Ordering> {
+                fn partial_cmp(&self, other: &$nonzero) -> Option<Ordering> {
                     PartialOrd::partial_cmp(&self.0, &(other.get() as $float))
                 }
             }
@@ -1309,15 +1331,15 @@ macro_rules! real_from_signed_ints_impl {
     ($real:ty { $float:ty } : $($nonzero:ty{ $int:ty }),+) => {
         $(
             impl From<$int> for $real {
-                #[inline] fn from(x: $int) -> Self {Self(x as $float)}
+                fn from(x: $int) -> Self {Self(x as $float)}
             }
 
             impl IntoPropValue<$real> for $int {
-                #[inline] fn into_prop_value(self) -> $real {self.into()}
+                fn into_prop_value(self) -> $real {self.into()}
             }
 
             impl From<$real> for $int {
-                #[inline] fn from(x: $real) -> Self {
+                fn from(x: $real) -> Self {
                     if      *x >= <$int>::MAX as $float {<$int>::MAX}
                     else if *x <= <$int>::MIN as $float {<$int>::MIN}
                     else {*x as $int}
@@ -1325,44 +1347,44 @@ macro_rules! real_from_signed_ints_impl {
             }
 
             impl IntoPropValue<$int> for $real {
-                #[inline] fn into_prop_value(self) -> $int {self.into()}
+                fn into_prop_value(self) -> $int {self.into()}
             }
 
             impl PartialEq<$int> for $real {
-                #[inline] fn eq(&self, other: &$int) -> bool {
+                fn eq(&self, other: &$int) -> bool {
                     PartialEq::eq(&self.0, &(*other as $float))
                 }
             }
 
             impl PartialOrd<$int> for $real {
-                #[inline] fn partial_cmp(&self, other: &$int) -> Option<Ordering> {
+                fn partial_cmp(&self, other: &$int) -> Option<Ordering> {
                     PartialOrd::partial_cmp(&self.0, &(*other as $float))
                 }
             }
 
             impl From<$nonzero> for $real {
-                #[inline] fn from(x: $nonzero) -> Self {Self(x.get() as $float)}
+                fn from(x: $nonzero) -> Self {Self(x.get() as $float)}
             }
 
             impl IntoPropValue<$real> for $nonzero {
-                #[inline] fn into_prop_value(self) -> $real {self.into()}
+                fn into_prop_value(self) -> $real {self.into()}
             }
 
             impl TryFrom<$real> for $nonzero {
                 type Error = TryFromIntError;
-                #[inline] fn try_from(x: $real) -> Result<Self, Self::Error> {
+                fn try_from(x: $real) -> Result<Self, Self::Error> {
                     <$nonzero>::try_from(<$int>::from(x))
                 }
             }
 
             impl PartialEq<$nonzero> for $real {
-                #[inline] fn eq(&self, other: &$nonzero) -> bool {
+                fn eq(&self, other: &$nonzero) -> bool {
                     PartialEq::eq(&self.0, &(other.get() as $float))
                 }
             }
 
             impl PartialOrd<$nonzero> for $real {
-                #[inline] fn partial_cmp(&self, other: &$nonzero) -> Option<Ordering> {
+                fn partial_cmp(&self, other: &$nonzero) -> Option<Ordering> {
                     PartialOrd::partial_cmp(&self.0, &(other.get() as $float))
                 }
             }
@@ -1374,22 +1396,22 @@ macro_rules! impl_op {
     ($op:ident :: $method:ident ($self:ident : $real:ty , $rhs:ident : $rhs_ty:ty) -> $out:ty { $($s:stmt);+ }) => {
         impl $op<$rhs_ty> for $real {
             type Output = $out;
-            #[inline] fn $method($self, $rhs: $rhs_ty) -> Self::Output { $($s)+ }
+            fn $method($self, $rhs: $rhs_ty) -> Self::Output { $($s)+ }
         }
 
         impl $op<&$rhs_ty> for $real {
             type Output = $out;
-            #[inline] fn $method(self, rhs: &$rhs_ty) -> Self::Output {$op::$method(self, *rhs)}
+            fn $method(self, rhs: &$rhs_ty) -> Self::Output {$op::$method(self, *rhs)}
         }
 
         impl<'a> $op<$rhs_ty> for &'a $real {
             type Output = $out;
-            #[inline] fn $method(self, rhs: $rhs_ty) -> Self::Output {$op::$method(*self, rhs)}
+            fn $method(self, rhs: $rhs_ty) -> Self::Output {$op::$method(*self, rhs)}
         }
 
         impl<'a> $op<&$rhs_ty> for &'a $real {
             type Output = $out;
-            #[inline] fn $method(self, rhs: &$rhs_ty) -> Self::Output {$op::$method(*self, *rhs)}
+            fn $method(self, rhs: &$rhs_ty) -> Self::Output {$op::$method(*self, *rhs)}
         }
     };
 }
@@ -1397,11 +1419,11 @@ macro_rules! impl_op {
 macro_rules! impl_assign_op {
     ($op:ident :: $method:ident ($self:ident : $real:ty , $rhs:ident : $rhs_ty:ty) { $($s:stmt);+ }) => {
         impl $op<$rhs_ty> for $real {
-            #[inline] fn $method(&mut $self, $rhs: $rhs_ty) { $($s)+ }
+            fn $method(&mut $self, $rhs: $rhs_ty) { $($s)+ }
         }
 
         impl $op<&$rhs_ty> for $real {
-            #[inline] fn $method(&mut self, rhs: &$rhs_ty) {$op::$method(self, *rhs)}
+            fn $method(&mut self, rhs: &$rhs_ty) {$op::$method(self, *rhs)}
         }
     };
 }
@@ -1495,29 +1517,29 @@ macro_rules! real_impl {
 
         impl Deref for $real {
             type Target = $float;
-            #[inline] fn deref(&self) -> &Self::Target {&self.0}
+            fn deref(&self) -> &Self::Target {&self.0}
         }
 
         impl PartialEq<$float> for $real {
-            #[inline] fn eq(&self, other: &$float) -> bool {
+            fn eq(&self, other: &$float) -> bool {
                 self.0.eq(other)
             }
         }
 
         impl PartialOrd<$float> for $real {
-            #[inline] fn partial_cmp(&self, other: &$float) -> Option<Ordering> {
+            fn partial_cmp(&self, other: &$float) -> Option<Ordering> {
                 self.0.partial_cmp(&other)
             }
         }
 
         impl PartialOrd for $real {
-            #[inline] fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
                 Some(self.cmp(other))
             }
         }
 
         impl Ord for $real {
-            #[inline] fn cmp(&self, other: &Self) -> Ordering {
+            fn cmp(&self, other: &Self) -> Ordering {
                 unsafe{self.0.partial_cmp(&other.0).unwrap_unchecked()}
             }
         }
@@ -1526,37 +1548,37 @@ macro_rules! real_impl {
 
         impl TryFrom<$float> for $real {
             type Error = AppError;
-            #[inline] fn try_from(x: $float) -> Result<Self, Self::Error> {
-                Self::new(x).ok_or(AppError::new("the value is NaN"))
+            fn try_from(x: $float) -> Result<Self, Self::Error> {
+                Self::new(x).ok_or(app_error!("the value is NaN"))
             }
         }
 
         impl From<$other_real> for $real {
-            #[inline] fn from(x: $other_real) -> Self {Self(x.0 as $float)}
+            fn from(x: $other_real) -> Self {Self(x.0 as $float)}
         }
 
         impl IntoPropValue<$other_real> for $real {
-            #[inline] fn into_prop_value(self) -> $other_real {self.into()}
+            fn into_prop_value(self) -> $other_real {self.into()}
         }
 
         impl Display for $real {
-            #[inline] fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
                 Display::fmt(&self.0, f)
             }
         }
 
         impl Neg for $real {
             type Output = Self;
-            #[inline] fn neg(self) -> Self::Output {Self(-self.0)}
+            fn neg(self) -> Self::Output {Self(-self.0)}
         }
 
         impl RoundTo for $real {
-            #[inline] fn floor_to(self, step: Self) -> Self {
+            fn floor_to(self, step: Self) -> Self {
                 if self.is_infinite() || step == 0 {return self}
                 Self(*self - *self % *step)
             }
 
-            #[inline] fn  ceil_to(self, step: Self) -> Self {
+            fn  ceil_to(self, step: Self) -> Self {
                 if self.is_infinite() || step == 0 {return self}
                 let prev = *self - 1.0;
                 Self(*step - prev % *step + prev)
@@ -1564,13 +1586,13 @@ macro_rules! real_impl {
         }
 
         impl Sum for $real {
-            #[inline] fn sum<I>(iter: I) -> Self where I: Iterator<Item=$real> {
+            fn sum<I>(iter: I) -> Self where I: Iterator<Item=$real> {
                 iter.fold(Self(0.0), |s, n| s + n)
             }
         }
 
         impl<'a> Sum<&'a $real> for $real {
-            #[inline] fn sum<I>(iter: I) -> Self where I: Iterator<Item=&'a $real> {
+            fn sum<I>(iter: I) -> Self where I: Iterator<Item=&'a $real> {
                 iter.fold(Self(0.0), |s, n| s + n)
             }
         }
@@ -1621,59 +1643,59 @@ macro_rules! real_impl {
             pub const PI: $real = $real(std::$float::consts::PI);
             pub const TAU: $real = $real(std::$float::consts::TAU);
 
-            #[inline] pub const fn new(x: $float) -> Option<Self> {
+            pub const fn new(x: $float) -> Option<Self> {
                 if x.is_nan() {None} else {Some(Self(x))}
             }
 
             /// # Safety
             /// `x` must not be NaN
-            #[inline] pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
+            pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
 
-            #[inline] pub const fn new_or(default: Self, x: $float) -> Self {
+            pub const fn new_or(default: Self, x: $float) -> Self {
                 if x.is_nan() {default} else {Self(x)}
             }
 
-            #[inline] pub fn rem_euclid(self, rhs: Self) -> Option<Self> {
+            pub fn rem_euclid(self, rhs: Self) -> Option<Self> {
                 let res = self.0.rem_euclid(rhs.0);
                 if res.is_nan() {return None}
                 Some(Self(res))
             }
 
-            #[inline] pub fn copysign(self, sign: Self) -> Self {
+            pub fn copysign(self, sign: Self) -> Self {
                 Self(self.0.copysign(*sign))
             }
 
-            #[inline] pub fn recip(self) -> Self {Self(self.0.recip())}
+            pub fn recip(self) -> Self {Self(self.0.recip())}
 
-            #[inline] pub fn exp2(self) -> Self {Self(self.0.exp2())}
+            pub fn exp2(self) -> Self {Self(self.0.exp2())}
 
-            #[inline] pub fn floor(self) -> Self {Self(self.0.floor())}
+            pub fn floor(self) -> Self {Self(self.0.floor())}
 
-            #[inline] pub fn ceil(self) -> Self {Self(self.0.ceil())}
+            pub fn ceil(self) -> Self {Self(self.0.ceil())}
 
-            #[inline] pub fn round(self) -> Self {Self(self.0.round())}
+            pub fn round(self) -> Self {Self(self.0.round())}
 
-            #[inline] pub fn is_finite(&self) -> bool {self.0.is_finite()}
+            pub fn is_finite(&self) -> bool {self.0.is_finite()}
 
-            #[inline] pub fn abs(self) -> Self {Self(self.0.abs())}
+            pub fn abs(self) -> Self {Self(self.0.abs())}
 
-            #[inline] pub fn sin(self) -> Option<Self> {Self::new(self.0.sin())}
+            pub fn sin(self) -> Option<Self> {Self::new(self.0.sin())}
 
             /// # Safety
             /// `self` must be finite
-            #[inline] pub unsafe fn sin_unchecked(self) -> Self {Self(self.0.sin())}
+            pub unsafe fn sin_unchecked(self) -> Self {Self(self.0.sin())}
 
-            #[inline] pub fn sin_or(self, default: Self) -> Self {
+            pub fn sin_or(self, default: Self) -> Self {
                 Self::new(self.0.sin()).unwrap_or(default)
             }
 
-            #[inline] pub fn cos(self) -> Option<Self> {Self::new(self.0.cos())}
+            pub fn cos(self) -> Option<Self> {Self::new(self.0.cos())}
 
             /// # Safety
             /// `self` must be finite
-            #[inline] pub unsafe fn cos_unchecked(self) -> Self {Self(self.0.cos())}
+            pub unsafe fn cos_unchecked(self) -> Self {Self(self.0.cos())}
 
-            #[inline] pub fn cos_or(self, default: Self) -> Self {
+            pub fn cos_or(self, default: Self) -> Self {
                 Self::new(self.0.cos()).unwrap_or(default)
             }
         }
@@ -1687,14 +1709,24 @@ real_impl!(R64{f64}, R32{f32});
 macro_rules! r32 {
     ($x:literal) => {{
         #[allow(unused_unsafe)]
-        unsafe{$crate::R32::new_unchecked($x)}
+        unsafe{$crate::R32::new_unchecked($x as f32)}
     }};
+
+    ($x:expr) => {{
+        #[allow(unused_unsafe)]
+        unsafe{$crate::R64::new_unchecked(($x + 0) as f64)}
+    }}
 }
 
 #[macro_export]
 macro_rules! r64 {
     ($x:literal) => {{
         #[allow(unused_unsafe)]
-        unsafe{$crate::R64::new_unchecked($x)}
+        unsafe{$crate::R64::new_unchecked($x as f64)}
     }};
+
+    ($x:expr) => {{
+        #[allow(unused_unsafe)]
+        unsafe{$crate::R64::new_unchecked(($x + 0) as f64)}
+    }}
 }

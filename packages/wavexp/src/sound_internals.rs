@@ -1,11 +1,50 @@
-use std::ops::Deref;
-
+use std::{
+    ops::Deref,
+    rc::Rc,
+    fmt::{Display, Formatter, self}};
 use wasm_bindgen::link_to;
 use wasm_bindgen_futures::JsFuture;
 use wavexp_utils::AppResult;
-use web_sys::{AudioWorklet,
+use web_sys::{
+    AudioWorklet,
     BaseAudioContext,
-    AudioWorkletNode, AudioParam};
+    AudioWorkletNode,
+    AudioParam,
+    AudioBuffer};
+use crate::sound::{Secs, Beats};
+
+#[derive(Debug, Clone)]
+pub enum AudioInputKind {
+    /// the inner string is the name of the file
+    File(Rc<str>)
+}
+
+impl Display for AudioInputKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::File(name) => write!(f, "File {name:?}")
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AudioInput {
+    kind: AudioInputKind,
+    inner: AudioBuffer,
+    duration: Beats
+}
+
+impl AudioInput {
+    pub fn kind(&self) -> &AudioInputKind {&self.kind}
+    pub fn duraion(&self) -> Secs {self.duration}
+}
+
+impl Display for AudioInput {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.kind.fmt(f)?;
+        write!(f, ", {:.2} beats", self.duration)
+    }
+}
 
 pub struct TimeStretcherNode(AudioWorkletNode);
 

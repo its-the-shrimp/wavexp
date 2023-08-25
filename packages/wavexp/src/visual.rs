@@ -112,7 +112,7 @@ impl SoundVisualiser {
             canvas: default()}
 	}
 
-    #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
+    pub fn canvas(&self) -> &NodeRef {&self.canvas}
 
     // TODO: correctly readjust the graph when shrinked in the UI
     pub fn handle_event(&mut self, event: &AppEvent, sequencer: &Sequencer) -> AppResult<()> {
@@ -195,9 +195,9 @@ impl HintHandler {
         })
     }
 
-    #[inline] pub fn main_bar(&self) -> &NodeRef {&self.main_bar}
+    pub fn main_bar(&self) -> &NodeRef {&self.main_bar}
 
-    #[inline] pub fn aux_bar(&self) -> &NodeRef {&self.aux_bar}
+    pub fn aux_bar(&self) -> &NodeRef {&self.aux_bar}
 }
 
 /// data that can be edited with a generic graph editor defined below
@@ -205,11 +205,11 @@ pub trait GraphPoint: Sized + Ord {
     /// the name of the plane that will be displayed as a hint when hovered over it
     const EDITOR_NAME: &'static str;
     /// bounds for the points along the X axis
-    const X_BOUND: Range<R64> = r64![0.0] .. R64::INFINITY;
+    const X_BOUND: Range<R64> = r64![0] .. R64::INFINITY;
     /// bounds for the scale of the X axis of the graph
-    const SCALE_X_BOUND: Range<R64> = r64![3.0] .. r64![30.0];
+    const SCALE_X_BOUND: Range<R64> = r64![3] .. r64![30];
     /// bounds for the offset of the X axis of the graph
-    const OFFSET_X_BOUND: Range<R64> = r64![-1.0] .. R64::INFINITY;
+    const OFFSET_X_BOUND: Range<R64> = r64![-1] .. R64::INFINITY;
     /// bounds for the points along the Y axis
     const Y_BOUND: Range<R64>;
     /// bounds for the scale of the Y axis of the graph
@@ -254,7 +254,7 @@ pub trait GraphPoint: Sized + Ord {
     /// Handle points being moved in the UI.
     /// `point` is the ID of the point that's being moved or `None` if a selection or plane is
     /// moved instead of 1 point.
-    #[allow(unused_variables)] #[inline] fn on_move(
+    #[allow(unused_variables)] fn on_move(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         cursor: Cursor,
@@ -268,7 +268,7 @@ pub trait GraphPoint: Sized + Ord {
     /// it just means that selection was changed.
     /// Returns the action to register after the click; if `None` is returned, the default action
     /// will be chosen by the graph editor itself.
-    #[allow(unused_variables)] #[inline] fn on_click(
+    #[allow(unused_variables)] fn on_click(
         editor:        &mut GraphEditor<Self>,
         ctx:           &mut AppContext,
         cursor:        Cursor,
@@ -281,7 +281,7 @@ pub trait GraphPoint: Sized + Ord {
     /// `first` signifies whether this call is the first consecutive one.
     /// Note: if shift's held down, hovering over a point/selection won't count as such, and this
     /// Handler will still be called instead of `on_(point/selection)_hover`.
-    #[allow(unused_variables)] #[inline] fn on_plane_hover(
+    #[allow(unused_variables)] fn on_plane_hover(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         cursor: Cursor,
@@ -291,7 +291,7 @@ pub trait GraphPoint: Sized + Ord {
     /// Handle cursor moving across a point on the editor plane.
     /// `point_id` is the index of the point in the editor.
     /// `first` signifies whether this call is the first consecutive one.
-    #[allow(unused_variables)] #[inline] fn on_point_hover(
+    #[allow(unused_variables)] fn on_point_hover(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         cursor: Cursor,
@@ -301,7 +301,7 @@ pub trait GraphPoint: Sized + Ord {
     /// Handle cursor moving across a selection on the editor plane.
     /// The selection itself is available in `editor`.
     /// `first` signifies whether this call is the first consecutive one.
-    #[allow(unused_variables)] #[inline] fn on_selection_hover(
+    #[allow(unused_variables)] fn on_selection_hover(
         editor: &mut GraphEditor<Self>,
         ctx:    &mut AppContext,
         cursor: Cursor,
@@ -322,14 +322,15 @@ pub trait GraphPoint: Sized + Ord {
         action: &AppAction
     ) -> AppResult<()>;
     /// Handle request for a redraw.
-    // TODO: rewrite this
-    /// `scale` are the coefficients by which a user coordinate point must be
-    /// multiplied to get a canvas coordinate point.
-    /// `offset` are the offsets which must be added to a canvas coordinate point for
-    /// it to be correctly displayed to the user.
-    /// `solid` is a path that will be rendered with a solid stroke style.
-    /// `dotted` is a path that will be rendered with a dotted stroke style.
-    /// `visual_ctx` is a context provided to the graph editor through its `handle_event` method
+    /// `editor` is the editor that needs redraw.
+    /// `ctx` is the application context of the editor.
+    /// `sequencer` is the the app's global sequencer.
+    /// `canvas_size` is canvas's dimensions in pixels.
+    /// Points on a canvas must be confined to these dimensions to appear on the screen.
+    /// `solid` is the path that will be stroked with a solid line.
+    /// `dotted` is the path that will be stroked with a dotted line.
+    /// `visual_ctx` is the visual context defined for the graph point, passed to this handler
+    /// through `GraphEditor::handle_event`.
     fn on_redraw(
         editor:      &mut GraphEditor<Self>,
         ctx:         &AppContext,
@@ -344,7 +345,7 @@ pub trait GraphPoint: Sized + Ord {
     fn fmt_loc(loc: [R64; 2]) -> String;
     /// the canvas's coordinate space
     /// the function will be called every time the user 
-    #[inline] fn canvas_coords(canvas: &HtmlCanvasElement) -> AppResult<[u32; 2]> {
+    fn canvas_coords(canvas: &HtmlCanvasElement) -> AppResult<[u32; 2]> {
         Ok([canvas.client_width() as u32, canvas.client_height() as u32])
     }
 }
@@ -355,15 +356,15 @@ pub struct GraphPointView<'a, T: GraphPoint>(&'a mut T);
 
 impl<'a, T: GraphPoint> Deref for GraphPointView<'a, T> {
     type Target = T;
-    #[inline] fn deref(&self) -> &Self::Target {self.0}
+    fn deref(&self) -> &Self::Target {self.0}
 }
 
 impl<'a, T: GraphPoint> GraphPointView<'a, T> {
-    #[inline] pub fn inner(&mut self) -> &mut T::Inner {self.0.inner_mut()}
-    #[inline] pub fn y(&mut self) -> &mut T::Y {self.0.y_mut()}
+    pub fn inner(&mut self) -> &mut T::Inner {self.0.inner_mut()}
+    pub fn y(&mut self) -> &mut T::Y {self.0.y_mut()}
 
     // /// the caller must ensure that the point retains its sorted placement
-    // #[inline] pub unsafe fn unlock(self) -> &'a mut T {self.0}
+    // pub unsafe fn unlock(self) -> &'a mut T {self.0}
 }
 
 // types as coordinate space hints:
@@ -410,18 +411,18 @@ impl AnyGraphEditor {
     /// an ID that's guaranteed to never be used by any graph editor
     pub const INVALID_ID: usize = 0;
 
-    #[inline] pub fn id(&self) -> usize {self.id}
-    #[inline] pub fn canvas(&self) -> &NodeRef {&self.canvas}
-    #[inline] pub fn selection(&self) -> &[usize] {&self.selection}
+    pub fn id(&self) -> usize {self.id}
+    pub fn canvas(&self) -> &NodeRef {&self.canvas}
+    pub fn selection(&self) -> &[usize] {&self.selection}
     /// Offsets which must be subtracted from a canvas coordinate point for
     /// it to be correctly displayed to the user.
     /// Changed by the user dragging the editor plane.
-    #[inline] pub fn offset(&self) -> Point {self.offset}
+    pub fn offset(&self) -> Point {self.offset}
     /// Coefficients by which a user coordinate point must be
     /// multiplied to get a canvas coordinate point.
-    #[inline] pub fn scale(&self) -> [R64; 2] {self.scale}
+    pub fn scale(&self) -> [R64; 2] {self.scale}
 
-    #[inline] pub fn last_cursor(&self) -> Option<Cursor> {
+    pub fn last_cursor(&self) -> Option<Cursor> {
         matches!(self.focus, Focus::None).not().then_some(self.last_cursor)
     }
 }
@@ -434,19 +435,19 @@ pub struct GraphEditor<T: GraphPoint> {
 
 impl<T: GraphPoint> Deref for GraphEditor<T> {
     type Target = AnyGraphEditor;
-    #[inline] fn deref(&self) -> &Self::Target {&self.inner}
+    fn deref(&self) -> &Self::Target {&self.inner}
 }
 
 impl<T: GraphPoint> DerefMut for GraphEditor<T> {
-    #[inline] fn deref_mut(&mut self) -> &mut Self::Target {&mut self.inner}
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.inner}
 }
 
 impl<T: GraphPoint> Default for GraphEditor<T> {
-    #[inline] fn default() -> Self {Self::new(vec![])}
+    fn default() -> Self {Self::new(vec![])}
 }
 
 impl<T: GraphPoint> GraphEditor<T> {
-    #[inline] pub fn new(data: Vec<T>) -> Self {
+    pub fn new(data: Vec<T>) -> Self {
         let res = Self{data,
             inner: AnyGraphEditor{
                 scale: [T::SCALE_X_BOUND, T::SCALE_Y_BOUND]
@@ -457,35 +458,35 @@ impl<T: GraphPoint> GraphEditor<T> {
         res
     }
 
-    #[inline] pub fn len(&self) -> usize {self.data.len()}
+    pub fn len(&self) -> usize {self.data.len()}
 
-    #[inline] pub unsafe fn get_unchecked(&self, index: usize) -> &T {
+    pub unsafe fn get_unchecked(&self, index: usize) -> &T {
         self.data.get_unchecked(index)
     }
 
-    #[inline] pub unsafe fn get_unchecked_aware(&self, index: usize) -> SliceRef<'_, T> {
-        SliceRef::raw(self.get_unchecked(index), index)
+    pub fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>> {
+        self.data.get(index).map(|x| unsafe{SliceRef::raw(x, index)})
     }
 
-    #[inline] pub unsafe fn get_unchecked_mut(&mut self, index: usize)
+    pub unsafe fn get_unchecked_mut(&mut self, index: usize)
     -> GraphPointView<'_, T> {
         GraphPointView(self.data.get_unchecked_mut(index))
     }
 
-    #[inline] pub fn last(&self) -> Option<&T> {self.data.last()}
+    pub fn last(&self) -> Option<&T> {self.data.last()}
 
-    #[inline] pub fn iter(&self) -> Iter<'_, T> {self.data.iter()}
+    pub fn iter(&self) -> Iter<'_, T> {self.data.iter()}
 
-    #[inline] pub fn iter_mut(&mut self) -> impl Iterator<Item=GraphPointView<'_, T>> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item=GraphPointView<'_, T>> {
         self.data.iter_mut().map(GraphPointView)
     }
 
-    #[inline] pub fn iter_selection_mut(&mut self) -> impl Iterator<Item=GraphPointView<'_, T>> {
+    pub fn iter_selection_mut(&mut self) -> impl Iterator<Item=GraphPointView<'_, T>> {
         unsafe{self.data.iter_indices_unchecked_mut(&self.inner.selection)}
             .map(GraphPointView)
     }
 
-    #[inline] pub fn expand_selection(&mut self, ids: impl Iterator<Item = usize>) -> AppResult<()> {
+    pub fn expand_selection(&mut self, ids: impl Iterator<Item = usize>) -> AppResult<()> {
         let len = self.data.len();
         Ok(for id in ids {
             js_assert!(id < len)?;
@@ -494,14 +495,14 @@ impl<T: GraphPoint> GraphEditor<T> {
     }
 
     /// The function is unsafe because maintaining sorted order of the points is on the caller.
-    #[inline] pub unsafe fn insert_point(&mut self, at: usize, point: T) {
+    pub unsafe fn insert_point(&mut self, at: usize, point: T) {
         self.redraw = true;
         self.data.insert(at, point);
         SliceMove{from: self.data.len(), to: at}.apply(&mut self.selection)
     }
 
     /// returns the index at which the new point will be available
-    #[inline] pub fn add_point(&mut self, point: T) -> usize {
+    pub fn add_point(&mut self, point: T) -> usize {
         self.redraw = true;
         let to = self.data.push_sorted(point);
         SliceMove{from: self.data.len(), to}.apply(&mut self.selection);
@@ -509,13 +510,13 @@ impl<T: GraphPoint> GraphEditor<T> {
     }
 
     /// removes the selection area from the plane (not the selected points)
-    #[inline] pub fn clear_selection_area(&mut self) {self.selection_size = default()}
+    pub fn clear_selection_area(&mut self) {self.selection_size = default()}
 
     /// `to_remove` accepts an ID of the selected point and a reference to it,
     /// and returns `true` if the point stays or `false` if the point must be removed.
     /// `sink` is the function that will be called on every removed point.
     /// If there's nothing to do with the points, standard library's `drop` function can be passed.
-    #[inline] pub fn filter_selected(
+    pub fn filter_selected(
         &mut self,
         mut to_remove: impl FnMut((usize, &T)) -> bool,
         mut sink: impl FnMut((usize, T))
@@ -535,7 +536,7 @@ impl<T: GraphPoint> GraphEditor<T> {
     /// `to_remove` iterates over IDs of points that must be removed.
     /// `sink` is the function that will be called on every removed point.
     /// If there's nothing to do with the points, standard library's `drop` function can be passed.
-    #[inline] pub fn remove_points(
+    pub fn remove_points(
         &mut self,
         to_remove: impl Iterator<Item = usize> + DoubleEndedIterator,
         mut sink: impl FnMut((usize, T))
@@ -562,7 +563,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         })
     }
 
-    #[inline] pub fn force_redraw(&mut self) {self.redraw = true}
+    pub fn force_redraw(&mut self) {self.redraw = true}
 
     /// must be called when a canvas has just been bound or its dimensions have been changed
     pub fn init(&mut self) -> AppResult<()> {
@@ -570,7 +571,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         let [w, h] = T::canvas_coords(&canvas)?;
         canvas.set_width(w);
         canvas.set_height(h);
-        self.scale = self.scale.map(|x| x.ceil_to(r64![2.0]));
+        self.scale = self.scale.map(|x| x.ceil_to(r64![2]));
         self.grid = None;
         if self.offset.x <= 0 {
             self.offset.x = (T::OFFSET_X_BOUND.start * w / self.scale[0]).into();
@@ -584,7 +585,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         Ok(self.redraw = true)
     }
 
-    #[inline] fn point_by_pos(
+    fn point_by_pos(
         &self,
         loc:        [R64; 2],
         ctx:        &AppContext,
@@ -596,11 +597,11 @@ impl<T: GraphPoint> GraphEditor<T> {
             .map(|(id, x)| unsafe{SliceRef::raw(x, id)}))
     }
 
-    #[inline] fn point_in_selection(&self, loc: ConfinedAlignedUserPoint) -> bool {
+    fn point_in_selection(&self, loc: ConfinedAlignedUserPoint) -> bool {
         loc.sub(&self.selection_src).zip_fold(true, self.selection_size, |r, x, y| r && 0.0 <= *x && x <= y)
     }
 
-    #[inline] fn set_zoom_focus(
+    fn set_zoom_focus(
         &mut self,
         ctx: &mut AppContext,
         cursor: Cursor,
@@ -614,7 +615,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         T::on_plane_hover(self, ctx, cursor, loc, first)
     }
 
-    #[inline] fn set_plane_focus(
+    fn set_plane_focus(
         &mut self,
         ctx: &mut AppContext,
         cursor: Cursor,
@@ -625,7 +626,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         T::on_plane_hover(self, ctx, cursor, loc, true)
     }
 
-    #[inline] fn set_point_focus(
+    fn set_point_focus(
         &mut self,
         ctx: &mut AppContext,
         cursor: Cursor,
@@ -636,7 +637,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         T::on_point_hover(self, ctx, cursor, id, true)
     }
 
-    #[inline] fn set_selection_focus(&mut self, ctx: &mut AppContext, cursor: Cursor)
+    fn set_selection_focus(&mut self, ctx: &mut AppContext, cursor: Cursor)
     -> AppResult<()> {
         self.focus = Focus::Selection{origin: default(), end: default(), meta: false};
         self.changed_focus = true;
@@ -680,11 +681,11 @@ impl<T: GraphPoint> GraphEditor<T> {
                 }
                 let point = cursor.point + *init_offset - *pivot;
                 if !T::SCALE_X_BOUND.is_empty() {
-                    self.inner.scale[0] = T::SCALE_X_BOUND.fit(r64![50.0] / size[1] * point.x + init_scale[0]);
+                    self.inner.scale[0] = T::SCALE_X_BOUND.fit(r64![50] / size[1] * point.x + init_scale[0]);
                     self.inner.offset.x = ((init_scale[0] - self.inner.scale[0]) * pivot.x / self.inner.scale[0] + init_offset.x).into();
                 }
                 if !T::SCALE_Y_BOUND.is_empty() {
-                    self.inner.scale[1] = T::SCALE_Y_BOUND.fit(r64![50.0] / size[0] * point.y + init_scale[1]);
+                    self.inner.scale[1] = T::SCALE_Y_BOUND.fit(r64![50] / size[0] * point.y + init_scale[1]);
                     self.inner.offset.y = ((init_scale[1] - self.inner.scale[1]) * pivot.y / self.inner.scale[1] + init_offset.y).into();
                 }
             } else {

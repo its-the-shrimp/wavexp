@@ -34,11 +34,12 @@ use wavexp_utils::{
     default,
     AppResult,
     r64,
-    AppResultUtils};
+    AppResultUtils, ToAttrValue};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, TabInfo, Note, NoteBlock, CustomBlock},
+    sound::{MSecs, Secs, Beats, SoundType, Note, NoteBlock, CustomBlock},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
-    input::{Button, Switch, GraphEditorCanvas}, sequencer::{SoundBlock, Sequencer}};
+    input::{Button, Switch, GraphEditorCanvas},
+    sequencer::{SoundBlock, Sequencer}};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, PartialEq, Clone)]
@@ -128,7 +129,7 @@ pub enum AppEvent {
 }
 
 impl AppEvent {
-    #[inline] pub fn needs_layout_rerender(&self) -> bool {
+    pub fn needs_layout_rerender(&self) -> bool {
         matches!(self, Self::SetTab(..)
             | Self::Select(..)
             | Self::StartPlay
@@ -140,6 +141,7 @@ impl AppEvent {
     }
 }
 
+// TODO: add a notion of visible and hidden actions
 /// a globally registered cancelable action
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
@@ -204,7 +206,7 @@ pub enum AppAction {
 }
 
 impl AppAction {
-    #[inline] pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::Start =>
                 "Start",
@@ -222,7 +224,7 @@ impl AppAction {
                 "Add Note Block",
             Self::Select{to, ..} =>
                 if to.is_some() {"Open Sound Block Editor"}
-                else {"Close Sound Block Editor"}
+                else {"Close Sound Block Editor"},
             Self::SetBlockType(..) =>
                 "Set Sound Block Type",
             Self::SwitchTab{..} =>
@@ -262,7 +264,6 @@ impl AppAction {
     }
 }
 
-// TODO: remove this
 /// carries all the app-wide settings that are passed to all the event receivers
 pub struct AppContext {
     now: Secs,
@@ -276,11 +277,11 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    #[inline] pub fn new(event_emitter: Callback<AppEvent>) -> AppResult<Self> {
+    pub fn new(event_emitter: Callback<AppEvent>) -> AppResult<Self> {
         Ok(Self{
             now: unsafe{R64::new_unchecked(window().performance().to_app_result()?.now()) / 1000},
-            snap_step: r64![1.0],
-            selected_tab: 0,
+            snap_step: r64![1],
+            selected_tab: default(),
             undid_actions: 0,
             actions: vec![AppAction::Start],
             action_done: false,
@@ -288,22 +289,22 @@ impl AppContext {
             event_emitter})
     }
 
-    #[inline] pub fn now(&self) -> Secs {self.now}
-    #[inline] pub fn snap_step(&self) -> R64 {self.snap_step}
-    #[inline] pub fn selected_tab(&self) -> usize {self.selected_tab}
-    #[inline] pub fn actions(&self) -> &[AppAction] {&self.actions}
-    #[inline] pub fn event_emitter(&self) -> &Callback<AppEvent> {&self.event_emitter}
-    #[inline] pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
-    #[inline] pub fn playing(&self) -> bool {self.playing}
+    pub fn now(&self) -> Secs {self.now}
+    pub fn snap_step(&self) -> R64 {self.snap_step}
+    pub fn selected_tab(&self) -> usize {self.selected_tab}
+    pub fn actions(&self) -> &[AppAction] {&self.actions}
+    pub fn event_emitter(&self) -> &Callback<AppEvent> {&self.event_emitter}
+    pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
+    pub fn playing(&self) -> bool {self.playing}
 
-    #[inline] pub fn register_action(&mut self, action: AppAction) {
+    pub fn register_action(&mut self, action: AppAction) {
         self.actions.drain(self.actions.len() - take(&mut self.undid_actions) ..);
         self.actions.push(action);
         self.action_done = true;
     }
 
     /// takes the flag and sets it to `false`
-    #[inline] pub fn recent_action_done(&mut self) -> bool {self.action_done.take()}
+    pub fn recent_action_done(&mut self) -> bool {self.action_done.take()}
 
     pub fn handle_event(&mut self, event: &AppEvent) -> AppResult<()> {
         Ok(match event {
@@ -396,7 +397,7 @@ pub struct App {
     ctx: AppContext,
     hint_handler: HintHandler,
     frame_emitter: Function,
-    selected_id: Option<usize>
+    selected_block: Option<usize>
 }
 
 impl Component for App {
@@ -409,10 +410,10 @@ impl Component for App {
         let sound_visualiser = SoundVisualiser::new();
 
         let res = Self{
-            selected_id: None,
+            selected_block: None,
             hint_handler: default(),
             sequencer: Sequencer::new().unwrap_throw(),
-            frame_emitter: Closure::<dyn Fn(_)>::new(move |x| cb.emit(R64::new_or(r64![0.0], x)))
+            frame_emitter: Closure::<dyn Fn(_)>::new(move |x| cb.emit(R64::new_or(r64![0], x)))
                 .into_js_value().unchecked_into(),
             sound_visualiser, ctx};
         window().request_animation_frame(&res.frame_emitter).unwrap_throw();
@@ -426,17 +427,17 @@ impl Component for App {
                     _ = window().request_animation_frame(&self.frame_emitter)?,
 
                 AppEvent::Select(id) => {
-                    if id != self.selected_id {
+                    if id != self.selected_block {
                         self.ctx.register_action(AppAction::Select{
-                            from: self.selected_id, to: id,
+                            from: self.selected_block, to: id,
                             prev_selected_tab: self.ctx.selected_tab});
                     }
-                    self.selected_id = id
+                    self.selected_block = id
                 }
 
                 AppEvent::Remove => {
                     let mut pattern = self.sequencer.pattern().try_borrow_mut().to_app_result()?;
-                    let id = self.selected_id.take().to_app_result()?;
+                    let id = self.selected_block.take().to_app_result()?;
                     let id = *unsafe{pattern.selection().get_unchecked(id)};
                     let mut removed = MaybeUninit::uninit();
                     pattern.remove_points(once(id), |(_, x)| _ = removed.write(x))?;
@@ -469,13 +470,13 @@ impl Component for App {
 
                 AppEvent::Undo(ref actions) => for action in actions.iter() {
                     if let &AppAction::Select{from, ..} = action {
-                        self.selected_id = from;
+                        self.selected_block = from;
                     }
                 }
 
                 AppEvent::Redo(ref actions) => for action in actions.iter() {
                     if let &AppAction::Select{to, ..} = action {
-                        self.selected_id = to;
+                        self.selected_block = to;
                     }
                 }
 
@@ -493,35 +494,25 @@ impl Component for App {
     fn view(&self, ctx: &Context<Self>) -> Html {
         // TODO: add switching between selected blocks
         let pattern = self.sequencer.pattern().try_borrow().unwrap_throw();
-        let block = self.selected_id.map(|i| unsafe{pattern.get_unchecked_aware(i)});
-
+        let block = self.selected_block.and_then(|i| pattern.get_aware(i));
         let setter = ctx.link().callback(|x| x);
-        let render_tab_info = |info: &TabInfo, tab_id: usize, desc: AttrValue| -> Html {
-            html!{
-                <div id={(self.ctx.selected_tab == tab_id).then_some("selected-tab")}
-                onpointerup={ctx.link().callback(move |_| AppEvent::SetTab(tab_id))}
-                data-main-hint={info.name} data-aux-hint={desc}>
-                    <p>{info.name}</p>
-                </div>
-            }
-        };
 
         html!{<>
             <div id="main-panel">
                 <div id="ctrl-panel" class="dark-bg"
-                data-main-hint="Settings" data-aux-hint={block.as_ref().map_or(AttrValue::from("General"), |x| AttrValue::from(x.desc()))}>
+                data-main-hint="Settings"
+                data-aux-hint={block.as_ref().map_or("General".into(), |x| x.to_attr_value())}>
                     <div id="hint" class="light-bg"
                     data-main-hint="Hint bar" data-aux-hint="for useful messages about the app's controls">
                         <span id="main-hint" ref={self.hint_handler.main_bar()}/>
                         <br/>
                         <span id="aux-hint" ref={self.hint_handler.aux_bar()}/>
                     </div>
-                    if let Some((tab_aux_hint, block)) = block.map(|x| (AttrValue::from(x.desc() + ": Settings tab"), x)) {
+                    if let Some(block) = block {
                         <div id="tab-list">
-                            {for block.sound.tabs().iter().enumerate()
-                                .map(|(tab_id, tab)| render_tab_info(tab, tab_id, tab_aux_hint.clone()))}
+                            {block.tabs(&self.ctx)}
                         </div>
-                        {block.sound.params(&self.ctx, setter.clone())}
+                        {block.sound.params(&self.ctx)}
                         <div id="general-ctrl" class="dark-bg">
                             <Button name="Back to project-wide settings"
                             setter={setter.reform(|_| AppEvent::Select(None))}>
@@ -537,7 +528,10 @@ impl Component for App {
                             </Button>
                         </div>
                     } else {
-                        {self.sequencer.params(setter.clone())}
+                        <div id="tab-list">
+                            {self.sequencer.tabs(&self.ctx)}
+                        </div>
+                        {self.sequencer.params(&self.ctx)}
                     }
                 </div>
                 <GraphEditorCanvas<SoundBlock>
@@ -594,7 +588,7 @@ impl Component for App {
                 <div id="plane-settings" data-main-hint="Editor plane settings">
                     <Switch key="snap" name="Interval for blocks to snap to"
                     setter={setter.reform(|x: usize|
-                        AppEvent::SnapStep(*[r64![0.0], r64![1.0], r64![0.5], r64![0.25], r64![0.125]]
+                        AppEvent::SnapStep(*[r64![0], r64![1], r64![0.5], r64![0.25], r64![0.125]]
                             .get_wrapping(x)))}
                     options={vec!["None", "1", "1/2", "1/4", "1/8"]}
                     initial={match *self.ctx.snap_step {
