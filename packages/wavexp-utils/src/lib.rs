@@ -1,3 +1,4 @@
+#![feature(let_chains)]
 #![feature(const_float_classify)]
 #![feature(never_type)]
 #![feature(try_blocks)]
@@ -6,27 +7,96 @@ use std::{
     ptr,
     mem::{take, transmute_copy, MaybeUninit, forget},
     fmt::{self, Debug, Formatter, Display},
-    ops::{Neg, SubAssign, Sub, AddAssign, Add, Deref, RangeBounds, Mul, MulAssign, DivAssign, Div, Rem, RemAssign, Range},
+    ops::{Neg, Range, Deref, DerefMut, RangeBounds, 
+        Add, Sub, Mul, Div, Rem,
+        AddAssign, SubAssign, MulAssign, DivAssign, RemAssign},
     iter::{successors, Sum},
     cmp::Ordering,
     array::from_fn,
     num::{TryFromIntError,
         NonZeroU8, NonZeroU16, NonZeroU32, NonZeroUsize, NonZeroU64,
         NonZeroI8, NonZeroI16, NonZeroI32, NonZeroIsize, NonZeroI64},
-    cell::{RefCell, Ref, RefMut, BorrowError, BorrowMutError}
+    cell::{BorrowError, BorrowMutError, Ref, RefMut},
+    rc::Rc
 };
 pub use js_sys;
 pub use wasm_bindgen;
 use wasm_bindgen::{JsValue, JsCast};
 use web_sys::{
-    Document as HtmlDocument,
-    Window as HtmlWindow,
+    Document,
+    Window,
     CanvasRenderingContext2d,
     HtmlCanvasElement,
     Element,
     console::{warn_1, warn_2},
     HtmlElement};
-use yew::{html::IntoPropValue, AttrValue};
+use yew::{
+    html::IntoPropValue,
+    AttrValue,
+    scheduler::Shared};
+
+pub struct AwareRef<'a, T> {
+    inner: Ref<'a, T>,
+    outer: &'a Shared<T>
+}
+
+impl<'a, T> Deref for AwareRef<'a, T> {
+    type Target = Ref<'a, T>;
+    fn deref(&self) -> &Self::Target {&self.inner}
+}
+
+impl<'a, T> AwareRef<'a, T> {
+    pub fn get_outer(&self) -> Shared<T> {Rc::clone(self.outer)}
+}
+
+pub struct AwareRefMut<'a, T> {
+    inner: RefMut<'a, T>,
+    outer: &'a Shared<T>
+}
+
+impl<'a, T> Deref for AwareRefMut<'a, T> {
+    type Target = RefMut<'a, T>;
+    fn deref(&self) -> &Self::Target {&self.inner}
+}
+
+impl<'a, T> DerefMut for AwareRefMut<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.inner}
+}
+
+impl<'a, T> AwareRefMut<'a, T> {
+    pub fn get_outer(&self) -> Shared<T> {Rc::clone(self.outer)}
+}
+
+pub trait SharedExt<T> {
+    fn get(&self)           -> AppResult<Ref<'_,         T>>;
+    fn get_mut(&self)       -> AppResult<RefMut<'_,      T>>;
+    fn get_aware(&self)     -> AppResult<AwareRef<'_,    T>>;
+    fn get_aware_mut(&self) -> AppResult<AwareRefMut<'_, T>>;
+}
+
+impl<T> SharedExt<T> for Shared<T> {
+    fn get(&self) -> AppResult<Ref<'_, T>> {
+        self.try_borrow().map_err(AppError::from)
+    }
+
+    fn get_mut(&self) -> AppResult<RefMut<'_, T>> {
+        self.try_borrow_mut().map_err(AppError::from)
+    }
+
+    fn get_aware(&self) -> AppResult<AwareRef<'_, T>> {
+        match self.try_borrow() {
+            Ok(inner) => Ok(AwareRef{inner, outer: self}),
+            Err(e) => Err(AppError::from(e))
+        }
+    }
+
+    fn get_aware_mut(&self) -> AppResult<AwareRefMut<'_, T>> {
+        match self.try_borrow_mut() {
+            Ok(inner) => Ok(AwareRefMut{inner, outer: self}),
+            Err(e) => Err(AppError::from(e))
+        }
+    }
+}
 
 pub struct EveryNth<'a, T> {
     iter: &'a [T],
@@ -393,6 +463,7 @@ impl<T, const OUTER: usize, const INNER: usize> FlippedArray<T, OUTER, INNER> fo
 /// limitation makes sense, but in Webassembly, which doesn't support threading, this limitation is meaningless.
 pub struct WasmCell<T>(T);
 
+#[cfg(target_arch = "wasm32")]
 unsafe impl<T> Sync for WasmCell<T> {}
 
 impl<T> Deref for WasmCell<T> {
@@ -402,41 +473,6 @@ impl<T> Deref for WasmCell<T> {
 
 impl<T> WasmCell<T> {
     pub const fn new(val: T) -> Self {Self(val)}
-}
-
-#[derive(Debug)]
-pub struct MaybeCell<T>(RefCell<Option<T>>);
-
-impl<T> Default for MaybeCell<T> {
-    fn default() -> Self {Self(RefCell::new(None))}
-}
-
-impl<T> MaybeCell<T> {
-    pub const fn new(x: Option<T>) -> Self {
-        Self(RefCell::new(x))
-    }
-
-    pub fn get(&self) -> AppResult<Ref<'_, T>> {
-        self.0.try_borrow().to_app_result()
-            .and_then(|x| Ref::filter_map(x, Option::as_ref)
-                .explain_err("MaybeCell object is not initialised"))
-    }
-
-    pub fn get_mut(&self) -> AppResult<RefMut<'_, T>> {
-        self.0.try_borrow_mut().to_app_result()
-            .and_then(|x| RefMut::filter_map(x, Option::as_mut)
-                .explain_err("MaybeCell object is not initialised"))
-    }
-
-    pub fn set(&self, val: T) -> AppResult<RefMut<'_, T>> {
-        self.0.try_borrow_mut().to_app_result()
-            .map(|x| RefMut::map(x, |x| x.insert(val)))
-    }
-
-    pub fn get_or_init(&self, f: impl FnOnce() -> T) -> AppResult<RefMut<'_, T>> {
-        self.0.try_borrow_mut().to_app_result()
-            .map(|x| RefMut::map(x, |x| x.get_or_insert(f())))
-    }
 }
 
 pub struct SliceRef<'a, T: ?Sized> {
@@ -490,8 +526,19 @@ macro_rules! js_obj {
 
 #[macro_export]
 macro_rules! js_function {
-    (move || $f:expr) => {
-        $crate::wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || $f).into_js_value()
+    (|| $body:expr) => {
+        $crate::wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || $body)
+            .into_js_value()
+            .unchecked_into::<$crate::js_sys::Function>()
+    };
+    (|$arg:ident $(: $t:ty)?| $body:expr) => {
+        $crate::wasm_bindgen::closure::Closure::<dyn Fn(_)>::new(move |$arg $(: $t)?| $body)
+            .into_js_value()
+            .unchecked_into::<$crate::js_sys::Function>()
+    };
+    ($var:path) => {
+        $crate::wasm_bindgen::closure::Closure::new($var)
+            .into_js_value()
             .unchecked_into::<$crate::js_sys::Function>()
     };
 }
@@ -526,12 +573,17 @@ macro_rules! eval_once {
     }};
 }
 
-pub fn window() -> HtmlWindow {
+pub fn window() -> Window {
 	unsafe{web_sys::window().unwrap_unchecked()}
 }
 
-pub fn document() -> HtmlDocument {
+pub fn document() -> Document {
 	unsafe{web_sys::window().unwrap_unchecked().document().unwrap_unchecked()}
+}
+
+/// returns precise current time in seconds.
+pub fn now() -> Option<R64> {
+    window().performance().map(|p| unsafe{R64::new_unchecked(p.now())} / 1000)
 }
 
 pub fn report_err(err: js_sys::Error) {
@@ -559,11 +611,8 @@ impl From<JsValue> for AppError {
 /// `format!`-like macro to create an `AppError`
 #[macro_export]
 macro_rules! app_error {
-    ($x:literal) => {
-        $crate::AppError::new($x)
-    };
-    ($x:literal, $($arg:tt)+) => {
-        $crate::AppError::new(&format!($x, $($arg)+))
+    ($x:literal $(,)? $($arg:tt)*) => {
+        $crate::AppError::new(&format!($x, $($arg)*))
     };
 }
 
@@ -610,6 +659,7 @@ pub trait ResultExt<T, E> {
     fn to_app_result(self) -> AppResult<T> where E: Display;
     fn explain_err(self, msg: &str) -> AppResult<T>;
     fn explain_err_with(self, f: impl FnOnce() -> String) -> AppResult<T>;
+    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
 }
 
 impl<T, E> ResultExt<T, E> for Result<T, E> {
@@ -623,6 +673,10 @@ impl<T, E> ResultExt<T, E> for Result<T, E> {
 
     fn explain_err_with(self, f: impl FnOnce() -> String) -> AppResult<T> {
         self.map_err(|_| AppError::new(&f()))
+    }
+
+    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
+        match self {Ok(x) => f(x), Err(_) => U::default()}
     }
 }
 
@@ -687,7 +741,7 @@ pub trait HtmlDocumentExt {
     fn element_dyn_into<T: JsCast>(&self, id: &str) -> Option<T>;
 }
 
-impl HtmlDocumentExt for HtmlDocument {
+impl HtmlDocumentExt for Document {
     fn element_dyn_into<T: JsCast>(&self, id: &str) -> Option<T> {
         self.get_element_by_id(id)?.dyn_into::<T>().ok()
     }

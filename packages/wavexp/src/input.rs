@@ -18,13 +18,10 @@ use yew::{
     AttrValue,
     Callback,
     Properties,
-    scheduler::Shared,
-    NodeRef, function_component};
+    NodeRef, function_component, scheduler::Shared};
 use wavexp_utils::{
-    r64,
     R64,
     Point,
-    report_err,
     BoolExt,
     default,
     AppError,
@@ -33,8 +30,8 @@ use wavexp_utils::{
     HtmlElementExt,
     AppResult,
     AppResultUtils,
-    ResultExt,
-    Pipe};
+    Pipe,
+    r64, SharedExt};
 use crate::{
     visual::{GraphPoint, GraphEditor},
     global::AppEvent};
@@ -351,8 +348,8 @@ impl<T: 'static + GraphPoint> Component for GraphEditorCanvas<T> {
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         let GraphEditorCanvasProps{emitter, editor, id} = ctx.props();
-        match editor.try_borrow().to_app_result() {
-            Ok(editor) => {
+        match editor.get().report() {
+            Some(editor) => {
                 let (canvas_id, id) = (*id, editor.id());
                 html!{<canvas ref={editor.canvas().clone()} id={canvas_id}
                     onpointerdown={emitter.reform(move  |e| AppEvent::Focus(id, e))}
@@ -361,18 +358,14 @@ impl<T: 'static + GraphPoint> Component for GraphEditorCanvas<T> {
                     onpointerenter={emitter.reform(move |e| AppEvent::Enter(id, MouseEvent::from(e)))}
                     onpointerout={emitter.reform(move   |_| AppEvent::Leave(id))}/>}
             }
-            Err(err) => {
-                report_err(err.into());
-                html!{"Error"}
-            }
+            None => html!{"Error"}
         }
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         if !first_render {return}
-        match ctx.props().editor.try_borrow_mut().to_app_result() {
-            Ok(mut x) => _ = x.init(),
-            Err(e) => report_err(e.into())
+        if let Some(mut x) = ctx.props().editor.get_mut().report() {
+            x.init().report();
         }
     }
 }
@@ -470,7 +463,7 @@ pub struct TabProps {
 pub fn Tab(props: &TabProps) -> Html {
     let TabProps{name, desc, setter, selected} = props;
     html!{
-        <div id={selected.then_some("selected-tab")}
+        <div class={selected.then_some("selected")}
         onpointerup={setter.reform(|_| ())}
         data-main-hint={name} data-aux-hint={desc}>
             <p>{name}</p>

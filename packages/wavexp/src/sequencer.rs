@@ -2,7 +2,10 @@ use std::{
     ops::{Deref, DerefMut, Range, Not},
     cmp::Ordering,
     borrow::Cow,
-    iter::once, fmt::{Display, Formatter, self}};
+    iter::once,
+    fmt::{Display, Formatter, self},
+    cell::RefCell,
+    rc::Rc};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use wavexp_utils::{
@@ -15,10 +18,14 @@ use wavexp_utils::{
     ArrayFrom,
     document,
     OptionExt,
-    window,
     Check,
     R32,
-    AppResultUtils, ToAttrValue, report_err, AppError};
+    AppResultUtils,
+    ToAttrValue,
+    now,
+    js_function,
+    SharedExt,
+    AwareRefMut};
 use web_sys::{
     Path2d,
     HtmlCanvasElement,
@@ -26,12 +33,13 @@ use web_sys::{
     AnalyserNode,
     GainNode,
     OfflineAudioContext,
-    AudioContext};
+    AudioContext,
+    HtmlInputElement};
 use yew::{
-    scheduler::Shared,
     Html,
     html,
-    AttrValue};
+    AttrValue,
+    TargetCast, scheduler::Shared};
 use crate::{
     sound::{Sound, Beats, Secs, FromBeats},
     visual::{GraphPoint, GraphEditor},
@@ -253,7 +261,7 @@ impl GraphPoint for SoundBlock {
 
         Ok(if let Ok(start) = sequencer.playing_since().check(R64::is_finite) {
             editor.force_redraw();
-            let x = (ctx.now() - start).secs_to_beats(bps) * step[0] - offset[0];
+            let x = (ctx.frame() - start).secs_to_beats(bps) * step[0] - offset[0];
             solid.move_to(*x, 0.0);
             solid.line_to(*x, *canvas_size[1]);
         })
@@ -319,37 +327,22 @@ impl Sequencer {
         let gain = audio_ctx.create_gain()?;
         gain.gain().set_value(0.2);
         Ok(Self{
-            pattern: default(),
+            pattern: Shared::new(default()),
             inputs: vec![],
             analyser: audio_ctx.create_analyser()?,
             gain,
             audio_ctx: audio_ctx.into(),
-            ctx_created_at: unsafe{R64::new_unchecked(window().performance().to_app_result()?.now())}
-                / 1000,
+            ctx_created_at: now().to_app_result()? / 1000,
             bps: r64![2],
             playing_since: Secs::NEG_INFINITY})
     }
 
     /// returns `R64::NEG_INFINITY` if no sound's playing at the moment
-    pub fn playing_since(&self) -> Secs {
-        self.playing_since
-    }
-
-    pub fn bps(&self) -> Beats {
-        self.bps
-    }
-
-    pub fn pattern(&self) -> &Shared<GraphEditor<SoundBlock>> {
-        &self.pattern
-    }
-
-    pub fn audio_ctx(&self) -> &BaseAudioContext {
-        &self.audio_ctx
-    }
-
-    pub fn analyser(&self) -> &AnalyserNode {
-        &self.analyser
-    }
+    pub fn playing_since(&self) -> Secs {self.playing_since}
+    pub fn bps(&self) -> Beats {self.bps}
+    pub fn pattern(&self) -> &Shared<GraphEditor<SoundBlock>> {&self.pattern}
+    pub fn audio_ctx(&self) -> &BaseAudioContext {&self.audio_ctx}
+    pub fn analyser(&self) -> &AnalyserNode {&self.analyser}
 
     pub fn volume(&self) -> R32 {
         unsafe{R32::new_unchecked(self.gain.gain().value())}
@@ -386,16 +379,14 @@ impl Sequencer {
             1 /* Inputs */ => html!{
                 <div class="horizontal-menu">
                     {for self.inputs.iter().map(|i| {
-                        match i.try_borrow().map(|x| x.to_attr_value()) {
-                            Ok(name) =>
+                        match i.get().report().map(|x| x.add_ctx(self).to_attr_value()) {
+                            Some(name) =>
                                 html!{<Button name={&name}>{name}</Button>},
-                            Err(e) => {
-                                report_err(AppError::from(e).into());
+                            None =>
                                 html!{<p style="color:red">{"Failed to access audio input"}</p>}
-                            }
                         }
                     })}
-                    <Button name="Add audio input">
+                    <Button name="Add audio input" setter={emitter.reform(|_| AppEvent::StartInputAdd)}>
                         <svg viewBox="0 0 100 100">
                             <polygon points="
                                 40,10 60,10 60,40 90,40 90,60 60,60
@@ -409,7 +400,7 @@ impl Sequencer {
         }
     }
 
-    pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> AppResult<()> {
+    pub fn handle_event(self: &mut AwareRefMut<'_, Self>, event: &AppEvent, ctx: &mut AppContext) -> AppResult<()> {
         Ok(match event {
             AppEvent::PreparePlay => if self.audio_ctx.is_instance_of::<AudioContext>() {
                 ctx.emit_event(AppEvent::StartPlay)
@@ -421,14 +412,13 @@ impl Sequencer {
                 self.gain.gain().set_value(*volume);
                 self.gain.connect_with_audio_node(&self.analyser)?
                     .connect_with_audio_node(&self.audio_ctx.destination())?;
-                let perf = window().performance().to_app_result()?;
-                self.ctx_created_at = unsafe{R64::new_unchecked(perf.now()) / 1000};
+                self.ctx_created_at = now().to_app_result()?;
 
-                let audio_ctx = self.audio_ctx.clone();
+                let worklet = self.audio_ctx.audio_worklet()?;
                 let emitter = ctx.event_emitter().clone();
                 spawn_local(async move {
                     let res: AppResult<!> = try {
-                        TimeStretcherNode::register(audio_ctx.audio_worklet()?).await?;
+                        TimeStretcherNode::register(worklet).await?;
                         return emitter.emit(AppEvent::StartPlay)
                     };
                     res.report();
@@ -436,15 +426,42 @@ impl Sequencer {
             }
 
             AppEvent::StartPlay => {
-                let perf = window().performance().to_app_result()?;
-                let now = unsafe{R64::new_unchecked(perf.now()) / 1000 - self.ctx_created_at};
-                let mut pattern = self.pattern.try_borrow_mut()?;
+                let now = now().to_app_result()? - self.ctx_created_at;
+                self.playing_since = now + self.ctx_created_at;
+                let mut pattern = self.pattern.get_mut()?;
                 for mut block in pattern.iter_mut() {
                     let offset = block.offset.to_secs(self.bps);
                     block.inner().play(&self.gain, now, offset, self.bps)?;
                 }
-                self.playing_since = now + self.ctx_created_at;
             }
+
+            AppEvent::StopPlay => self.playing_since = R64::NEG_INFINITY,
+
+            AppEvent::StartInputAdd => {
+                let temp = document().create_element("input")?
+                    .unchecked_into::<HtmlInputElement>();
+                temp.set_type("file");
+                let emitter = ctx.event_emitter().clone();
+                temp.set_onchange(Some(&js_function!(|e| emitter.emit(AppEvent::AudioUploaded(e)))));
+                temp.click();
+            }
+
+            AppEvent::AudioUploaded(e) => {
+                let target: HtmlInputElement = e.target_dyn_into().to_app_result()?;
+                let emitter = ctx.event_emitter().clone();
+
+                let seq = self.get_outer();
+                spawn_local(async move {
+                    let res: AppResult<!> = try {
+                        let file = target.files().and_then(|x| x.get(0)).to_app_result()?;
+                        let input = AudioInput::new_file(file, seq).await?;
+                        return emitter.emit(AppEvent::AddInput(Rc::new(RefCell::new(input))))
+                    };
+                    res.report();
+                })
+            }
+
+            AppEvent::AddInput(input) => self.inputs.push(input.clone()),
 
             &AppEvent::MasterVolume(to) => unsafe {
                 let gain = self.gain.gain();
@@ -458,36 +475,41 @@ impl Sequencer {
                 self.bps = to
             }
 
-            AppEvent::StopPlay => self.playing_since = R64::NEG_INFINITY,
 
-            AppEvent::RedrawEditorPlane => self.pattern.try_borrow_mut()?
+            AppEvent::RedrawEditorPlane => self.pattern.get_mut()?
                 .force_redraw(),
 
-            AppEvent::Undo(actions) => for action in actions.iter() {
-                match *action {
-                    AppAction::SetTempo{from, ..} =>
-                        self.bps = from,
+            e @AppEvent::Undo(actions) => {
+                for action in actions.iter() {
+                    match *action {
+                        AppAction::SetTempo{from, ..} =>
+                            self.bps = from,
 
-                    AppAction::SetMasterVolume{from, ..} =>
-                        self.gain.gain().set_value(*from),
+                        AppAction::SetMasterVolume{from, ..} =>
+                            self.gain.gain().set_value(*from),
 
-                    _ => ()
+                        _ => ()
+                    }
                 }
+                self.pattern.get_mut()?.handle_event(e, ctx, &*self, || ())?
             }
 
-            AppEvent::Redo(actions) => for action in actions.iter() {
-                match *action {
-                    AppAction::SetTempo{to, ..} =>
-                        self.bps = to,
+            e @AppEvent::Redo(actions) => {
+                for action in actions.iter() {
+                    match *action {
+                        AppAction::SetTempo{to, ..} =>
+                            self.bps = to,
 
-                    AppAction::SetMasterVolume{to, ..} =>
-                        self.gain.gain().set_value(*to),
+                        AppAction::SetMasterVolume{to, ..} =>
+                            self.gain.gain().set_value(*to),
 
-                    _ => ()
+                        _ => ()
+                    }
                 }
+                self.pattern.get_mut()?.handle_event(e, ctx, &*self, || ())?
             }
 
-            e => self.pattern.try_borrow_mut()?.handle_event(e, ctx, self, || ())?
+            e => self.pattern.get_mut()?.handle_event(e, ctx, &*self, || ())?
         })
     }
 }

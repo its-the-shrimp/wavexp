@@ -2,44 +2,48 @@ use std::{
     borrow::Cow,
     slice::from_ref,
     mem::{take, MaybeUninit},
-    cmp::Ordering, iter::once, num::NonZeroUsize};
+    cmp::Ordering,
+    iter::once,
+    num::NonZeroUsize,
+    cell::RefCell,
+    rc::Rc};
 use js_sys::Function;
 use wasm_bindgen::{
     closure::Closure,
-    JsCast,
-    UnwrapThrowExt};
+    JsCast};
 use web_sys::{
     PointerEvent,
     MouseEvent,
     UiEvent,
     KeyboardEvent,
-    Event,
-    AudioBuffer};
+    Event};
 use yew::{
     Component,
     Context,
     Html,
     html,
     AttrValue,
-    Callback};
+    Callback, scheduler::Shared};
 use wavexp_utils::{
     R64,
     R32,
     window,
     SliceExt,
     OptionExt,
-    ResultExt,
     Point,
     Take,
     default,
     AppResult,
     r64,
-    AppResultUtils, ToAttrValue};
+    AppResultUtils,
+    ToAttrValue,
+    now,
+    SharedExt};
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, Note, NoteBlock, CustomBlock},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
     input::{Button, Switch, GraphEditorCanvas},
-    sequencer::{SoundBlock, Sequencer}};
+    sequencer::{SoundBlock, Sequencer}, sound_internals::AudioInput};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, PartialEq, Clone)]
@@ -120,12 +124,14 @@ pub enum AppEvent {
     Rewind(usize),
     /// set the repetition count of a sound block
     RepCount(NonZeroUsize),
-    /// audio file was uploaded to a Custom Audio sound block
+    /// file was selected to be a new audio input to be added
     AudioUploaded(Event),
     /// audio source was decoded and is ready to be used
-    AudioProcessed(AudioBuffer),
+    AddInput(Shared<AudioInput>),
     /// set the playback speed of the audio source of the Custom Audio sound block
-    Speed(R32)
+    Speed(R32),
+    /// emitted when the user clicks a button to add an audio input
+    StartInputAdd,
 }
 
 impl AppEvent {
@@ -137,7 +143,8 @@ impl AppEvent {
             | Self::SetBlockType(..)
             | Self::Remove
             | Self::Undo(..)
-            | Self::Redo(..))
+            | Self::Redo(..)
+            | Self::AddInput(..))
     }
 }
 
@@ -176,7 +183,8 @@ pub enum AppAction {
     /// switch tabs in the side editor
     SwitchTab{from: usize, to: usize},
     /// remove sound blocks
-    RemoveSoundBlock(usize, SoundBlock),
+    RemoveSoundBlock{block_id: usize, block: SoundBlock,
+        prev_selected_tab: usize},
     /// remove note blocks
     RemoveNoteBlocks(Box<[(usize, NoteBlock)]>),
     /// change the length of note blocks, optionally removing some
@@ -206,194 +214,110 @@ pub enum AppAction {
 }
 
 impl AppAction {
-    pub fn name(&self) -> &'static str {
+    /// Returns the name of the action, or `None` if an action is hidden and thus not supposed to
+    /// be shown to the user.
+    /// Hidden actions are those that are only significant as context for correct reconstruction of
+    /// user's actions, but are not worthy of being shown in the list of actions.
+    /// Such actions are dragging an editor plane, switching between tabs, etc.
+    pub fn name(&self) -> Option<&'static str> {
         match self {
             Self::Start =>
-                "Start",
+                Some("Start"),
             Self::DragPlane{..} =>
-                "Drag Plane",
+                None, // "Drag Plane"
             Self::DragPoint{..} =>
-                "Drag Block",
+                Some("Drag Block"),
             Self::DragSelection{..} =>
-                "Drag Selection",
+                Some("Drag Selection"),
             Self::SetSelection{..} =>
-                "Set Selection",
+                Some("Set Selection"),
             Self::AddSoundBlock{..} =>
-                "Add Sound Block",
+                Some("Add Sound Block"),
             Self::AddNoteBlock{..} =>
-                "Add Note Block",
-            Self::Select{to, ..} =>
-                if to.is_some() {"Open Sound Block Editor"}
-                else {"Close Sound Block Editor"},
+                Some("Add Note Block"),
+            Self::Select{..} =>
+                None, // "Open Sound Block Editor" | "Close Sound Block Editor"
             Self::SetBlockType(..) =>
-                "Set Sound Block Type",
+                Some("Set Sound Block Type"),
             Self::SwitchTab{..} =>
-                "Switch Tabs",
-            Self::RemoveSoundBlock(..) =>
-                "Remove Sound Block",
+                None, // "Switch Tabs",
+            Self::RemoveSoundBlock{..} =>
+                Some("Remove Sound Block"),
             Self::RemoveNoteBlocks(..) =>
-                "Remove Note Blocks",
+                Some("Remove Note Blocks"),
             Self::StretchNoteBlocks{..} =>
-                "Drag & Remove Blocks",
+                Some("Drag & Remove Blocks"),
             Self::SetVolume{..} =>
-                "Set Volume",
+                Some("Set Volume"),
             Self::SetAttack{..} =>
-                "Set Attack Time",
+                Some("Set Attack Time"),
             Self::SetDecay{..} =>
-                "Set Decay Time",
+                Some("Set Decay Time"),
             Self::SetSustain{..} =>
-                "Set Sustain Level",
+                Some("Set Sustain Level"),
             Self::SetRelease{..} =>
-                "Set Release Time",
+                Some("Set Release Time"),
             Self::SetTempo{..} =>
-                "Set Tempo",
+                Some("Set Tempo"),
             Self::SetSnapStep{..} =>
-                "Set Snap Step",
+                Some("Set Snap Step"),
             Self::SetMasterVolume{..} =>
-                "Set Master Volume",
+                Some("Set Master Volume"),
             Self::SetRepCount{..} =>
-                "Set Sound Block Repetition Count",
-            Self::RemoveCustomBlocks(removed) =>
-                if removed.len() == 1 {"Remove Custom Audio Block"}
-                else {"Remove Custom Audio Blocks"},
+                Some("Set Sound Block Repetition Count"),
+            Self::RemoveCustomBlocks(removed) => Some(if removed.len() == 1 {
+                "Remove Custom Audio Block"
+            } else {
+                "Remove Custom Audio Blocks"
+            }),
             Self::AddCustomBlock(..) =>
-                "Add Custom Audio Block",
+                Some("Add Custom Audio Block"),
             Self::SetSpeed{..} =>
-                "Set Custom Audio's Playback Speed"
+                Some("Set Custom Audio's Playback Speed")
         }
     }
 }
 
 /// carries all the app-wide settings that are passed to all the event receivers
 pub struct AppContext {
-    now: Secs,
+    frame: Secs,
     snap_step: R64,
     selected_tab: usize,
     event_emitter: Callback<AppEvent>,
     actions: Vec<AppAction>,
     undid_actions: usize,
-    action_done: bool,
-    playing: bool
+    action_done: bool
 }
 
 impl AppContext {
     pub fn new(event_emitter: Callback<AppEvent>) -> AppResult<Self> {
         Ok(Self{
-            now: unsafe{R64::new_unchecked(window().performance().to_app_result()?.now()) / 1000},
+            frame: now().to_app_result()? / 1000,
             snap_step: r64![1],
             selected_tab: default(),
             undid_actions: 0,
             actions: vec![AppAction::Start],
             action_done: false,
-            playing: false,
             event_emitter})
     }
 
-    pub fn now(&self) -> Secs {self.now}
+    pub fn frame(&self) -> Secs {self.frame}
     pub fn snap_step(&self) -> R64 {self.snap_step}
     pub fn selected_tab(&self) -> usize {self.selected_tab}
     pub fn actions(&self) -> &[AppAction] {&self.actions}
     pub fn event_emitter(&self) -> &Callback<AppEvent> {&self.event_emitter}
     pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
-    pub fn playing(&self) -> bool {self.playing}
 
     pub fn register_action(&mut self, action: AppAction) {
         self.actions.drain(self.actions.len() - take(&mut self.undid_actions) ..);
         self.actions.push(action);
         self.action_done = true;
     }
-
-    /// takes the flag and sets it to `false`
-    pub fn recent_action_done(&mut self) -> bool {self.action_done.take()}
-
-    pub fn handle_event(&mut self, event: &AppEvent) -> AppResult<()> {
-        Ok(match event {
-            AppEvent::StartPlay => self.playing = true,
-
-            AppEvent::StopPlay => self.playing = false,
-
-            AppEvent::Frame(now) => self.now = now / 1000,
-
-            &AppEvent::SnapStep(to) => {
-                self.register_action(AppAction::SetSnapStep{from: self.snap_step, to});
-                self.snap_step = to;
-            }
-
-            AppEvent::Select(_) =>
-                self.selected_tab = 0,
-
-            &AppEvent::SetTab(to) => {
-                self.register_action(AppAction::SwitchTab{from: self.selected_tab, to});
-                self.selected_tab = to;
-            }
-
-            AppEvent::KeyPress(_, e) if &e.code() == "KeyZ" && e.meta_key() && !e.repeat() =>
-            if e.shift_key() {
-                if self.undid_actions > 0 {
-                    let a = unsafe{self.actions.get_unchecked(self.actions.len() - self.undid_actions)};
-                    self.emit_event(AppEvent::Redo(from_ref(a).to_vec().into()));
-                    self.undid_actions -= 1;
-                }
-            } else if self.undid_actions < self.actions.len() - 1 {
-                self.undid_actions += 1;
-                let a = unsafe{self.actions.get_unchecked(self.actions.len() - self.undid_actions)};
-                self.emit_event(AppEvent::Undo(from_ref(a).to_vec().into()));
-            }
-
-            &AppEvent::Unwind(n) => {
-                let unwound = self.actions.get(self.actions.len() - n - self.undid_actions ..)
-                    .to_app_result()?
-                    .iter().rev().cloned().collect();
-                self.undid_actions += n;
-                self.event_emitter.emit(AppEvent::Undo(unwound))
-            }
-
-            &AppEvent::Rewind(n) => {
-                let len = self.actions.len();
-                let rewound = self.actions.get({let x = len - self.undid_actions; x .. x + n})
-                    .to_app_result()?.to_box();
-                self.undid_actions -= n;
-                self.event_emitter.emit(AppEvent::Redo(rewound))
-            }
-
-            AppEvent::Undo(actions) => for action in actions.iter() {
-                match *action {
-                    AppAction::SwitchTab{from, ..} =>
-                        self.selected_tab = from,
-
-                    AppAction::Select{prev_selected_tab, ..} =>
-                        self.selected_tab = prev_selected_tab,
-
-                    AppAction::SetSnapStep{from, ..} =>
-                        self.snap_step = from,
-
-                    _ => ()
-                }
-            }
-
-            AppEvent::Redo(actions) => for action in actions.iter() {
-                match *action {
-                    AppAction::SwitchTab{to, ..} =>
-                        self.selected_tab = to,
-
-                    AppAction::Select{..} =>
-                        self.selected_tab = 0,
-
-                    AppAction::SetSnapStep{to, ..} =>
-                        self.snap_step = to,
-
-                    _ => ()
-                }
-            }
-
-            _ => ()
-        })
-    }
 }
 
 pub struct App {
     sound_visualiser: SoundVisualiser,
-    sequencer: Sequencer,
+    sequencer: Shared<Sequencer>,
     ctx: AppContext,
     hint_handler: HintHandler,
     frame_emitter: Function,
@@ -406,42 +330,94 @@ impl Component for App {
 
     fn create(ctx: &Context<Self>) -> Self {
         let cb = ctx.link().callback(AppEvent::Frame);
-        let ctx = AppContext::new(ctx.link().callback(|x| x)).unwrap_throw();
+        let ctx = AppContext::new(ctx.link().callback(|x| x)).unwrap();
         let sound_visualiser = SoundVisualiser::new();
 
         let res = Self{
             selected_block: None,
             hint_handler: default(),
-            sequencer: Sequencer::new().unwrap_throw(),
+            sequencer: Rc::new(RefCell::new(Sequencer::new().unwrap())),
             frame_emitter: Closure::<dyn Fn(_)>::new(move |x| cb.emit(R64::new_or(r64![0], x)))
                 .into_js_value().unchecked_into(),
             sound_visualiser, ctx};
-        window().request_animation_frame(&res.frame_emitter).unwrap_throw();
+        window().request_animation_frame(&res.frame_emitter).unwrap();
         res
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         let res: AppResult<!> = try {
             match msg {
-                AppEvent::Frame(_) =>
-                    _ = window().request_animation_frame(&self.frame_emitter)?,
+                AppEvent::SnapStep(to) => {
+                    self.ctx.register_action(AppAction::SetSnapStep{from: self.ctx.snap_step, to});
+                    self.ctx.snap_step = to;
+                }
 
-                AppEvent::Select(id) => {
-                    if id != self.selected_block {
-                        self.ctx.register_action(AppAction::Select{
-                            from: self.selected_block, to: id,
-                            prev_selected_tab: self.ctx.selected_tab});
+                AppEvent::SetTab(to) => {
+                    self.ctx.register_action(AppAction::SwitchTab{from: self.ctx.selected_tab, to});
+                    self.ctx.selected_tab = to;
+                }
+
+                AppEvent::KeyPress(_, ref e) if &e.code() == "KeyZ" && e.meta_key() && !e.repeat() =>
+                if e.shift_key() {
+                    if self.ctx.undid_actions > 0 {
+                        let a = unsafe{self.ctx.actions.get_unchecked(
+                            self.ctx.actions.len() - self.ctx.undid_actions)};
+                        self.ctx.emit_event(AppEvent::Redo(from_ref(a).to_box()));
+                        self.ctx.undid_actions -= 1;
                     }
-                    self.selected_block = id
+                } else if self.ctx.undid_actions < self.ctx.actions.len() - 1 {
+                    self.ctx.undid_actions += 1;
+                    let a = unsafe{self.ctx.actions.get_unchecked(
+                        self.ctx.actions.len() - self.ctx.undid_actions)};
+                    self.ctx.emit_event(AppEvent::Undo(from_ref(a).to_box()));
+                }
+
+                AppEvent::Unwind(n) => {
+                    let unwound = self.ctx.actions
+                        .get(self.ctx.actions.len() - n - self.ctx.undid_actions ..)
+                        .to_app_result()?
+                        .iter().rev().cloned().collect();
+                    self.ctx.undid_actions += n;
+                    self.ctx.emit_event(AppEvent::Undo(unwound))
+                }
+
+                AppEvent::Rewind(n) => {
+                    let rewound = self.ctx.actions
+                        .get({let x = self.ctx.actions.len() - self.ctx.undid_actions; x .. x + n})
+                        .to_app_result()?
+                        .to_box();
+                    self.ctx.undid_actions -= n;
+                    self.ctx.emit_event(AppEvent::Redo(rewound))
+                }
+
+                AppEvent::Frame(frame) => {
+                    window().request_animation_frame(&self.frame_emitter)?;
+                    self.ctx.frame = frame / 1000
+                }
+
+                AppEvent::Select(to) => if to != self.selected_block {
+                    let prev_selected_tab = self.ctx.selected_tab.take();
+                    self.ctx.register_action(AppAction::Select{
+                        from: self.selected_block, to,
+                        prev_selected_tab});
+                    self.selected_block = to
                 }
 
                 AppEvent::Remove => {
-                    let mut pattern = self.sequencer.pattern().try_borrow_mut().to_app_result()?;
+                    let sequencer = self.sequencer.get()?;
+                    let mut pattern = sequencer.pattern().get_mut()?;
                     let id = self.selected_block.take().to_app_result()?;
-                    let id = *unsafe{pattern.selection().get_unchecked(id)};
+                    let block_id = *pattern.selection().get(id).to_app_result()?;
+                    // Safety: `id` comes from `pattern.selection()`, thus it's guaranteed to be a
+                    // valid index in the `pattern` itself.
                     let mut removed = MaybeUninit::uninit();
-                    pattern.remove_points(once(id), |(_, x)| _ = removed.write(x))?;
-                    self.ctx.register_action(AppAction::RemoveSoundBlock(id, unsafe{removed.assume_init()}));
+                    pattern.remove_points(once(block_id), |(_, x)| _ = removed.write(x))?;
+                    let prev_selected_tab = self.ctx.selected_tab.take();
+                    self.ctx.register_action(AppAction::RemoveSoundBlock{
+                        block_id,
+                        block: unsafe{removed.assume_init()},
+                        prev_selected_tab
+                    });
                 }
 
                 AppEvent::Enter(id, _) => {
@@ -469,14 +445,50 @@ impl Component for App {
                 }
 
                 AppEvent::Undo(ref actions) => for action in actions.iter() {
-                    if let &AppAction::Select{from, ..} = action {
-                        self.selected_block = from;
+                    match *action {
+                        AppAction::Select{from, prev_selected_tab, ..} => {
+                            self.selected_block = from;
+                            self.ctx.selected_tab = prev_selected_tab;
+                        }
+
+                        AppAction::RemoveSoundBlock{block_id, ref block, prev_selected_tab} => unsafe {
+                            self.sequencer.get()?.pattern().get_mut()?
+                                .insert_point(block_id, block.clone());
+                            self.selected_block = Some(block_id);
+                            self.ctx.selected_tab = prev_selected_tab;
+                        }
+
+                        AppAction::SwitchTab{from, ..} =>
+                            self.ctx.selected_tab = from,
+
+                        AppAction::SetSnapStep{from, ..} =>
+                            self.ctx.snap_step = from,
+
+                        _ => (),
                     }
                 }
 
                 AppEvent::Redo(ref actions) => for action in actions.iter() {
-                    if let &AppAction::Select{to, ..} = action {
-                        self.selected_block = to;
+                    match *action {
+                        AppAction::Select{to, ..} => {
+                            self.selected_block = to;
+                            self.ctx.selected_tab = 0;
+                        }
+                        
+                        AppAction::RemoveSoundBlock{block_id, ..} => {
+                            self.sequencer.get()?.pattern().get_mut()?
+                                .remove_points(once(block_id), drop)?;
+                            self.selected_block = None;
+                            self.ctx.selected_tab = 0;
+                        }
+
+                        AppAction::SwitchTab{to, ..} =>
+                            self.ctx.selected_tab = to,
+
+                        AppAction::SetSnapStep{to, ..} =>
+                            self.ctx.snap_step = to,
+
+                        _ => (),
                     }
                 }
 
@@ -485,7 +497,7 @@ impl Component for App {
 
             let res = msg.needs_layout_rerender();
             self.forward_event(msg)?;
-            return res | self.ctx.recent_action_done()
+            return res | self.ctx.action_done.take()
         };
         res.report();
         false
@@ -493,7 +505,8 @@ impl Component for App {
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         // TODO: add switching between selected blocks
-        let pattern = self.sequencer.pattern().try_borrow().unwrap_throw();
+        let sequencer = self.sequencer.get().unwrap();
+        let pattern = sequencer.pattern().get().unwrap();
         let block = self.selected_block.and_then(|i| pattern.get_aware(i));
         let setter = ctx.link().callback(|x| x);
 
@@ -512,37 +525,42 @@ impl Component for App {
                         <div id="tab-list">
                             {block.tabs(&self.ctx)}
                         </div>
-                        {block.sound.params(&self.ctx)}
+                        {block.sound.params(&self.ctx, &sequencer)}
                         <div id="general-ctrl" class="dark-bg">
                             <Button name="Back to project-wide settings"
                             setter={setter.reform(|_| AppEvent::Select(None))}>
                                 <svg viewBox="0 0 100 100">
-                                    <polygon points="20,60 50,20 80,60 70,60 70,80 30,80 30,60"/>
+                                    <polygon points="
+                                        20,60 50,20 80,60 70,60 70,80 30,80 30,60
+                                    "/>
                                 </svg>
                             </Button>
                             <Button name="Remove sound block"
                             setter={setter.reform(|_| AppEvent::Remove)}>
                                 <svg viewBox="0 0 100 100">
-                                    <polygon points="27,35 35,27 50,42 65,27 73,35 58,50 73,65 65,73 50,58 35,73 27,65 42,50"/>
+                                    <polygon points="
+                                        27,35 35,27 50,42 65,27 73,35 58,50
+                                        73,65 65,73 50,58 35,73 27,65 42,50
+                                    "/>
                                 </svg>
                             </Button>
                         </div>
                     } else {
                         <div id="tab-list">
-                            {self.sequencer.tabs(&self.ctx)}
+                            {sequencer.tabs(&self.ctx)}
                         </div>
-                        {self.sequencer.params(&self.ctx)}
+                        {sequencer.params(&self.ctx)}
                     }
                 </div>
                 <GraphEditorCanvas<SoundBlock>
-                editor={self.sequencer.pattern()}
+                editor={sequencer.pattern()}
                 emitter={setter.clone()}/>
             </div>
             <div id="io-panel" data-main-hint="Editor plane settings">
                 <div class="horizontal-menu" id="actions">
-                    {for self.ctx.actions().iter().rev().enumerate().map(|(i, a)| (a.name(), i)).map(|(name, i)|
+                    {for self.ctx.actions().iter().rev().enumerate().map(|(i, a)|
                         match i.cmp(&self.ctx.undid_actions) {
-                            Ordering::Less => {
+                            Ordering::Less if let Some(name) = a.name() => {
                                 let i = self.ctx.undid_actions - i;
                                 html!{
                                     <Button {name} class="undone"
@@ -558,18 +576,16 @@ impl Component for App {
                             },
 
                             Ordering::Equal => html!{<>
-                                <div data-main-hint="Present"
-                                data-aux-hint="Below this are done actions, above - undone actions">
-                                    <p>{"Present"}</p>
-                                </div>
-                                <Button {name}
-                                help={"Last action"}
-                                setter={Callback::noop()}>
-                                    <p>{name}</p>
-                                </Button>
+                                if let Some(name) = a.name() {
+                                    <Button {name} class="selected"
+                                    help={"Last action"}
+                                    setter={Callback::noop()}>
+                                        <p>{name}</p>
+                                    </Button>
+                                }
                             </>},
 
-                            Ordering::Greater => {
+                            Ordering::Greater if let Some(name) = a.name() => {
                                 let i = i - self.ctx.undid_actions;
                                 html!{
                                     <Button {name}
@@ -582,6 +598,8 @@ impl Component for App {
                                     </Button>
                                 }
                             }
+
+                            _ => html!{}
                         }
                     )}
                 </div>
@@ -599,7 +617,7 @@ impl Component for App {
                         _ => 0
                     }}/>
                 </div>
-                if self.ctx.playing() {
+                if sequencer.playing_since().is_finite() {
                     <Button name="Stop"
                     setter={setter.reform(|_| AppEvent::StopPlay)}>
                         <svg viewBox="3 0 100 103" height="100%">
@@ -618,6 +636,7 @@ impl Component for App {
                 <canvas id="sound-visualiser" ref={self.sound_visualiser.canvas()} class="blue-border"
                 data-main-hint="Sound visualiser"/>
             </div>
+            // add a loading indicator
             <div id="error-sign" hidden={true}
             data-main-hint="Error has occured" data-aux-hint="Check the console for more info">
                 <svg viewBox="0 0 100 100">
@@ -659,16 +678,16 @@ impl Component for App {
 
 impl App {
     fn forward_event(&mut self, event: AppEvent) -> AppResult<()> {
-        self.ctx.handle_event(&event)?;
         self.hint_handler.handle_event(&event)?;
-        self.sound_visualiser.handle_event(&event, &self.sequencer)?;
-        self.sequencer.handle_event(&event, &mut self.ctx)?;
+        let mut sequencer = self.sequencer.get_aware_mut()?;
+        self.sound_visualiser.handle_event(&event, &sequencer)?;
+        sequencer.handle_event(&event, &mut self.ctx)?;
 
-        let mut pattern = self.sequencer.pattern().try_borrow_mut()?;
+        let mut pattern = sequencer.pattern().get_mut()?;
         Ok(if let Some(&id) = pattern.selection().first() {
             let mut block = unsafe{pattern.get_unchecked_mut(id)};
             let offset = block.offset;
-            block.inner().handle_event(&event, &mut self.ctx, &self.sequencer, offset)?;
+            block.inner().handle_event(&event, &mut self.ctx, &sequencer, offset)?;
         })
     }
 }

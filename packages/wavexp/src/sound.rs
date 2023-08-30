@@ -8,16 +8,15 @@ use std::{
     num::NonZeroUsize};
 use js_sys::Math::random;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
     Path2d,
-    HtmlInputElement,
-    AudioBuffer, AudioNode, AudioBufferOptions};
+    AudioBuffer,
+    AudioNode,
+    AudioBufferOptions};
 use yew::{
     html,
     Html,
-    scheduler::Shared,
-    TargetCast};
+    scheduler::Shared};
 use wavexp_utils::{
     R64,
     R32,
@@ -33,13 +32,16 @@ use wavexp_utils::{
     AppResultUtils,
     BoolExt,
     js_function,
-    AppError};
+    AppError,
+    SharedExt,
+    AwareRefMut,
+    ResultExt};
 use crate::{
     input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas, Counter},
     visual::{GraphEditor, GraphPoint},
     global::{AppContext, AppEvent, AppAction},
     sequencer::Sequencer,
-    sound_internals::TimeStretcherNode};
+    sound_internals::{TimeStretcherNode, AudioInput}};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -477,7 +479,7 @@ impl GraphPoint for NoteBlock {
         }
 
         let total_len = editor.last().map_or_default(|x| x.offset + x.len);
-        let progress = (ctx.now() - sequencer.playing_since())
+        let progress = (ctx.frame() - sequencer.playing_since())
             .secs_to_beats(sequencer.bps()) - sb_offset;
         Ok(if progress < total_len * n_reps {
             editor.force_redraw();
@@ -726,7 +728,7 @@ impl GraphPoint for CustomBlock {
         }
 
         let total_len = editor.last().map_or_default(|x| x.offset + len);
-        let progress = (ctx.now() - sequencer.playing_since())
+        let progress = (ctx.frame() - sequencer.playing_since())
             .secs_to_beats(sequencer.bps()) - sb_offset;
         Ok(if progress < total_len * n_reps {
             editor.force_redraw();
@@ -746,7 +748,7 @@ pub enum Sound {
     Noise{pattern: Shared<GraphEditor<NoteBlock>>, src: AudioBuffer,
         volume: R32, attack: Beats, decay: Beats, sustain: R32, release: Beats,
         rep_count: NonZeroUsize},
-    Custom{pattern: Shared<GraphEditor<CustomBlock>>, src: AudioBuffer,
+    Custom{pattern: Shared<GraphEditor<CustomBlock>>, src: Shared<AudioInput>,
         volume: R32, attack: Beats, decay: Beats, sustain: R32, release: Beats,
         rep_count: NonZeroUsize, speed: R32}
 }
@@ -761,7 +763,7 @@ impl Sound {
     pub fn new(sound_type: SoundType) -> AppResult<Self> {
         Ok(match sound_type {
             SoundType::Note =>
-                Self::Note{pattern: default(),
+                Self::Note{pattern: Shared::new(default()),
                     volume: r32![1], attack: r64![0], decay: r64![0], sustain: r32![1], release: r64![0],
                     rep_count: NonZeroUsize::MIN},
 
@@ -774,16 +776,14 @@ impl Sound {
                 for i in 0 .. Sequencer::CHANNEL_COUNT as i32 {
                     src.copy_to_channel(&buf, i)?;
                 }
-                Self::Noise{pattern: default(), src,
+                Self::Noise{pattern: Shared::new(default()), src,
                     volume: r32![0.2], attack: r64![0], decay: r64![0], sustain: r32![1], release: r64![0.2],
                     rep_count: NonZeroUsize::MIN}
             }
 
             SoundType::Custom => 
                 Self::Custom{pattern: default(),
-                    src: AudioBufferOptions::new(1, Sequencer::SAMPLE_RATE as f32)
-                        .number_of_channels(Sequencer::CHANNEL_COUNT)
-                        .pipe(|x| AudioBuffer::new(x))?,
+                    src: default(),
                     volume: r32![1], attack: r64![0], decay: r64![0], sustain: r32![1], release: r64![0],
                     rep_count: NonZeroUsize::MIN, speed: r32![1]}
         })
@@ -804,7 +804,7 @@ impl Sound {
             Sound::None => (),
 
             Sound::Note{ref pattern, volume, attack, decay, mut sustain, release, rep_count} => {
-                let pat = pattern.try_borrow()?;
+                let pat = pattern.get()?;
                 let Some(last) = pat.last() else {return Ok(())};
                 let pat_len = (last.offset + last.len).to_secs(bps);
 
@@ -831,7 +831,7 @@ impl Sound {
                             .connect_with_audio_node(plug)?;
                         block_core.start_with_when(*start)?;
                         block_core.stop_with_when(*at)?;
-                        block_core.clone().set_onended(Some(&js_function!(move || {
+                        block_core.clone().set_onended(Some(&js_function!(|| {
                             block.disconnect().map_err(AppError::from).report();
                             block_core.disconnect().map_err(AppError::from).report();
                         })));
@@ -840,7 +840,7 @@ impl Sound {
             }
 
             Sound::Noise{ref pattern, ref src, volume, attack, decay, mut sustain, release, rep_count} => {
-                let pat = pattern.try_borrow()?;
+                let pat = pattern.get()?;
                 let Some(last) = pat.last() else {return Ok(())};
                 let pat_len = (last.offset + last.len).to_secs(bps);
 
@@ -871,7 +871,7 @@ impl Sound {
                             .connect_with_audio_node(plug)?;
                         block_core.start_with_when(*start)?;
                         block_core.stop_with_when(*at)?;
-                        block_core.clone().set_onended(Some(&js_function!(move || {
+                        block_core.clone().set_onended(Some(&js_function!(|| {
                             block.disconnect().map_err(AppError::from).report();
                             block_core.disconnect().map_err(AppError::from).report();
                         })));
@@ -880,9 +880,10 @@ impl Sound {
             }
 
             Sound::Custom{ref pattern, ref src, volume, attack, decay, mut sustain, release, rep_count, speed} => {
-                let pat = pattern.try_borrow()?;
+                let pat = pattern.get()?;
                 let Some(last) = pat.last() else {return Ok(())};
-                let len = unsafe{R64::new_unchecked(src.duration())} / speed;
+                let src = src.get()?;
+                let len = src.duration() / speed;
                 let pat_len = last.offset.to_secs(bps) + len;
 
                 for rep in 0 .. rep_count.get() {
@@ -907,14 +908,14 @@ impl Sound {
                         stretcher.rate().set_value(1.0 / *speed);
 
                         let block_core = ctx.create_buffer_source()?;
-                        block_core.set_buffer(Some(src));
+                        block_core.set_buffer(src.inner());
                         //block_core.playback_rate().set_value(*speed);
                         block_core
                             .connect_with_audio_node(&stretcher)?
                             .connect_with_audio_node(&block)?
                             .connect_with_audio_node(plug)?;
                         block_core.start_with_when(*start)?;
-                        block_core.clone().set_onended(Some(&js_function!(move || {
+                        block_core.clone().set_onended(Some(&js_function!(|| {
                             let res: AppResult<_> = try {
                                 block.disconnect()?;
                                 stretcher.disconnect()?;
@@ -933,11 +934,11 @@ impl Sound {
             Self::None => r64![1],
 
             Self::Note {pattern, ..} |
-            Self::Noise{pattern, ..} => pattern.try_borrow()?
+            Self::Noise{pattern, ..} => pattern.get()?
                 .last().map_or_default(|x| x.offset + x.len),
 
-            Self::Custom{pattern, src, speed, ..} => match pattern.try_borrow()?.last() {
-                Some(x) => x.offset + R64::try_from(src.duration())?.secs_to_beats(bps) / speed,
+            Self::Custom{pattern, src, speed, ..} => match pattern.get()?.last() {
+                Some(x) => x.offset + src.get()?.duration().secs_to_beats(bps) / speed,
                 None => default()
             }
         })
@@ -952,7 +953,7 @@ impl Sound {
         }
     }
 
-    pub fn params(&self, ctx: &AppContext) -> Html {
+    pub fn params(&self, ctx: &AppContext, sequencer: &Sequencer) -> Html {
         let setter = ctx.event_emitter();
         match self {
             Self::None => html!{<div class="horizontal-menu">
@@ -1002,7 +1003,8 @@ impl Sound {
                 tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
             }
 
-            Self::Custom{pattern, volume, attack, decay, sustain, release, rep_count, speed, ..} => match ctx.selected_tab() {
+            Self::Custom{pattern, volume, attack, decay, sustain, release, rep_count, speed, src} =>
+            match ctx.selected_tab() {
                 0 /* General */ => html!{<div id="inputs">
                     <Slider key="custom-vol"
                     setter={setter.reform(|x| AppEvent::Volume(R32::from(x)))}
@@ -1014,13 +1016,18 @@ impl Sound {
                     name="Number Of Pattern Repetitions"
                     min={r64![1]}
                     initial={*rep_count}/>
-                    <input type="file"
-                    onchange={setter.reform(AppEvent::AudioUploaded)}/>
                     <Counter key="note-speed"
                     setter={setter.reform(|x| AppEvent::Speed(R32::from(x)))}
                     fmt={|x| format!("{x:.2}x")}
                     name="Playback speed"
                     initial={*speed}/>
+                    <Button name="Audio input" help="Click to change" class="wide">
+                        if let Some(src) = src.get().report() {
+                            {src.add_ctx(sequencer).to_string()}
+                        } else {
+                            <p style="color:red">{"Failed to access audio input"}</p>
+                        }
+                    </Button>
                 </div>},
                 1 /* Envelope */ => html!{<div id="inputs">
                     <Counter key="custom-att"
@@ -1052,7 +1059,7 @@ impl Sound {
         &mut self,
         event: &AppEvent,
         ctx: &mut AppContext,
-        sequencer: &Sequencer,
+        sequencer: &AwareRefMut<'_, Sequencer>,
         offset: Beats
     ) -> AppResult<()> {
         Ok(match self {
@@ -1092,7 +1099,7 @@ impl Sound {
 
                 e => {
                     let pattern = if ctx.selected_tab() == 2 {
-                        let mut p = pattern.try_borrow_mut()?;
+                        let mut p = pattern.get_mut()?;
                         p.handle_event(e, ctx, sequencer, || (offset, *rep_count))?;
                         Some(p)
                     } else {None};
@@ -1160,32 +1167,17 @@ impl Sound {
                     ctx.emit_event(AppEvent::RedrawEditorPlane);
                 }
 
-                AppEvent::AudioUploaded(e) => {
-                    let target: HtmlInputElement = e.target_dyn_into().to_app_result()?;
-                    let emitter = ctx.event_emitter().clone();
-                    let ctx = sequencer.audio_ctx().clone();
-
-                    spawn_local(async move {
-                        let res: AppResult<!> = try {
-                            let file = target.files().to_app_result()?.get(0).to_app_result()?;
-                            let raw = JsFuture::from(file.array_buffer()).await?.dyn_into()?;
-                            let buf = JsFuture::from(ctx.decode_audio_data(&raw)?).await?.dyn_into()?;
-                            return emitter.emit(AppEvent::AudioProcessed(buf))
-                        };
-                        res.report();
-                    })
-                }
-
-                AppEvent::AudioProcessed(buf) => {
-                    *src = buf.clone();
+                AppEvent::AddInput(input) => {
+                    *src = input.clone();
                     ctx.emit_event(AppEvent::RedrawEditorPlane)
                 }
 
                 e => {
                     if ctx.selected_tab() == 2 {
-                        pattern.try_borrow_mut()?
+                        pattern.get_mut()?
                             .handle_event(e, ctx, sequencer, ||
-                                (offset, *rep_count, unsafe{R64::new_unchecked(src.duration())} / *speed))?;
+                                (offset, *rep_count, src.get().map_or_default(|x|
+                                    x.add_ctx(sequencer).duration() / *speed)))?;
                     }
 
                     match e {

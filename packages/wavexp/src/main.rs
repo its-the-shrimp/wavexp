@@ -1,3 +1,4 @@
+#![feature(arbitrary_self_types)]
 #![feature(try_blocks)]
 #![feature(never_type)]
 #![feature(unwrap_infallible)]
@@ -7,6 +8,7 @@
 #![feature(lazy_cell)]
 #![feature(variant_count)]
 #![feature(let_chains)]
+#![feature(if_let_guard)]
 #![feature(try_find)]
 #![allow(clippy::unit_arg)]
 #![allow(clippy::option_map_unit_fn)]

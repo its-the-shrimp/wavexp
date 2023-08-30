@@ -494,7 +494,8 @@ impl<T: GraphPoint> GraphEditor<T> {
         })
     }
 
-    /// The function is unsafe because maintaining sorted order of the points is on the caller.
+    /// # Safety:
+    /// `point` must maintin sorted order at index `at`.
     pub unsafe fn insert_point(&mut self, at: usize, point: T) {
         self.redraw = true;
         self.data.insert(at, point);
@@ -745,7 +746,8 @@ impl<T: GraphPoint> GraphEditor<T> {
 
                         ctx.register_action(action.unwrap_or(AppAction::DragPlane{
                             editor_id: self.inner.id,
-                            offset_delta: init_offset - self.inner.offset, scale_delta: default()}));
+                            offset_delta: self.inner.offset - init_offset,
+                            scale_delta: default()}));
                     } else {
                         let prev_ids = take(&mut self.selection).into_boxed_slice();
                         let prev_size = take(&mut self.selection_size);

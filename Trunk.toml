@@ -1,4 +1,3 @@
 [build]
 target = "packages/wavexp/index.html"
-dist = "packages/wavexp/dist"
 release = false
