@@ -1,3 +1,4 @@
+#![feature(iter_advance_by)]
 #![feature(arbitrary_self_types)]
 #![feature(try_blocks)]
 #![feature(never_type)]

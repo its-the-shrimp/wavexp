@@ -38,7 +38,7 @@ use wavexp_utils::{
     AppResultUtils,
     ToAttrValue,
     now,
-    SharedExt};
+    SharedExt, ArrayExt};
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, Note, NoteBlock, CustomBlock},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
@@ -132,6 +132,10 @@ pub enum AppEvent {
     Speed(R32),
     /// emitted when the user clicks a button to add an audio input
     StartInputAdd,
+    /// emitted when a pop-up needs to be toggled
+    TogglePopup,
+    /// emitted when an audio input is selected, e.g. clicked
+    SelectAudioInput(Shared<AudioInput>)
 }
 
 impl AppEvent {
@@ -144,7 +148,8 @@ impl AppEvent {
             | Self::Remove
             | Self::Undo(..)
             | Self::Redo(..)
-            | Self::AddInput(..))
+            | Self::AddInput(..)
+            | Self::TogglePopup)
     }
 }
 
@@ -211,6 +216,10 @@ pub enum AppAction {
     RemoveCustomBlocks(Box<[(usize, CustomBlock)]>),
     /// set playback speed of the audio source of a Custom Audio sound block
     SetSpeed{from: R32, to: R32},
+    /// switch the state of the pop-up winwdow from on to off and vice versa
+    TogglePopup,
+    /// change the selected audio input of the sound block.
+    SelectAudioInput{from: Shared<AudioInput>, to: Shared<AudioInput>}
 }
 
 impl AppAction {
@@ -230,7 +239,7 @@ impl AppAction {
             Self::DragSelection{..} =>
                 Some("Drag Selection"),
             Self::SetSelection{..} =>
-                Some("Set Selection"),
+                None, // "Set Selection"
             Self::AddSoundBlock{..} =>
                 Some("Add Sound Block"),
             Self::AddNoteBlock{..} =>
@@ -273,7 +282,44 @@ impl AppAction {
             Self::AddCustomBlock(..) =>
                 Some("Add Custom Audio Block"),
             Self::SetSpeed{..} =>
-                Some("Set Custom Audio's Playback Speed")
+                Some("Set Custom Audio's Playback Speed"),
+            Self::TogglePopup =>
+                None,
+            Self::SelectAudioInput{..} =>
+                Some("Select Audio Input")
+        }
+    }
+
+    /// Try to incorporate `other` into `self`, returning either both of them,
+    /// only `self` optionally modified, or none.
+    pub fn merge(self, other: Self) -> Option<(Self, Option<Self>)> {
+        match (self, other) {
+            (Self::TogglePopup, Self::TogglePopup) =>
+                None,
+            (Self::SwitchTab{from, ..}, Self::SwitchTab{to, ..}) if from == to =>
+                None,
+            (Self::SwitchTab{from, ..}, Self::SwitchTab{to, ..}) =>
+                Some((Self::SwitchTab{from, to}, None)),
+            (Self::Select{from, prev_selected_tab: 0, ..}, Self::Select{to, ..}) if from == to =>
+                None,
+            (Self::Select{from, prev_selected_tab, ..}, Self::Select{to, ..}) if from == to =>
+                Some((Self::SwitchTab{from: prev_selected_tab, to: 0}, None)),
+            (Self::Select{from, prev_selected_tab, ..}, Self::Select{to, ..}) =>
+                Some((Self::Select{from, to, prev_selected_tab}, None)),
+            (Self::DragPlane{editor_id: eid_1, offset_delta: off_1, scale_delta: s_1},
+             Self::DragPlane{editor_id: eid_2, offset_delta: off_2, scale_delta: s_2})
+            if eid_1 == eid_2
+            && Some(off_1) == off_2.checked_neg()
+            && s_1 == s_2.map(R64::recip) => 
+                None,
+            (Self::DragPlane{editor_id: eid_1, offset_delta: off_1, scale_delta: s_1},
+             Self::DragPlane{editor_id: eid_2, offset_delta: off_2, scale_delta: s_2})
+            if eid_1 == eid_2 =>
+                Some((Self::DragPlane{
+                    editor_id: eid_1,
+                    offset_delta: off_1 + off_2,
+                    scale_delta: s_1.zip(s_2, |d1, d2| d1 * d2)}, None)),
+            (a, b) => Some((a, Some(b)))
         }
     }
 }
@@ -310,8 +356,13 @@ impl AppContext {
 
     pub fn register_action(&mut self, action: AppAction) {
         self.actions.drain(self.actions.len() - take(&mut self.undid_actions) ..);
-        self.actions.push(action);
         self.action_done = true;
+        if let Some(last) = self.actions.pop() {
+            let Some((first, second)) = last.merge(action) else {return};
+            self.actions.push(first);
+            let Some(second) = second else {return};
+            self.actions.push(second);
+        }
     }
 }
 
@@ -321,7 +372,8 @@ pub struct App {
     ctx: AppContext,
     hint_handler: HintHandler,
     frame_emitter: Function,
-    selected_block: Option<usize>
+    selected_block: Option<usize>,
+    popup_open: bool
 }
 
 impl Component for App {
@@ -334,6 +386,7 @@ impl Component for App {
         let sound_visualiser = SoundVisualiser::new();
 
         let res = Self{
+            popup_open: false,
             selected_block: None,
             hint_handler: default(),
             sequencer: Rc::new(RefCell::new(Sequencer::new().unwrap())),
@@ -357,19 +410,28 @@ impl Component for App {
                     self.ctx.selected_tab = to;
                 }
 
-                AppEvent::KeyPress(_, ref e) if &e.code() == "KeyZ" && e.meta_key() && !e.repeat() =>
-                if e.shift_key() {
-                    if self.ctx.undid_actions > 0 {
+                AppEvent::KeyPress(_, ref e) => match e.code().as_str() {
+                    "KeyZ" if e.meta_key() && !e.repeat() => if e.shift_key() {
+                        if self.ctx.undid_actions > 0 {
+                            let a = unsafe{self.ctx.actions.get_unchecked(
+                                self.ctx.actions.len() - self.ctx.undid_actions)};
+                            self.ctx.emit_event(AppEvent::Redo(from_ref(a).to_box()));
+                            self.ctx.undid_actions -= 1;
+                        }
+                    } else if self.ctx.undid_actions < self.ctx.actions.len() - 1 {
+                        self.ctx.undid_actions += 1;
                         let a = unsafe{self.ctx.actions.get_unchecked(
                             self.ctx.actions.len() - self.ctx.undid_actions)};
-                        self.ctx.emit_event(AppEvent::Redo(from_ref(a).to_box()));
-                        self.ctx.undid_actions -= 1;
+                        self.ctx.emit_event(AppEvent::Undo(from_ref(a).to_box()));
                     }
-                } else if self.ctx.undid_actions < self.ctx.actions.len() - 1 {
-                    self.ctx.undid_actions += 1;
-                    let a = unsafe{self.ctx.actions.get_unchecked(
-                        self.ctx.actions.len() - self.ctx.undid_actions)};
-                    self.ctx.emit_event(AppEvent::Undo(from_ref(a).to_box()));
+
+                    "Escape" if self.popup_open => {
+                        e.prevent_default();
+                        self.ctx.register_action(AppAction::TogglePopup);
+                        self.popup_open = false;
+                    }
+
+                    _ => ()
                 }
 
                 AppEvent::Unwind(n) => {
@@ -444,6 +506,11 @@ impl Component for App {
                     window.set_onkeyup(Some(&cb))
                 }
 
+                AppEvent::TogglePopup => {
+                    self.ctx.register_action(AppAction::TogglePopup);
+                    self.popup_open = !self.popup_open;
+                }
+
                 AppEvent::Undo(ref actions) => for action in actions.iter() {
                     match *action {
                         AppAction::Select{from, prev_selected_tab, ..} => {
@@ -463,6 +530,9 @@ impl Component for App {
 
                         AppAction::SetSnapStep{from, ..} =>
                             self.ctx.snap_step = from,
+
+                        AppAction::TogglePopup =>
+                            self.popup_open = !self.popup_open,
 
                         _ => (),
                     }
@@ -488,6 +558,9 @@ impl Component for App {
                         AppAction::SetSnapStep{to, ..} =>
                             self.ctx.snap_step = to,
 
+                        AppAction::TogglePopup =>
+                            self.popup_open = !self.popup_open,
+
                         _ => (),
                     }
                 }
@@ -503,6 +576,8 @@ impl Component for App {
         false
     }
 
+    // because such patterns allow for more concise html
+    #[allow(irrefutable_let_patterns)]
     fn view(&self, ctx: &Context<Self>) -> Html {
         // TODO: add switching between selected blocks
         let sequencer = self.sequencer.get().unwrap();
@@ -535,7 +610,7 @@ impl Component for App {
                                     "/>
                                 </svg>
                             </Button>
-                            <Button name="Remove sound block"
+                            <Button name="Remove sound block" class="red-on-hover"
                             setter={setter.reform(|_| AppEvent::Remove)}>
                                 <svg viewBox="0 0 100 100">
                                     <polygon points="
@@ -545,6 +620,23 @@ impl Component for App {
                                 </svg>
                             </Button>
                         </div>
+                        if self.popup_open && let (title, body) = block.sound.popup(&self.ctx, &sequencer) {
+                            <div id="popup-bg">
+                                <p>{&title}</p>
+                                <Button name="Close the pop-up" class="red-on-hover"
+                                setter={setter.reform(|_| AppEvent::TogglePopup)}>
+                                    <svg viewBox="0 0 100 100">
+                                        <polygon points="
+                                            27,35 35,27 50,42 65,27 73,35 58,50
+                                            73,65 65,73 50,58 35,73 27,65 42,50
+                                        "/>
+                                    </svg>
+                                </Button>
+                                <div class="light-bg blue-border" data-main-hint={title}>
+                                    {body}
+                                </div>
+                            </div>
+                        }
                     } else {
                         <div id="tab-list">
                             {sequencer.tabs(&self.ctx)}

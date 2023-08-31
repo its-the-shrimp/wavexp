@@ -39,7 +39,7 @@ use yew::{
     Html,
     html,
     AttrValue,
-    TargetCast, scheduler::Shared};
+    TargetCast, scheduler::Shared, Callback};
 use crate::{
     sound::{Sound, Beats, Secs, FromBeats},
     visual::{GraphPoint, GraphEditor},
@@ -327,7 +327,7 @@ impl Sequencer {
         let gain = audio_ctx.create_gain()?;
         gain.gain().set_value(0.2);
         Ok(Self{
-            pattern: Shared::new(default()),
+            pattern: default(),
             inputs: vec![],
             analyser: audio_ctx.create_analyser()?,
             gain,
@@ -346,6 +346,34 @@ impl Sequencer {
 
     pub fn volume(&self) -> R32 {
         unsafe{R32::new_unchecked(self.gain.gain().value())}
+    }
+
+    pub fn inputs(&self, emitter: Callback<AppEvent>) -> Html {
+        html!{
+            <div class="horizontal-menu dark-bg">
+                {for self.inputs.iter().cloned().map(|i| {
+                    match i.get().report().map(|x| x.add_ctx(self).to_attr_value()) {
+                        Some(name) =>
+                            html!{
+                                <Button name={&name}
+                                setter={emitter.reform(move |_| AppEvent::SelectAudioInput(i.clone()))}>
+                                    {name}
+                                </Button>
+                            },
+                        None =>
+                            html!{<p style="color:red">{"Failed to access audio input"}</p>}
+                    }
+                })}
+                <Button name="Add audio input" setter={emitter.reform(|_| AppEvent::StartInputAdd)}>
+                    <svg viewBox="0 0 100 100">
+                        <polygon points="
+                            40,10 60,10 60,40 90,40 90,60 60,60
+                            60,90 40,90 40,60 10,60 10,40 40,40
+                        "/>
+                    </svg>
+                </Button>
+            </div>
+        }
     }
 
     pub fn tabs(&self, ctx: &AppContext) -> Html {
@@ -376,27 +404,10 @@ impl Sequencer {
                     initial={self.volume()}/>
                 </div>
             },
-            1 /* Inputs */ => html!{
-                <div class="horizontal-menu">
-                    {for self.inputs.iter().map(|i| {
-                        match i.get().report().map(|x| x.add_ctx(self).to_attr_value()) {
-                            Some(name) =>
-                                html!{<Button name={&name}>{name}</Button>},
-                            None =>
-                                html!{<p style="color:red">{"Failed to access audio input"}</p>}
-                        }
-                    })}
-                    <Button name="Add audio input" setter={emitter.reform(|_| AppEvent::StartInputAdd)}>
-                        <svg viewBox="0 0 100 100">
-                            <polygon points="
-                                40,10 60,10 60,40 90,40 90,60 60,60
-                                60,90 40,90 40,60 10,60 10,40 40,40
-                            "/>
-                        </svg>
-                    </Button>
-                </div>
-            },
-            tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
+            1 /* Inputs */ =>
+                self.inputs(emitter.clone()),
+            tab_id =>
+                html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
         }
     }
 

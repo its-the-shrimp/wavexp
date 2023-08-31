@@ -16,7 +16,7 @@ use web_sys::{
 use yew::{
     html,
     Html,
-    scheduler::Shared};
+    scheduler::Shared, AttrValue};
 use wavexp_utils::{
     R64,
     R32,
@@ -763,7 +763,7 @@ impl Sound {
     pub fn new(sound_type: SoundType) -> AppResult<Self> {
         Ok(match sound_type {
             SoundType::Note =>
-                Self::Note{pattern: Shared::new(default()),
+                Self::Note{pattern: default(),
                     volume: r32![1], attack: r64![0], decay: r64![0], sustain: r32![1], release: r64![0],
                     rep_count: NonZeroUsize::MIN},
 
@@ -776,7 +776,7 @@ impl Sound {
                 for i in 0 .. Sequencer::CHANNEL_COUNT as i32 {
                     src.copy_to_channel(&buf, i)?;
                 }
-                Self::Noise{pattern: Shared::new(default()), src,
+                Self::Noise{pattern: default(), src,
                     volume: r32![0.2], attack: r64![0], decay: r64![0], sustain: r32![1], release: r64![0.2],
                     rep_count: NonZeroUsize::MIN}
             }
@@ -1012,7 +1012,7 @@ impl Sound {
                     initial={*volume}/>
                     <Counter key="custom-repcnt"
                     setter={setter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
-                    fmt={|x| format!("{}", usize::from(x))}
+                    fmt={|x| format!("{:.0}", x)}
                     name="Number Of Pattern Repetitions"
                     min={r64![1]}
                     initial={*rep_count}/>
@@ -1021,7 +1021,8 @@ impl Sound {
                     fmt={|x| format!("{x:.2}x")}
                     name="Playback speed"
                     initial={*speed}/>
-                    <Button name="Audio input" help="Click to change" class="wide">
+                    <Button name="Audio input" help="Click to change" class="wide"
+                    setter={setter.reform(|_| AppEvent::TogglePopup)}>
                         if let Some(src) = src.get().report() {
                             {src.add_ctx(sequencer).to_string()}
                         } else {
@@ -1053,6 +1054,16 @@ impl Sound {
                 tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
             }
         }
+    }
+
+    /// The returned string is the popup title
+    pub fn popup(&self, ctx: &AppContext, sequencer: &Sequencer) -> (AttrValue, Html) {
+        let body = html!{
+            <div class="dark-bg horizontal-menu-wrapper">
+                {sequencer.inputs(ctx.event_emitter().clone())}
+            </div>
+        };
+        ("Choose audio input".into(), body)
     }
 
     pub fn handle_event(
@@ -1167,8 +1178,9 @@ impl Sound {
                     ctx.emit_event(AppEvent::RedrawEditorPlane);
                 }
 
-                AppEvent::AddInput(input) => {
-                    *src = input.clone();
+                AppEvent::AddInput(to) | AppEvent::SelectAudioInput(to) => {
+                    ctx.register_action(AppAction::SelectAudioInput{from: src.clone(), to: to.clone()});
+                    *src = to.clone();
                     ctx.emit_event(AppEvent::RedrawEditorPlane)
                 }
 

@@ -33,7 +33,7 @@ impl Display for AudioInputKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct AudioInput {
     kind: AudioInputKind,
     inner: Option<AudioBuffer>,

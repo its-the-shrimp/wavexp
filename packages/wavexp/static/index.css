@@ -48,6 +48,7 @@ body {
 	height: 4em;
 	min-height: 1em;
 	user-select: none;
+	z-index: 33;
 }
 #aux-hint {
 	font-size: small;
@@ -151,8 +152,8 @@ body {
 	height: 4em;
 	flex: 1;
 }
-#general-ctrl > .button:nth-child(2):hover {border-color: #E10000}
-#general-ctrl > .button:nth-child(2):hover > svg {
+.red-on-hover:hover {border-color: #E10000}
+.red-on-hover:hover > svg {
 	fill: #E10000;
 	stroke: #E10000;
 }
@@ -317,4 +318,47 @@ body {
 	user-select: none;
 	font-size: larger;
 	alignment-baseline: central;
+}
+#popup-bg {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100vw;
+	height: 100vh;
+	z-index: 32;
+	background-color: rgb(15 15 25 / 0.6);
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	grid-template-rows: repeat(3, 1fr);
+}
+#popup-bg > div {
+	grid-column: 2;
+	grid-row: 2;
+	min-width: 20%;
+	min-height: 20%;
+}
+#popup-bg > div > div {
+	width: 100%;
+	height: 100%;
+}
+#popup-bg > p {
+	grid-column: 2;
+	grid-row: 1;
+	align-self: end;
+}
+#popup-bg > button {
+	grid-column: 3;
+	grid-row: 1;
+	align-self: end;
+	width: 3em;
+	height: 3em;
+	background-color: transparent;
+}
+#popup-bg > button > svg:not(:hover) {
+	fill: transparent;
+}
+.horizontal-menu-wrapper > .horizontal-menu {
+	width: 80%;
+	height: 80%;
+	margin: auto;
 }
