@@ -128,7 +128,7 @@ impl SoundVisualiser {
                 self.out_data.resize(w as usize * w as usize, Self::BG);
             }
 
-            AppEvent::Frame(..) => if sequencer.playing_since().is_finite() {
+            AppEvent::Frame(..) => if sequencer.playback_ctx().playing() {
                 self.out_data.rotate_right(1);
                 sequencer.analyser().get_byte_frequency_data(&mut self.in_data);
                 for (&src, dst) in self.in_data.iter().zip(self.out_data.every_nth_mut(self.width as usize)) {
@@ -950,7 +950,7 @@ impl<T: GraphPoint> GraphEditor<T> {
             AppEvent::Resize =>
                 self.init()?,
 
-            AppEvent::StartPlay =>
+            AppEvent::StartPlay(_) =>
                 self.redraw = true,
 
             AppEvent::Undo(actions) => for action in actions.iter() {

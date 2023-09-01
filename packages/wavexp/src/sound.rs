@@ -5,14 +5,14 @@ use std::{
     borrow::Cow,
     iter::once,
     mem::{replace, variant_count, transmute},
-    num::NonZeroUsize};
+    num::NonZeroUsize, rc::Rc};
 use js_sys::Math::random;
 use wasm_bindgen::JsCast;
 use web_sys::{
     Path2d,
     AudioBuffer,
     AudioNode,
-    AudioBufferOptions};
+    AudioBufferOptions, PointerEvent, Event};
 use yew::{
     html,
     Html,
@@ -40,8 +40,8 @@ use crate::{
     input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas, Counter},
     visual::{GraphEditor, GraphPoint},
     global::{AppContext, AppEvent, AppAction},
-    sequencer::Sequencer,
-    sound_internals::{TimeStretcherNode, AudioInput}};
+    sequencer::{Sequencer, PlaybackContext},
+    sound_internals::{TimeStretcherNode, AudioInput, AudioInputKind}};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -479,13 +479,14 @@ impl GraphPoint for NoteBlock {
         }
 
         let total_len = editor.last().map_or_default(|x| x.offset + x.len);
-        let progress = (ctx.frame() - sequencer.playing_since())
-            .secs_to_beats(sequencer.bps()) - sb_offset;
-        Ok(if progress < total_len * n_reps {
-            editor.force_redraw();
-            let x = R64::new_or(progress, *progress % *total_len) * step[0] - offset[0];
-            solid.move_to(*x, 0.0);
-            solid.line_to(*x, *canvas_size[1]);
+        Ok(if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
+            let progress = (ctx.frame() - start).secs_to_beats(sequencer.bps()) - sb_offset;
+            if progress < total_len * n_reps {
+                editor.force_redraw();
+                let x = R64::new_or(progress, *progress % *total_len) * step[0] - offset[0];
+                solid.move_to(*x, 0.0);
+                solid.line_to(*x, *canvas_size[1]);
+            }
         })
     }
 }
@@ -728,13 +729,14 @@ impl GraphPoint for CustomBlock {
         }
 
         let total_len = editor.last().map_or_default(|x| x.offset + len);
-        let progress = (ctx.frame() - sequencer.playing_since())
-            .secs_to_beats(sequencer.bps()) - sb_offset;
-        Ok(if progress < total_len * n_reps {
-            editor.force_redraw();
-            let x = R64::new_or(progress, *progress % *total_len) * step[0] - offset[0];
-            solid.move_to(*x, 0.0);
-            solid.line_to(*x, *canvas_size[1]);
+        Ok(if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
+            let progress = (ctx.frame() - start).secs_to_beats(sequencer.bps()) - sb_offset;
+            if progress < total_len * n_reps {
+                editor.force_redraw();
+                let x = R64::new_or(progress, *progress % *total_len) * step[0] - offset[0];
+                solid.move_to(*x, 0.0);
+                solid.line_to(*x, *canvas_size[1]);
+            }
         })
     }
 }
@@ -1023,8 +1025,45 @@ impl Sound {
                     initial={*speed}/>
                     <Button name="Audio input" help="Click to change" class="wide"
                     setter={setter.reform(|_| AppEvent::TogglePopup)}>
-                        if let Some(src) = src.get().report() {
-                            {src.add_ctx(sequencer).to_string()}
+                        if let Some(input) = src.get().report() {
+                            <div class="inner-button-panel">
+                                if input.playing() {
+                                    <Button name="Stop playing" help="Click to stop the playback"
+                                    setter={{
+                                        let s = Rc::clone(src);
+                                        setter.reform(move |e: PointerEvent| {
+                                            e.stop_propagation();
+                                            AppEvent::StopPlay(Some(s.clone()))
+                                        })
+                                    }}>
+                                        <svg viewBox="0 0 100 100">
+                                            <polygon points="25,25 75,25 75,75 25,75"/>
+                                        </svg>
+                                    </Button>
+                                } else if let AudioInputKind::Empty = input.kind() {
+                                    <Button class="unavailable" name="Play audio input (not chosen)"
+                                    help="Choose the audio input for the sound block to play it here"
+                                    setter={|e: PointerEvent| e.stop_propagation()}>
+                                        <svg viewBox="0 0 100 100">
+                                            <polygon points="25,25 75,50 25,75"/>
+                                        </svg>
+                                    </Button>
+                                } else {
+                                    <Button name="Play audio input" help="Click to hear how the input sounds"
+                                    setter={{
+                                        let s = Rc::clone(src);
+                                        setter.reform(move |e: PointerEvent| {
+                                            e.stop_propagation();
+                                            AppEvent::PreparePlay(Some(s.clone()))
+                                        })
+                                    }}>
+                                        <svg viewBox="0 0 100 100">
+                                            <polygon points="25,25 75,50 25,75"/>
+                                        </svg>
+                                    </Button>
+                                }
+                                <p>{input.add_ctx(sequencer).to_string()}</p>
+                            </div>
                         } else {
                             <p style="color:red">{"Failed to access audio input"}</p>
                         }
@@ -1178,8 +1217,8 @@ impl Sound {
                     ctx.emit_event(AppEvent::RedrawEditorPlane);
                 }
 
-                AppEvent::AddInput(to) | AppEvent::SelectAudioInput(to) => {
-                    ctx.register_action(AppAction::SelectAudioInput{from: src.clone(), to: to.clone()});
+                AppEvent::AddInput(to) | AppEvent::SelectInput(to) => {
+                    ctx.register_action(AppAction::SelectInput{from: src.clone(), to: to.clone()});
                     *src = to.clone();
                     ctx.emit_event(AppEvent::RedrawEditorPlane)
                 }
@@ -1213,6 +1252,10 @@ impl Sound {
                                     *speed = from;
                                     ctx.emit_event(AppEvent::RedrawEditorPlane)
                                 }
+                                AppAction::SelectInput{ref from, ..} => {
+                                    *src = from.clone();
+                                    ctx.emit_event(AppEvent::RedrawEditorPlane)
+                                }
                                 _ => (),
                             }
                         }
@@ -1230,6 +1273,10 @@ impl Sound {
                                 }
                                 AppAction::SetSpeed{to, ..} => {
                                     *speed = to;
+                                    ctx.emit_event(AppEvent::RedrawEditorPlane)
+                                }
+                                AppAction::SelectInput{ref to, ..} => {
+                                    *src = to.clone();
                                     ctx.emit_event(AppEvent::RedrawEditorPlane)
                                 }
                                 _ => (),

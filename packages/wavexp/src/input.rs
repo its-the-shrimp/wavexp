@@ -31,7 +31,7 @@ use wavexp_utils::{
     AppResult,
     AppResultUtils,
     Pipe,
-    r64, SharedExt};
+    r64, SharedExt, js_log};
 use crate::{
     visual::{GraphPoint, GraphEditor},
     global::AppEvent};
@@ -290,7 +290,7 @@ pub struct ButtonProps {
     pub name: AttrValue,
     pub children: Children,
     #[prop_or_default]
-    pub setter: Callback<()>,
+    pub setter: Callback<PointerEvent>,
     #[prop_or(false)]
     pub svg: bool,
     #[prop_or_default]
@@ -315,7 +315,7 @@ impl Component for Button {
             html!{
                 <g {class}
                 data-main-hint={name} data-aux-hint={help}
-                onpointerup={setter.reform(|_| ())}>
+                onpointerup={setter}>
                     {children.clone()}
                 </g>
             }
@@ -323,7 +323,7 @@ impl Component for Button {
             html!{
                 <button {class}
                 data-main-hint={name} data-aux-hint={help}
-                onpointerup={setter.reform(|_| ())}>
+                onpointerup={setter}>
                     {children.clone()}
                 </button>
             }

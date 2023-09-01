@@ -102,11 +102,10 @@ body {
 	height: 100%;
 	transition: fill.1s;
 }
-.button:hover > svg {
+.button:not(.unavailable):not(.red-on-hover):hover > svg {
 	fill: #0069E1;
 }
 .button > div {
-	margin-top: 12.5%;
 	user-select: none;
 }
 .piano-note {
@@ -361,4 +360,19 @@ body {
 	width: 80%;
 	height: 80%;
 	margin: auto;
+}
+.inner-button-panel {
+	display: flex;
+	align-items: center;
+	justify-content: space-evenly;
+	width: 80%;
+	height: 80%;
+	margin: auto;
+}
+.inner-button-panel > * {
+	height: 80%;
+	align-self: center;
+}
+.unavailable {
+	border-style: dashed;
 }

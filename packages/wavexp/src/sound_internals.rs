@@ -37,7 +37,8 @@ impl Display for AudioInputKind {
 pub struct AudioInput {
     kind: AudioInputKind,
     inner: Option<AudioBuffer>,
-    duration: Secs
+    duration: Secs,
+    playing: bool
 }
 
 impl AudioInput {
@@ -47,12 +48,14 @@ impl AudioInput {
         let inner: AudioBuffer = JsFuture::from(ctx.decode_audio_data(&raw)?).await?.dyn_into()?;
         let kind = AudioInputKind::File(file.name().into());
         let duration = R64::try_from(inner.duration())?;
-        Ok(Self{kind, inner: Some(inner), duration})
+        Ok(Self{kind, inner: Some(inner), duration, playing: false})
     }
 
     pub fn kind(&self) -> &AudioInputKind {&self.kind}
     pub fn duration(&self) -> Secs {self.duration}
     pub fn inner(&self) -> Option<&AudioBuffer> {self.inner.as_ref()}
+    pub fn playing(&self) -> bool {self.playing}
+    pub fn set_playing(&mut self, new: bool) {self.playing = new}
 
     pub fn add_ctx<'this, 'ctx>(&'this self, ctx: &'ctx Sequencer) -> AudioInputWithCtx<'this, 'ctx> {
         AudioInputWithCtx{this: self, ctx}

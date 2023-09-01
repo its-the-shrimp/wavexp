@@ -18,7 +18,6 @@ use wavexp_utils::{
     ArrayFrom,
     document,
     OptionExt,
-    Check,
     R32,
     AppResultUtils,
     ToAttrValue,
@@ -259,7 +258,7 @@ impl GraphPoint for SoundBlock {
             }
         }
 
-        Ok(if let Ok(start) = sequencer.playing_since().check(R64::is_finite) {
+        Ok(if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
             editor.force_redraw();
             let x = (ctx.frame() - start).secs_to_beats(bps) * step[0] - offset[0];
             solid.move_to(*x, 0.0);
@@ -304,6 +303,18 @@ impl SoundBlock {
 
 }
 
+#[derive(Debug, Clone)]
+pub enum PlaybackContext {
+    None,
+    One(Shared<AudioInput>, Secs),
+    All(Secs)
+}
+
+impl PlaybackContext {
+    pub fn playing(&self)     -> bool {!matches!(self, Self::None)}
+    pub fn all_playing(&self) -> bool { matches!(self, Self::All(..))}
+}
+
 pub struct Sequencer {
     pattern: Shared<GraphEditor<SoundBlock>>,
     inputs: Vec<Shared<AudioInput>>,
@@ -312,7 +323,7 @@ pub struct Sequencer {
     gain: GainNode,
     ctx_created_at: Secs,
     bps: Beats,
-    playing_since: Secs
+    playback_ctx: PlaybackContext
 }
 
 impl Sequencer {
@@ -334,15 +345,14 @@ impl Sequencer {
             audio_ctx: audio_ctx.into(),
             ctx_created_at: now().to_app_result()? / 1000,
             bps: r64![2],
-            playing_since: Secs::NEG_INFINITY})
+            playback_ctx: PlaybackContext::None})
     }
 
-    /// returns `R64::NEG_INFINITY` if no sound's playing at the moment
-    pub fn playing_since(&self) -> Secs {self.playing_since}
     pub fn bps(&self) -> Beats {self.bps}
     pub fn pattern(&self) -> &Shared<GraphEditor<SoundBlock>> {&self.pattern}
     pub fn audio_ctx(&self) -> &BaseAudioContext {&self.audio_ctx}
     pub fn analyser(&self) -> &AnalyserNode {&self.analyser}
+    pub fn playback_ctx(&self) -> &PlaybackContext {&self.playback_ctx}
 
     pub fn volume(&self) -> R32 {
         unsafe{R32::new_unchecked(self.gain.gain().value())}
@@ -356,7 +366,7 @@ impl Sequencer {
                         Some(name) =>
                             html!{
                                 <Button name={&name}
-                                setter={emitter.reform(move |_| AppEvent::SelectAudioInput(i.clone()))}>
+                                setter={emitter.reform(move |_| AppEvent::SelectInput(i.clone()))}>
                                     {name}
                                 </Button>
                             },
@@ -413,40 +423,65 @@ impl Sequencer {
 
     pub fn handle_event(self: &mut AwareRefMut<'_, Self>, event: &AppEvent, ctx: &mut AppContext) -> AppResult<()> {
         Ok(match event {
-            AppEvent::PreparePlay => if self.audio_ctx.is_instance_of::<AudioContext>() {
-                ctx.emit_event(AppEvent::StartPlay)
-            } else {
+            AppEvent::PreparePlay(input) => {
+                if self.audio_ctx.is_instance_of::<AudioContext>() {
+                        ctx.emit_event(AppEvent::StartPlay(input.clone()))
+                } else {
+                    self.audio_ctx = AudioContext::new()?.into();
+                    self.analyser = self.audio_ctx.create_analyser()?;
+                    self.analyser.connect_with_audio_node(&self.audio_ctx.destination())?;
+                    self.ctx_created_at = now().to_app_result()?;
+
+                    let worklet = self.audio_ctx.audio_worklet()?;
+                    let emitter = ctx.event_emitter().clone();
+                    let input = input.clone();
+                    spawn_local(async move {
+                        let res: AppResult<!> = try {
+                            TimeStretcherNode::register(worklet).await?;
+                            return emitter.emit(AppEvent::StartPlay(input))
+                        };
+                        res.report();
+                    });
+                }
                 let volume = self.volume();
-                self.audio_ctx = AudioContext::new()?.into();
-                self.analyser = self.audio_ctx.create_analyser()?;
                 self.gain = self.audio_ctx.create_gain()?;
                 self.gain.gain().set_value(*volume);
-                self.gain.connect_with_audio_node(&self.analyser)?
-                    .connect_with_audio_node(&self.audio_ctx.destination())?;
-                self.ctx_created_at = now().to_app_result()?;
-
-                let worklet = self.audio_ctx.audio_worklet()?;
-                let emitter = ctx.event_emitter().clone();
-                spawn_local(async move {
-                    let res: AppResult<!> = try {
-                        TimeStretcherNode::register(worklet).await?;
-                        return emitter.emit(AppEvent::StartPlay)
-                    };
-                    res.report();
-                });
+                self.gain.connect_with_audio_node(&self.analyser)?;
             }
 
-            AppEvent::StartPlay => {
+            AppEvent::StartPlay(input) => {
                 let now = now().to_app_result()? - self.ctx_created_at;
-                self.playing_since = now + self.ctx_created_at;
-                let mut pattern = self.pattern.get_mut()?;
-                for mut block in pattern.iter_mut() {
-                    let offset = block.offset.to_secs(self.bps);
-                    block.inner().play(&self.gain, now, offset, self.bps)?;
+                if let Some(input) = input {
+                    let player = self.audio_ctx.create_buffer_source()?;
+                    {
+                        let mut input = input.get_aware_mut()?;
+                        player.set_buffer(input.inner());
+                        input.set_playing(true);
+                        player.connect_with_audio_node(&self.gain)?;
+                    }
+                    self.playback_ctx = PlaybackContext::One(input.clone(), now + self.ctx_created_at);
+                    let emitter = ctx.event_emitter().clone();
+                    let input = Rc::clone(input);
+                    player.set_onended(Some(&js_function!{||
+                        emitter.emit(AppEvent::StopPlay(Some(input.clone())))}));
+                    player.start()?;
+                } else {
+                    self.playback_ctx = PlaybackContext::All(now + self.ctx_created_at);
+                    let mut pattern = self.pattern.get_mut()?;
+                    for mut block in pattern.iter_mut() {
+                        let offset = block.offset.to_secs(self.bps);
+                        block.inner().play(&self.gain, now, offset, self.bps)?;
+                    }
                 }
             }
 
-            AppEvent::StopPlay => self.playing_since = R64::NEG_INFINITY,
+            AppEvent::StopPlay(input) => {
+                if let Some(input) = input {
+                    input.get_mut()?.set_playing(false);
+                }
+                self.playback_ctx = PlaybackContext::None;
+                self.gain.disconnect()?;
+            }
 
             AppEvent::StartInputAdd => {
                 let temp = document().create_element("input")?
@@ -472,7 +507,10 @@ impl Sequencer {
                 })
             }
 
-            AppEvent::AddInput(input) => self.inputs.push(input.clone()),
+            AppEvent::AddInput(input) => {
+                ctx.register_action(AppAction::AddInput(input.clone()));
+                self.inputs.push(input.clone());
+            }
 
             &AppEvent::MasterVolume(to) => unsafe {
                 let gain = self.gain.gain();
@@ -486,7 +524,6 @@ impl Sequencer {
                 self.bps = to
             }
 
-
             AppEvent::RedrawEditorPlane => self.pattern.get_mut()?
                 .force_redraw(),
 
@@ -498,6 +535,9 @@ impl Sequencer {
 
                         AppAction::SetMasterVolume{from, ..} =>
                             self.gain.gain().set_value(*from),
+
+                        AppAction::AddInput(_) =>
+                            _ = self.inputs.pop(),
 
                         _ => ()
                     }
@@ -513,6 +553,9 @@ impl Sequencer {
 
                         AppAction::SetMasterVolume{to, ..} =>
                             self.gain.gain().set_value(*to),
+
+                        AppAction::AddInput(ref input) =>
+                            self.inputs.push(input.clone()),
 
                         _ => ()
                     }

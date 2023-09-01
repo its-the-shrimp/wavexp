@@ -38,7 +38,8 @@ use wavexp_utils::{
     AppResultUtils,
     ToAttrValue,
     now,
-    SharedExt, ArrayExt};
+    SharedExt,
+    ArrayExt};
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, Note, NoteBlock, CustomBlock},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
@@ -58,12 +59,12 @@ pub enum AppEvent {
     SetTab(usize),
     /// emitted when the viewport of the app changes its dimensions
     Resize,
-    /// emitted when the user starts playing by clicking the `Play` button
-    PreparePlay,
+    /// emitted when the user starts playing, either an audio input or the whole composition
+    PreparePlay(Option<Shared<AudioInput>>),
     /// emitted when the app is ready to start playing
-    StartPlay,
+    StartPlay(Option<Shared<AudioInput>>),
     /// emitted when the user stops playing by clicking the `Play` button
-    StopPlay,
+    StopPlay(Option<Shared<AudioInput>>),
     /// emitted when the user selects a sound block to edit in the side editor
     /// the contained value is index into the selected indices, not into the points directly
     Select(Option<usize>),
@@ -135,15 +136,15 @@ pub enum AppEvent {
     /// emitted when a pop-up needs to be toggled
     TogglePopup,
     /// emitted when an audio input is selected, e.g. clicked
-    SelectAudioInput(Shared<AudioInput>)
+    SelectInput(Shared<AudioInput>)
 }
 
 impl AppEvent {
     pub fn needs_layout_rerender(&self) -> bool {
         matches!(self, Self::SetTab(..)
             | Self::Select(..)
-            | Self::StartPlay
-            | Self::StopPlay
+            | Self::StartPlay(..)
+            | Self::StopPlay(..)
             | Self::SetBlockType(..)
             | Self::Remove
             | Self::Undo(..)
@@ -218,8 +219,10 @@ pub enum AppAction {
     SetSpeed{from: R32, to: R32},
     /// switch the state of the pop-up winwdow from on to off and vice versa
     TogglePopup,
+    /// register a new audio input
+    AddInput(Shared<AudioInput>),
     /// change the selected audio input of the sound block.
-    SelectAudioInput{from: Shared<AudioInput>, to: Shared<AudioInput>}
+    SelectInput{from: Shared<AudioInput>, to: Shared<AudioInput>}
 }
 
 impl AppAction {
@@ -285,8 +288,10 @@ impl AppAction {
                 Some("Set Custom Audio's Playback Speed"),
             Self::TogglePopup =>
                 None,
-            Self::SelectAudioInput{..} =>
-                Some("Select Audio Input")
+            Self::SelectInput{..} =>
+                Some("Select Audio Input"),
+            Self::AddInput(..) =>
+                Some("Add Audio Input")
         }
     }
 
@@ -709,9 +714,9 @@ impl Component for App {
                         _ => 0
                     }}/>
                 </div>
-                if sequencer.playing_since().is_finite() {
+                if sequencer.playback_ctx().all_playing() {
                     <Button name="Stop"
-                    setter={setter.reform(|_| AppEvent::StopPlay)}>
+                    setter={setter.reform(|_| AppEvent::StopPlay(None))}>
                         <svg viewBox="3 0 100 103" height="100%">
                             <polygon points="25,25 35,25 35,75 25,75"/>
                             <polygon points="65,25 75,25 75,75 65,75"/>
@@ -719,7 +724,7 @@ impl Component for App {
                     </Button>
                 } else {
                     <Button name="Play"
-                    setter={setter.reform(|_| AppEvent::PreparePlay)}>
+                    setter={setter.reform(|_| AppEvent::PreparePlay(None))}>
                         <svg viewBox="3 0 100 103" height="100%">
                             <polygon points="25,25 75,50 25,75"/>
                         </svg>
