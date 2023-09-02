@@ -421,11 +421,29 @@ impl Sequencer {
         }
     }
 
-    pub fn handle_event(self: &mut AwareRefMut<'_, Self>, event: &AppEvent, ctx: &mut AppContext) -> AppResult<()> {
+    fn stop_playback(&mut self, input: Option<Shared<AudioInput>>) -> AppResult<()> {
+        if let Some(input) = input {
+            let mut input = input.get_mut()?;
+            if !input.playing() {return Ok(())}
+            input.set_playing(false);
+        }
+        self.playback_ctx = PlaybackContext::None;
+        Ok(self.gain.disconnect()?)
+    }
+
+    pub fn handle_event(self: &mut AwareRefMut<'_, Self>, event: &AppEvent, ctx: &mut AppContext)
+    -> AppResult<()> {
         Ok(match event {
             AppEvent::PreparePlay(input) => {
                 if self.audio_ctx.is_instance_of::<AudioContext>() {
-                        ctx.emit_event(AppEvent::StartPlay(input.clone()))
+                    match &self.playback_ctx {
+                        PlaybackContext::None => (),
+                        PlaybackContext::One(input, _) =>
+                            Some(input.clone()).pipe(|x| self.stop_playback(x))?,
+                        PlaybackContext::All(_) =>
+                            self.stop_playback(None)?
+                    };
+                    ctx.emit_event(AppEvent::StartPlay(input.clone()))
                 } else {
                     self.audio_ctx = AudioContext::new()?.into();
                     self.analyser = self.audio_ctx.create_analyser()?;
@@ -475,13 +493,7 @@ impl Sequencer {
                 }
             }
 
-            AppEvent::StopPlay(input) => {
-                if let Some(input) = input {
-                    input.get_mut()?.set_playing(false);
-                }
-                self.playback_ctx = PlaybackContext::None;
-                self.gain.disconnect()?;
-            }
+            AppEvent::StopPlay(input) => self.stop_playback(input.clone())?,
 
             AppEvent::StartInputAdd => {
                 let temp = document().create_element("input")?

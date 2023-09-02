@@ -5,14 +5,16 @@ use std::{
     borrow::Cow,
     iter::once,
     mem::{replace, variant_count, transmute},
-    num::NonZeroUsize, rc::Rc};
+    num::NonZeroUsize,
+    rc::Rc};
 use js_sys::Math::random;
 use wasm_bindgen::JsCast;
 use web_sys::{
     Path2d,
     AudioBuffer,
     AudioNode,
-    AudioBufferOptions, PointerEvent, Event};
+    AudioBufferOptions,
+    PointerEvent};
 use yew::{
     html,
     Html,

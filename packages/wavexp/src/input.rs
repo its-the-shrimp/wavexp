@@ -31,7 +31,8 @@ use wavexp_utils::{
     AppResult,
     AppResultUtils,
     Pipe,
-    r64, SharedExt, js_log};
+    r64,
+    SharedExt};
 use crate::{
     visual::{GraphPoint, GraphEditor},
     global::AppEvent};
