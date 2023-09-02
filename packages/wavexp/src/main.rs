@@ -15,6 +15,7 @@
 #![allow(clippy::option_map_unit_fn)]
 #![allow(clippy::comparison_chain)]
 
+mod img;
 mod visual;
 mod input;
 mod sound;

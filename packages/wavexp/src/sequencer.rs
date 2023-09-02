@@ -44,7 +44,7 @@ use crate::{
     visual::{GraphPoint, GraphEditor},
     global::{AppContext, AppAction, AppEvent},
     input::{Cursor, Buttons, Slider, Tab, Button},
-    sound_internals::{TimeStretcherNode, AudioInput}};
+    sound_internals::{TimeStretcherNode, AudioInput}, img};
 
 #[derive(Debug, Clone)]
 pub struct SoundBlock {
@@ -375,12 +375,7 @@ impl Sequencer {
                     }
                 })}
                 <Button name="Add audio input" setter={emitter.reform(|_| AppEvent::StartInputAdd)}>
-                    <svg viewBox="0 0 100 100">
-                        <polygon points="
-                            40,10 60,10 60,40 90,40 90,60 60,60
-                            60,90 40,90 40,60 10,60 10,40 40,40
-                        "/>
-                    </svg>
+                    <img::Plus/>
                 </Button>
             </div>
         }
@@ -502,6 +497,11 @@ impl Sequencer {
                 let emitter = ctx.event_emitter().clone();
                 temp.set_onchange(Some(&js_function!(|e| emitter.emit(AppEvent::AudioUploaded(e)))));
                 temp.click();
+            }
+
+            AppEvent::SetInputName(input, e) => {
+                let target: HtmlInputElement = e.target_dyn_into().to_app_result()?;
+                input.get_mut()?.set_name(target.value().into());
             }
 
             AppEvent::AudioUploaded(e) => {

@@ -39,12 +39,13 @@ use wavexp_utils::{
     ToAttrValue,
     now,
     SharedExt,
-    ArrayExt};
+    ArrayExt, js_function};
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, Note, NoteBlock, CustomBlock},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
     input::{Button, Switch, GraphEditorCanvas},
-    sequencer::{SoundBlock, Sequencer}, sound_internals::AudioInput};
+    sequencer::{SoundBlock, Sequencer},
+    sound_internals::AudioInput, img};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, PartialEq, Clone)]
@@ -133,10 +134,14 @@ pub enum AppEvent {
     Speed(R32),
     /// emitted when the user clicks a button to add an audio input
     StartInputAdd,
-    /// emitted when a pop-up needs to be toggled
-    TogglePopup,
+    /// emitted when a pop-up window needs to be opened.
+    OpenPopup(Popup),
+    /// emitted when the current pop-up window needs to be closed
+    ClosePopup,
     /// emitted when an audio input is selected, e.g. clicked
-    SelectInput(Shared<AudioInput>)
+    SelectInput(Shared<AudioInput>),
+    /// emitted when an audio input is assigned a new name
+    SetInputName(Shared<AudioInput>, Event)
 }
 
 impl AppEvent {
@@ -150,7 +155,8 @@ impl AppEvent {
             | Self::Undo(..)
             | Self::Redo(..)
             | Self::AddInput(..)
-            | Self::TogglePopup)
+            | Self::OpenPopup(..)
+            | Self::ClosePopup)
     }
 }
 
@@ -217,10 +223,10 @@ pub enum AppAction {
     RemoveCustomBlocks(Box<[(usize, CustomBlock)]>),
     /// set playback speed of the audio source of a Custom Audio sound block
     SetSpeed{from: R32, to: R32},
-    /// switch the state of the pop-up winwdow from on to off and vice versa
-    TogglePopup,
     /// register a new audio input
     AddInput(Shared<AudioInput>),
+    /// Open/close a pop-up window.
+    SetPopup{from: Popup, to: Popup},
     /// change the selected audio input of the sound block.
     SelectInput{from: Shared<AudioInput>, to: Shared<AudioInput>}
 }
@@ -286,12 +292,12 @@ impl AppAction {
                 Some("Add Custom Audio Block"),
             Self::SetSpeed{..} =>
                 Some("Set Custom Audio's Playback Speed"),
-            Self::TogglePopup =>
+            Self::AddInput(..) =>
+                Some("Add Audio Input"),
+            Self::SetPopup{..} =>
                 None,
             Self::SelectInput{..} =>
-                Some("Select Audio Input"),
-            Self::AddInput(..) =>
-                Some("Add Audio Input")
+                Some("Select Audio Input")
         }
     }
 
@@ -299,8 +305,10 @@ impl AppAction {
     /// only `self` optionally modified, or none.
     pub fn merge(self, other: Self) -> Option<(Self, Option<Self>)> {
         match (self, other) {
-            (Self::TogglePopup, Self::TogglePopup) =>
+            (Self::SetPopup{from, ..}, Self::SetPopup{to, ..}) if from == to =>
                 None,
+            (Self::SetPopup{from, ..}, Self::SetPopup{to, ..}) =>
+                Some((Self::SetPopup{from, to}, None)),
             (Self::SwitchTab{from, ..}, Self::SwitchTab{to, ..}) if from == to =>
                 None,
             (Self::SwitchTab{from, ..}, Self::SwitchTab{to, ..}) =>
@@ -325,6 +333,64 @@ impl AppAction {
                     offset_delta: off_1 + off_2,
                     scale_delta: s_1.zip(s_2, |d1, d2| d1 * d2)}, None)),
             (a, b) => Some((a, Some(b)))
+        }
+    }
+}
+
+/// Handles rendering of a pop-up window in the center of the screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Popup {
+    /// No pop-up,
+    None,
+    /// Choose the audio input for the selected sound block.
+    ChooseInput,
+    /// Edit the contined audio input.
+    EditInput(Shared<AudioInput>)
+}
+
+impl Popup {
+    pub fn render(&self, ctx: &AppContext, sequencer: &Sequencer) -> Html {
+        let emitter = ctx.event_emitter();
+        match self {
+            Self::None => default(),
+
+            Self::ChooseInput => html!{
+                <div id="popup-bg">
+                    <p>{"Choose audio input"}</p>
+                    <Button name="Close the pop-up" class="red-on-hover"
+                    setter={emitter.reform(|_| AppEvent::ClosePopup)}>
+                        <img::Cross/>
+                    </Button>
+                    <div class="blue-border" data-main-hint={"Choose audio input"}>
+                        <div class="dark-bg horizontal-menu-wrapper">
+                            {sequencer.inputs(emitter.clone())}
+                        </div>
+                    </div>
+                </div>
+            },
+
+            Self::EditInput(input_outer) => html!{
+                <div id="popup-bg">
+                    <p>{"Edit audio input"}</p>
+                    <Button name="Close the pop-up" class="red-on-hover"
+                    setter={emitter.reform(|_| AppEvent::ClosePopup)}>
+                        <img::Cross/>
+                    </Button>
+                    <div class="dark-bg blue-border" data-main-hint={"Edit audio input"}>
+                        <div style="width: 80%; height: 80%; margin: auto; margin-top: 1em">
+                            if let Some(input) = input_outer.get().report() {
+                                <input type="text" value={input.name().clone()}
+                                minlength=1
+                                class="dark-bg blue-border" data-main-hint="Audio input name"
+                                onchange={{
+                                    let i = Rc::clone(input_outer);
+                                    emitter.reform(move |e| AppEvent::SetInputName(i.clone(), e))
+                                }}/>
+                            }
+                        </div>
+                    </div>
+                </div>
+            }
         }
     }
 }
@@ -378,7 +444,7 @@ pub struct App {
     hint_handler: HintHandler,
     frame_emitter: Function,
     selected_block: Option<usize>,
-    popup_open: bool
+    popup: Popup
 }
 
 impl Component for App {
@@ -391,12 +457,11 @@ impl Component for App {
         let sound_visualiser = SoundVisualiser::new();
 
         let res = Self{
-            popup_open: false,
+            popup: Popup::None,
             selected_block: None,
             hint_handler: default(),
             sequencer: Rc::new(RefCell::new(Sequencer::new().unwrap())),
-            frame_emitter: Closure::<dyn Fn(_)>::new(move |x| cb.emit(R64::new_or(r64![0], x)))
-                .into_js_value().unchecked_into(),
+            frame_emitter: js_function!(|x| cb.emit(R64::new_or(r64![0], x))),
             sound_visualiser, ctx};
         window().request_animation_frame(&res.frame_emitter).unwrap();
         res
@@ -430,10 +495,12 @@ impl Component for App {
                         self.ctx.emit_event(AppEvent::Undo(from_ref(a).to_box()));
                     }
 
-                    "Escape" if self.popup_open => {
+                    "Escape" if !matches!(self.popup, Popup::None) => {
                         e.prevent_default();
-                        self.ctx.register_action(AppAction::TogglePopup);
-                        self.popup_open = false;
+                        self.ctx.register_action(AppAction::SetPopup{
+                            from: self.popup.clone(),
+                            to: Popup::None});
+                        self.popup = Popup::None;
                     }
 
                     _ => ()
@@ -511,9 +578,18 @@ impl Component for App {
                     window.set_onkeyup(Some(&cb))
                 }
 
-                AppEvent::TogglePopup => {
-                    self.ctx.register_action(AppAction::TogglePopup);
-                    self.popup_open = !self.popup_open;
+                AppEvent::OpenPopup(ref to) => {
+                    self.ctx.register_action(AppAction::SetPopup{
+                        from: self.popup.clone(),
+                        to: to.clone()});
+                    self.popup = to.clone();
+                }
+
+                AppEvent::ClosePopup => {
+                    self.ctx.register_action(AppAction::SetPopup{
+                        from: self.popup.clone(),
+                        to: Popup::None});
+                    self.popup = Popup::None;
                 }
 
                 AppEvent::Undo(ref actions) => for action in actions.iter() {
@@ -536,8 +612,8 @@ impl Component for App {
                         AppAction::SetSnapStep{from, ..} =>
                             self.ctx.snap_step = from,
 
-                        AppAction::TogglePopup =>
-                            self.popup_open = !self.popup_open,
+                        AppAction::SetPopup{ref from, ..} =>
+                            self.popup = from.clone(),
 
                         _ => (),
                     }
@@ -563,8 +639,8 @@ impl Component for App {
                         AppAction::SetSnapStep{to, ..} =>
                             self.ctx.snap_step = to,
 
-                        AppAction::TogglePopup =>
-                            self.popup_open = !self.popup_open,
+                        AppAction::SetPopup{ref to, ..} =>
+                            self.popup = to.clone(),
 
                         _ => (),
                     }
@@ -609,45 +685,20 @@ impl Component for App {
                         <div id="general-ctrl" class="dark-bg">
                             <Button name="Back to project-wide settings"
                             setter={setter.reform(|_| AppEvent::Select(None))}>
-                                <svg viewBox="0 0 100 100">
-                                    <polygon points="
-                                        20,60 50,20 80,60 70,60 70,80 30,80 30,60
-                                    "/>
-                                </svg>
+                                <img::House/>
                             </Button>
                             <Button name="Remove sound block" class="red-on-hover"
                             setter={setter.reform(|_| AppEvent::Remove)}>
-                                <svg viewBox="0 0 100 100">
-                                    <polygon points="
-                                        27,35 35,27 50,42 65,27 73,35 58,50
-                                        73,65 65,73 50,58 35,73 27,65 42,50
-                                    "/>
-                                </svg>
+                                <img::Cross/>
                             </Button>
                         </div>
-                        if self.popup_open && let (title, body) = block.sound.popup(&self.ctx, &sequencer) {
-                            <div id="popup-bg">
-                                <p>{&title}</p>
-                                <Button name="Close the pop-up" class="red-on-hover"
-                                setter={setter.reform(|_| AppEvent::TogglePopup)}>
-                                    <svg viewBox="0 0 100 100">
-                                        <polygon points="
-                                            27,35 35,27 50,42 65,27 73,35 58,50
-                                            73,65 65,73 50,58 35,73 27,65 42,50
-                                        "/>
-                                    </svg>
-                                </Button>
-                                <div class="light-bg blue-border" data-main-hint={title}>
-                                    {body}
-                                </div>
-                            </div>
-                        }
                     } else {
                         <div id="tab-list">
                             {sequencer.tabs(&self.ctx)}
                         </div>
                         {sequencer.params(&self.ctx)}
                     }
+                    {self.popup.render(&self.ctx, &sequencer)}
                 </div>
                 <GraphEditorCanvas<SoundBlock>
                 editor={sequencer.pattern()}
@@ -717,17 +768,12 @@ impl Component for App {
                 if sequencer.playback_ctx().all_playing() {
                     <Button name="Stop"
                     setter={setter.reform(|_| AppEvent::StopPlay(None))}>
-                        <svg viewBox="3 0 100 103" height="100%">
-                            <polygon points="25,25 35,25 35,75 25,75"/>
-                            <polygon points="65,25 75,25 75,75 65,75"/>
-                        </svg>
+                        <img::Stop/>
                     </Button>
                 } else {
                     <Button name="Play"
                     setter={setter.reform(|_| AppEvent::PreparePlay(None))}>
-                        <svg viewBox="3 0 100 103" height="100%">
-                            <polygon points="25,25 75,50 25,75"/>
-                        </svg>
+                        <img::Play/>
                     </Button>
                 }
                 <canvas id="sound-visualiser" ref={self.sound_visualiser.canvas()} class="blue-border"
@@ -736,11 +782,7 @@ impl Component for App {
             // add a loading indicator
             <div id="error-sign" hidden={true}
             data-main-hint="Error has occured" data-aux-hint="Check the console for more info">
-                <svg viewBox="0 0 100 100">
-                    <polygon points="10,90 50,10 90,90"/>
-                    <polygon points="48,40 52,40 52,60 48,60"/>
-                    <polygon points="48,70 52,70 52,74 48,74"/>
-                </svg>
+                <img::Warning/>
             </div>
         </>}
     }

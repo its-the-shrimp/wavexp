@@ -527,12 +527,12 @@ macro_rules! js_obj {
 #[macro_export]
 macro_rules! js_function {
     (|| $body:expr) => {
-        $crate::wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || $body)
+        $crate::wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || $body)
             .into_js_value()
             .unchecked_into::<$crate::js_sys::Function>()
     };
     (|$arg:ident $(: $t:ty)?| $body:expr) => {
-        $crate::wasm_bindgen::closure::Closure::<dyn Fn(_)>::new(move |$arg $(: $t)?| $body)
+        $crate::wasm_bindgen::closure::Closure::<dyn FnMut(_)>::new(move |$arg $(: $t)?| $body)
             .into_js_value()
             .unchecked_into::<$crate::js_sys::Function>()
     };

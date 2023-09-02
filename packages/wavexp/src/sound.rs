@@ -18,7 +18,7 @@ use web_sys::{
 use yew::{
     html,
     Html,
-    scheduler::Shared, AttrValue};
+    scheduler::Shared};
 use wavexp_utils::{
     R64,
     R32,
@@ -41,9 +41,10 @@ use wavexp_utils::{
 use crate::{
     input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas, Counter},
     visual::{GraphEditor, GraphPoint},
-    global::{AppContext, AppEvent, AppAction},
+    global::{AppContext, AppEvent, AppAction, Popup},
     sequencer::{Sequencer, PlaybackContext},
-    sound_internals::{TimeStretcherNode, AudioInput, AudioInputKind}};
+    sound_internals::{TimeStretcherNode, AudioInput},
+    img};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -1026,8 +1027,8 @@ impl Sound {
                     name="Playback speed"
                     initial={*speed}/>
                     <Button name="Audio input" help="Click to change" class="wide"
-                    setter={setter.reform(|_| AppEvent::TogglePopup)}>
-                        if let Some(input) = src.get().report() {
+                    setter={setter.reform(|_| AppEvent::OpenPopup(Popup::ChooseInput))}>
+                        if let Some((chosen, input)) = src.get().report().map(|x| (x.inner().is_some(), x)) {
                             <div class="inner-button-panel">
                                 if input.playing() {
                                     <Button name="Stop playing" help="Click to stop the playback"
@@ -1038,19 +1039,9 @@ impl Sound {
                                             AppEvent::StopPlay(Some(s.clone()))
                                         })
                                     }}>
-                                        <svg viewBox="0 0 100 100">
-                                            <polygon points="25,25 75,25 75,75 25,75"/>
-                                        </svg>
+                                        <img::Stop/>
                                     </Button>
-                                } else if let AudioInputKind::Empty = input.kind() {
-                                    <Button class="unavailable" name="Play audio input (not chosen)"
-                                    help="Choose the audio input for the sound block to play it here"
-                                    setter={|e: PointerEvent| e.stop_propagation()}>
-                                        <svg viewBox="0 0 100 100">
-                                            <polygon points="25,25 75,50 25,75"/>
-                                        </svg>
-                                    </Button>
-                                } else {
+                                } else if chosen {
                                     <Button name="Play audio input" help="Click to hear how the input sounds"
                                     setter={{
                                         let s = Rc::clone(src);
@@ -1059,12 +1050,35 @@ impl Sound {
                                             AppEvent::PreparePlay(Some(s.clone()))
                                         })
                                     }}>
-                                        <svg viewBox="0 0 100 100">
-                                            <polygon points="25,25 75,50 25,75"/>
-                                        </svg>
+                                        <img::Play/>
+                                    </Button>
+                                } else {
+                                    <Button class="unavailable" name="Play audio input (not chosen)"
+                                    help="Choose the audio input for the sound block to play it here"
+                                    setter={|e: PointerEvent| e.stop_propagation()}>
+                                        <img::Play/>
                                     </Button>
                                 }
                                 <p>{input.add_ctx(sequencer).to_string()}</p>
+                                if chosen {
+                                    <Button name="Edit audio input" help="Click to edit the audio input"
+                                    setter={{
+                                        let s = Rc::clone(src);
+                                        setter.reform(move |e: PointerEvent| {
+                                            e.stop_propagation();
+                                            AppEvent::OpenPopup(Popup::EditInput(s.clone()))
+                                        })
+                                    }}>
+                                        <img::Settings/>
+                                    </Button>
+                                } else {
+                                    <Button class="unavailable" name="Edit audio input (not chosen)"
+                                    help="Choose the audio input for the sound block to edit it \
+                                          by clicking here"
+                                    setter={|e: PointerEvent| e.stop_propagation()}>
+                                        <img::Settings/>
+                                    </Button>
+                                }
                             </div>
                         } else {
                             <p style="color:red">{"Failed to access audio input"}</p>
@@ -1095,16 +1109,6 @@ impl Sound {
                 tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
             }
         }
-    }
-
-    /// The returned string is the popup title
-    pub fn popup(&self, ctx: &AppContext, sequencer: &Sequencer) -> (AttrValue, Html) {
-        let body = html!{
-            <div class="dark-bg horizontal-menu-wrapper">
-                {sequencer.inputs(ctx.event_emitter().clone())}
-            </div>
-        };
-        ("Choose audio input".into(), body)
     }
 
     pub fn handle_event(

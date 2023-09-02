@@ -4,7 +4,7 @@ use std::{
     fmt::{Display, Formatter, self}};
 use wasm_bindgen::{link_to, JsCast};
 use wasm_bindgen_futures::JsFuture;
-use wavexp_utils::{AppResult, R64, SharedExt};
+use wavexp_utils::{AppResult, R64, SharedExt, r64};
 use web_sys::{
     AudioWorklet,
     BaseAudioContext,
@@ -17,28 +17,18 @@ use crate::{
     sound::{Secs, Beats, FromBeats},
     sequencer::Sequencer};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum AudioInputKind {
-    #[default] Empty,
-    /// the inner string is the name of the file
-    File(Rc<str>)
-}
-
-impl Display for AudioInputKind {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => write!(f, "None"),
-            Self::File(name) => write!(f, "File {name:?}")
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioInput {
-    kind: AudioInputKind,
+    name: Rc<str>,
     inner: Option<AudioBuffer>,
     duration: Secs,
     playing: bool
+}
+
+impl Default for AudioInput {
+    fn default() -> Self {
+        Self{name: "None".into(), inner: None, duration: r64![0], playing: false}
+    }
 }
 
 impl AudioInput {
@@ -46,12 +36,13 @@ impl AudioInput {
         let raw = JsFuture::from(file.array_buffer()).await?.dyn_into()?;
         let ctx = sequencer.get().map(|s| s.audio_ctx().clone())?;
         let inner: AudioBuffer = JsFuture::from(ctx.decode_audio_data(&raw)?).await?.dyn_into()?;
-        let kind = AudioInputKind::File(file.name().into());
+        let name = format!("File {:?}", file.name()).into();
         let duration = R64::try_from(inner.duration())?;
-        Ok(Self{kind, inner: Some(inner), duration, playing: false})
+        Ok(Self{name, inner: Some(inner), duration, playing: false})
     }
 
-    pub fn kind(&self) -> &AudioInputKind {&self.kind}
+    pub fn name(&self) -> &Rc<str> {&self.name}
+    pub fn set_name(&mut self, name: Rc<str>) {self.name = name}
     pub fn duration(&self) -> Secs {self.duration}
     pub fn inner(&self) -> Option<&AudioBuffer> {self.inner.as_ref()}
     pub fn playing(&self) -> bool {self.playing}
@@ -76,8 +67,7 @@ impl<'this, 'ctx> AudioInputWithCtx<'this, 'ctx> {
 
 impl<'this, 'ctx> Display for AudioInputWithCtx<'this, 'ctx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.this.kind.fmt(f)?;
-        write!(f, ", {:.2} beats", self.this.duration)
+        write!(f, "{}, {:.2} beats", self.this.name, self.this.duration)
     }
 }
 
