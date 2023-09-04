@@ -1,73 +1,101 @@
 use std::{
     ops::Deref,
     rc::Rc,
-    fmt::{Display, Formatter, self}};
+    mem::replace};
 use wasm_bindgen::{link_to, JsCast};
 use wasm_bindgen_futures::JsFuture;
-use wavexp_utils::{AppResult, R64, SharedExt, r64};
+use wavexp_utils::{AppResult, R64, SharedExt, default};
 use web_sys::{
     AudioWorklet,
     BaseAudioContext,
     AudioWorkletNode,
     AudioParam,
     AudioBuffer,
-    File};
+    File,
+    AudioBufferOptions};
 use yew::scheduler::Shared;
 use crate::{
     sound::{Secs, Beats, FromBeats},
     sequencer::Sequencer};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AudioInputChanges {
+    /// Make the input play backwards.
+    pub reversed: bool
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioInput {
     name: Rc<str>,
-    inner: Option<AudioBuffer>,
     duration: Secs,
-    playing: bool
-}
-
-impl Default for AudioInput {
-    fn default() -> Self {
-        Self{name: "None".into(), inner: None, duration: r64![0], playing: false}
-    }
+    raw: AudioBuffer,
+    pending_changes: AudioInputChanges,
+    baked_changes: AudioInputChanges,
+    baked: AudioBuffer
 }
 
 impl AudioInput {
     pub async fn new_file(file: File, sequencer: Shared<Sequencer>) -> AppResult<Self> {
         let raw = JsFuture::from(file.array_buffer()).await?.dyn_into()?;
         let ctx = sequencer.get().map(|s| s.audio_ctx().clone())?;
-        let inner: AudioBuffer = JsFuture::from(ctx.decode_audio_data(&raw)?).await?.dyn_into()?;
+        let mut raw: AudioBuffer = JsFuture::from(ctx.decode_audio_data(&raw)?).await?.dyn_into()?;
+        if raw.number_of_channels() < Sequencer::CHANNEL_COUNT {
+            let new_raw = AudioBuffer::new(
+                AudioBufferOptions::new(raw.length(), Sequencer::SAMPLE_RATE as f32)
+                    .number_of_channels(Sequencer::CHANNEL_COUNT))?;
+            let data = raw.get_channel_data(0)?;
+            for i in 0 .. Sequencer::CHANNEL_COUNT as i32 {
+                new_raw.copy_to_channel(&data, i)?;
+            }
+            raw = new_raw;
+        }
         let name = format!("File {:?}", file.name()).into();
-        let duration = R64::try_from(inner.duration())?;
-        Ok(Self{name, inner: Some(inner), duration, playing: false})
+        let duration = R64::try_from(raw.duration())?;
+        Ok(Self{name, baked: raw.clone(), raw, duration, pending_changes: default(), baked_changes: default()})
     }
 
+    /// Name of the input, exists solely for the user's convenience.
     pub fn name(&self) -> &Rc<str> {&self.name}
-    pub fn set_name(&mut self, name: Rc<str>) {self.name = name}
-    pub fn duration(&self) -> Secs {self.duration}
-    pub fn inner(&self) -> Option<&AudioBuffer> {self.inner.as_ref()}
-    pub fn playing(&self) -> bool {self.playing}
-    pub fn set_playing(&mut self, new: bool) {self.playing = new}
+    /// Sets the name of the input, returning the old one.
+    pub fn set_name(&mut self, name: Rc<str>) -> Rc<str> {replace(&mut self.name, name)}
+    // /// Duration of the raw buffer, unchanged since the moment the input was created.
+    // pub fn raw_duration(&self) -> Secs {self.duration}
+    /// Duration of the buffer with all the requested changes baked in.
+    pub fn baked_duration(&self) -> Secs {self.duration}
 
-    pub fn add_ctx<'this, 'ctx>(&'this self, ctx: &'ctx Sequencer) -> AudioInputWithCtx<'this, 'ctx> {
-        AudioInputWithCtx{this: self, ctx}
+    // /// Raw buffer, unchanged since the moment the input was created.
+    // pub fn raw(&self) -> &AudioBuffer {&self.raw}
+
+    /// Get a struct holding all the changes yet to be baked into the input.
+    pub fn changes(&self) -> AudioInputChanges {self.pending_changes}
+    /// Get a mutable reference to a struct holding all the changes yet to be baked into the input.
+    pub fn changes_mut(&mut self) -> &mut AudioInputChanges {&mut self.pending_changes}
+
+    /// Bake all of the changes into a buffer that will be accessible through `.baked()` method.
+    /// If an error occurs, the input will appear unbaked.
+    pub fn bake(&mut self) -> AppResult<()> {
+        if self.pending_changes == self.baked_changes {return Ok(())};
+        self.baked = AudioBuffer::new(
+            AudioBufferOptions::new(self.raw.length(), Sequencer::SAMPLE_RATE as f32)
+                .number_of_channels(Sequencer::CHANNEL_COUNT))?;
+        for i in 0 .. Sequencer::CHANNEL_COUNT {
+            let mut data = self.raw.get_channel_data(i)?;
+            if self.pending_changes.reversed {
+                data.reverse();
+            }
+            self.baked.copy_to_channel(&data, i as i32)?;
+        }
+        Ok(self.baked_changes = self.pending_changes)
     }
-}
 
-#[derive(Clone, Copy)]
-pub struct AudioInputWithCtx<'this, 'ctx> {
-    pub this: &'this AudioInput,
-    pub ctx: &'ctx Sequencer
-}
-
-impl<'this, 'ctx> AudioInputWithCtx<'this, 'ctx> {
-    pub fn duration(&self) -> Beats {
-        self.this.duration.secs_to_beats(self.ctx.bps())
+    /// Buffer with all the requested changes baked in.
+    /// If the there are unbaked changes, `None` is returned.
+    pub fn baked(&self) -> Option<&AudioBuffer> {
+        (self.pending_changes == self.baked_changes).then_some(&self.baked)
     }
-}
 
-impl<'this, 'ctx> Display for AudioInputWithCtx<'this, 'ctx> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}, {:.2} beats", self.this.name, self.this.duration)
+    pub fn desc(&self, bps: Beats) -> String {
+        format!("{}, {:.2} beats", self.name, self.duration.secs_to_beats(bps))
     }
 }
 

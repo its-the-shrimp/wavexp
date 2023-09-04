@@ -13,6 +13,7 @@ body {
 }
 input {
 	color: #0069E1;
+	font-family: consolas;
 	transition: border-width.1s, padding.1s
 }
 input:blank {
@@ -352,10 +353,6 @@ input:focus-visible {
 	min-width: 20%;
 	min-height: 20%;
 }
-#popup-bg > div > div {
-	width: 100%;
-	height: 100%;
-}
 #popup-bg > p {
 	grid-column: 2;
 	grid-row: 1;
@@ -365,8 +362,6 @@ input:focus-visible {
 	grid-column: 3;
 	grid-row: 1;
 	align-self: end;
-	width: 3em;
-	height: 3em;
 	background-color: transparent;
 }
 #popup-bg > button > svg:not(:hover) {
@@ -391,4 +386,25 @@ input:focus-visible {
 }
 .unavailable {
 	border-style: dashed;
+}
+#input-settings-panel {
+	width: 80%;
+	height: 80%;
+	margin: auto;
+	display: flex;
+	align-items: center;
+	flex-direction: column;
+	justify-content: space-around;
+}
+.full {
+	height: 100%;
+	width: 100%;
+}
+.small {
+	width: 3em;
+	height: 3em;
+}
+.extend-inner-button-panel > .inner-button-panel {
+	width: 100%;
+	height: 100%;
 }

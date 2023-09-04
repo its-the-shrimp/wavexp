@@ -18,7 +18,7 @@ use yew::{
     AttrValue,
     Callback,
     Properties,
-    NodeRef, function_component, scheduler::Shared};
+    NodeRef, function_component, scheduler::Shared, classes};
 use wavexp_utils::{
     R64,
     Point,
@@ -35,7 +35,7 @@ use wavexp_utils::{
     SharedExt};
 use crate::{
     visual::{GraphPoint, GraphEditor},
-    global::AppEvent};
+    global::{AppEvent, Popup}, sound_internals::AudioInput, sound::Beats, img};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Buttons {
@@ -290,14 +290,15 @@ pub struct Button;
 pub struct ButtonProps {
     pub name: AttrValue,
     pub children: Children,
+    pub help: Option<AttrValue>,
     #[prop_or_default]
     pub setter: Callback<PointerEvent>,
     #[prop_or(false)]
     pub svg: bool,
+    #[prop_or(false)]
+    pub submit: bool,
     #[prop_or_default]
-    pub class: Classes,
-    #[prop_or_default]
-    pub help: AttrValue
+    pub class: Classes
 }
 
 impl Component for Button {
@@ -309,7 +310,7 @@ impl Component for Button {
     fn update(&mut self, _: &Context<Self>, _: Self::Message) -> bool {false}
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let ButtonProps{name, children, svg, class, setter, help} = ctx.props();
+        let ButtonProps{name, children, svg, class, setter, help, submit} = ctx.props();
         let mut class = class.clone();
         class.push("input button");
         if *svg {
@@ -322,7 +323,7 @@ impl Component for Button {
             }
         } else {
             html!{
-                <button {class}
+                <button {class} type={submit.choose("submit", "button")}
                 data-main-hint={name} data-aux-hint={help}
                 onpointerup={setter}>
                     {children.clone()}
@@ -469,5 +470,92 @@ pub fn Tab(props: &TabProps) -> Html {
         data-main-hint={name} data-aux-hint={desc}>
             <p>{name}</p>
         </div>
+    }
+}
+
+#[derive(PartialEq, Properties)]
+pub struct AudioInputButtonProps {
+    pub bps: Beats,
+    pub name: AttrValue,
+    pub input: Option<Shared<AudioInput>>,
+    pub help: Option<AttrValue>,
+    #[prop_or_default]
+    pub onclick: Callback<PointerEvent>,
+    #[prop_or(false)]
+    pub playing: bool,
+    #[prop_or_default]
+    pub emitter: Callback<AppEvent>,
+    #[prop_or_default]
+    pub class: Classes
+}
+
+#[function_component]
+pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
+    let AudioInputButtonProps{name, bps, input, help, onclick, playing, emitter, class} = props;
+    match input.as_ref().map(|x| x.get_aware().report()) {
+        Some(Some(input)) => html!{
+            <Button {name} {help} class={classes!(class.clone(), "wide")}
+            setter={onclick}>
+                <div class="inner-button-panel">
+                    if *playing {
+                        <Button name="Stop playing" help="Click to stop the playback"
+                        setter={emitter.reform(move |e: PointerEvent| {
+                            e.stop_propagation();
+                            AppEvent::StopPlay
+                        })}>
+                            <img::Stop/>
+                        </Button>
+                    } else {
+                        <Button name="Play audio input" help="Click to hear how the input sounds"
+                        setter={{
+                            let s = input.get_outer();
+                            emitter.reform(move |e: PointerEvent| {
+                                e.stop_propagation();
+                                AppEvent::PreparePlay(Some(s.clone()))
+                            })
+                        }}>
+                            <img::Play/>
+                        </Button>
+                    }
+                    <p>{input.desc(*bps)}</p>
+                    <Button name="Edit audio input" help="Click to edit the audio input"
+                    setter={{
+                        let s = input.get_outer();
+                        emitter.reform(move |e: PointerEvent| {
+                            e.stop_propagation();
+                            AppEvent::OpenPopup(Popup::EditInput(s.clone()))
+                        })
+                    }}>
+                        <img::Settings/>
+                    </Button>
+                </div>
+            </Button>
+        },
+
+        Some(None) => html!{
+            <Button {name} {help} class={classes!(class.clone(), "wide")}>
+                <p style="color:red">{"Failed to access the audio input"}</p>
+            </Button>
+        },
+
+        None => html!{
+            <Button {name} {help} class={classes!(class.clone(), "wide")}
+            setter={onclick}>
+                <div class="inner-button-panel">
+                    <Button class="unavailable" name="Play audio input (not chosen)"
+                    help="Choose the audio input for the sound block to play it here"
+                    setter={|e: PointerEvent| e.stop_propagation()}>
+                        <img::Play/>
+                    </Button>
+                    <p>{"Not chosen"}</p>
+                    <Button class="unavailable" name="Edit audio input (not chosen)"
+                    help="Choose the audio input for the sound block to edit it \
+                          by clicking here"
+                    setter={|e: PointerEvent| e.stop_propagation()}>
+                        <img::Settings/>
+                    </Button>
+                </div>
+            </Button>
+        }
     }
 }

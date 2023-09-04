@@ -4,15 +4,9 @@ use yew::{function_component, Html, html};
 pub fn Settings() -> Html {
     html!{
         <svg viewBox="0 0 100 100">
-            <polygon points="
-                15,20 30,15 30,10 40,15 85,20 40,25 30,30 30,25
-            "/>
-            <polygon points="
-                85,50 70,45 70,40 60,45 15,50 60,55 70,60 70,55
-            "/>
-            <polygon points="
-                15,80 30,85 30,90 40,85 85,80 40,75 30,70 30,75
-            "/>
+            <polygon points="15,20 30,15 30,10 40,15 85,20 40,25 30,30 30,25"/>
+            <polygon points="85,50 70,45 70,40 60,45 15,50 60,55 70,60 70,55"/>
+            <polygon points="15,80 30,85 30,90 40,85 85,80 40,75 30,70 30,75"/>
         </svg>
     }
 }
@@ -74,9 +68,25 @@ pub fn Cross() -> Html {
 pub fn House() -> Html {
     html!{
         <svg viewBox="0 0 100 100">
-            <polygon points="
-                20,60 50,20 80,60 70,60 70,80 30,80 30,60
-            "/>
+            <polygon points="20,60 50,20 80,60 70,60 70,80 30,80 30,60"/>
+        </svg>
+    }
+}
+
+#[function_component]
+pub fn RightArrow() -> Html {
+    html!{
+        <svg viewBox="0 0 100 100">
+            <polygon points="50,15 85,50 50,85 50,70 15,70 15,30 50,30"/>
+        </svg>
+    }
+}
+
+#[function_component]
+pub fn LeftArrow() -> Html {
+    html!{
+        <svg viewBox="0 0 100 100">
+            <polygon points="50,15 15,50 50,85 50,70 85,70 85,30 50,30"/>
         </svg>
     }
 }

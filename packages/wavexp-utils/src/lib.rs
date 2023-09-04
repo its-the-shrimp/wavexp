@@ -17,8 +17,7 @@ use std::{
         NonZeroU8, NonZeroU16, NonZeroU32, NonZeroUsize, NonZeroU64,
         NonZeroI8, NonZeroI16, NonZeroI32, NonZeroIsize, NonZeroI64},
     cell::{BorrowError, BorrowMutError, Ref, RefMut},
-    rc::Rc
-};
+    rc::Rc};
 pub use js_sys;
 pub use wasm_bindgen;
 use wasm_bindgen::{JsValue, JsCast};
@@ -287,6 +286,7 @@ pub trait BoolExt {
     fn then_negate<T: Neg<Output=T>>(self, val: T) -> T;
     fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
     fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T>;
+    fn flip(&mut self);
     fn to_app_result(self) -> AppResult<()>;
 }
 
@@ -313,6 +313,10 @@ impl BoolExt for bool {
 
     fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T> {
         if self {f()} else {None}
+    }
+
+    fn flip(&mut self) {
+        *self = !*self
     }
 
     fn to_app_result(self) -> AppResult<()> {

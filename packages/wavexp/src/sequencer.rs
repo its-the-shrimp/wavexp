@@ -20,11 +20,11 @@ use wavexp_utils::{
     OptionExt,
     R32,
     AppResultUtils,
-    ToAttrValue,
     now,
     js_function,
     SharedExt,
-    AwareRefMut};
+    AwareRefMut,
+    BoolExt};
 use web_sys::{
     Path2d,
     HtmlCanvasElement,
@@ -38,12 +38,13 @@ use yew::{
     Html,
     html,
     AttrValue,
-    TargetCast, scheduler::Shared, Callback};
+    TargetCast,
+    scheduler::Shared};
 use crate::{
     sound::{Sound, Beats, Secs, FromBeats},
     visual::{GraphPoint, GraphEditor},
     global::{AppContext, AppAction, AppEvent},
-    input::{Cursor, Buttons, Slider, Tab, Button},
+    input::{Cursor, Buttons, Slider, Tab, Button, AudioInputButton},
     sound_internals::{TimeStretcherNode, AudioInput}, img};
 
 #[derive(Debug, Clone)]
@@ -313,6 +314,9 @@ pub enum PlaybackContext {
 impl PlaybackContext {
     pub fn playing(&self)     -> bool {!matches!(self, Self::None)}
     pub fn all_playing(&self) -> bool { matches!(self, Self::All(..))}
+    pub fn played_input(&self) -> Option<&Shared<AudioInput>> {
+        if let Self::One(x, _) = self {Some(x)} else {None}
+    }
 }
 
 pub struct Sequencer {
@@ -358,28 +362,7 @@ impl Sequencer {
         unsafe{R32::new_unchecked(self.gain.gain().value())}
     }
 
-    pub fn inputs(&self, emitter: Callback<AppEvent>) -> Html {
-        html!{
-            <div class="horizontal-menu dark-bg">
-                {for self.inputs.iter().cloned().map(|i| {
-                    match i.get().report().map(|x| x.add_ctx(self).to_attr_value()) {
-                        Some(name) =>
-                            html!{
-                                <Button name={&name}
-                                setter={emitter.reform(move |_| AppEvent::SelectInput(i.clone()))}>
-                                    {name}
-                                </Button>
-                            },
-                        None =>
-                            html!{<p style="color:red">{"Failed to access audio input"}</p>}
-                    }
-                })}
-                <Button name="Add audio input" setter={emitter.reform(|_| AppEvent::StartInputAdd)}>
-                    <img::Plus/>
-                </Button>
-            </div>
-        }
-    }
+    pub fn inputs(&self) -> &[Shared<AudioInput>] {&self.inputs}
 
     pub fn tabs(&self, ctx: &AppContext) -> Html {
         let id = ctx.selected_tab();
@@ -409,21 +392,25 @@ impl Sequencer {
                     initial={self.volume()}/>
                 </div>
             },
-            1 /* Inputs */ =>
-                self.inputs(emitter.clone()),
-            tab_id =>
-                html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
-        }
-    }
 
-    fn stop_playback(&mut self, input: Option<Shared<AudioInput>>) -> AppResult<()> {
-        if let Some(input) = input {
-            let mut input = input.get_mut()?;
-            if !input.playing() {return Ok(())}
-            input.set_playing(false);
+            1 /* Inputs */ => html!{
+                <div class="horizontal-menu dark-bg">
+                    {for self.inputs.iter().map(|input| html!{
+                        <AudioInputButton
+                        playing={self.playback_ctx.played_input().is_some_and(|i| i.eq(input))} 
+                        name={input.get().map_or_else(|_| "".into(), |x| x.name().clone())}
+                        {input} {emitter} bps={self.bps} class="extend-inner-button-panel"/>
+                    })}
+                    <Button name="Add audio input" setter={emitter.reform(|_| AppEvent::StartInputAdd)}>
+                        <img::Plus/>
+                    </Button>
+                </div>
+            },
+
+            tab_id => html!{
+                <p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>
+            }
         }
-        self.playback_ctx = PlaybackContext::None;
-        Ok(self.gain.disconnect()?)
     }
 
     pub fn handle_event(self: &mut AwareRefMut<'_, Self>, event: &AppEvent, ctx: &mut AppContext)
@@ -431,13 +418,8 @@ impl Sequencer {
         Ok(match event {
             AppEvent::PreparePlay(input) => {
                 if self.audio_ctx.is_instance_of::<AudioContext>() {
-                    match &self.playback_ctx {
-                        PlaybackContext::None => (),
-                        PlaybackContext::One(input, _) =>
-                            Some(input.clone()).pipe(|x| self.stop_playback(x))?,
-                        PlaybackContext::All(_) =>
-                            self.stop_playback(None)?
-                    };
+                    self.playback_ctx = PlaybackContext::None;
+                    self.gain.disconnect()?;
                     ctx.emit_event(AppEvent::StartPlay(input.clone()))
                 } else {
                     self.audio_ctx = AudioContext::new()?.into();
@@ -456,6 +438,13 @@ impl Sequencer {
                         res.report();
                     });
                 }
+                if let Some(input) = input {
+                    input.get_mut()?.bake()?;
+                } else {
+                    for mut block in self.pattern.get_mut()?.iter_mut() {
+                        block.inner().prepare()?;
+                    }
+                }
                 let volume = self.volume();
                 self.gain = self.audio_ctx.create_gain()?;
                 self.gain.gain().set_value(*volume);
@@ -467,16 +456,13 @@ impl Sequencer {
                 if let Some(input) = input {
                     let player = self.audio_ctx.create_buffer_source()?;
                     {
-                        let mut input = input.get_aware_mut()?;
-                        player.set_buffer(input.inner());
-                        input.set_playing(true);
+                        let input = input.get()?;
+                        player.set_buffer(input.baked().to_app_result()?.into());
                         player.connect_with_audio_node(&self.gain)?;
                     }
                     self.playback_ctx = PlaybackContext::One(input.clone(), now + self.ctx_created_at);
                     let emitter = ctx.event_emitter().clone();
-                    let input = Rc::clone(input);
-                    player.set_onended(Some(&js_function!{||
-                        emitter.emit(AppEvent::StopPlay(Some(input.clone())))}));
+                    player.set_onended(Some(&js_function!{|| emitter.emit(AppEvent::StopPlay)}));
                     player.start()?;
                 } else {
                     self.playback_ctx = PlaybackContext::All(now + self.ctx_created_at);
@@ -488,7 +474,10 @@ impl Sequencer {
                 }
             }
 
-            AppEvent::StopPlay(input) => self.stop_playback(input.clone())?,
+            AppEvent::StopPlay => {
+                self.playback_ctx = PlaybackContext::None;
+                self.gain.disconnect()?;
+            }
 
             AppEvent::StartInputAdd => {
                 let temp = document().create_element("input")?
@@ -499,9 +488,20 @@ impl Sequencer {
                 temp.click();
             }
 
-            AppEvent::SetInputName(input, e) => {
+            AppEvent::SetInputName(e) => {
                 let target: HtmlInputElement = e.target_dyn_into().to_app_result()?;
-                input.get_mut()?.set_name(target.value().into());
+                let to: Rc<str> = target.value().into();
+                if !to.is_empty() {
+                    let from = ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?
+                        .get_mut()?.set_name(to.clone());
+                    ctx.register_action(AppAction::SetInputName{from, to});
+                }
+            }
+
+            AppEvent::ReverseInput => {
+                ctx.register_action(AppAction::ReverseInput);
+                ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?.get_mut()?
+                    .changes_mut().reversed.flip();
             }
 
             AppEvent::AudioUploaded(e) => {
@@ -551,6 +551,14 @@ impl Sequencer {
                         AppAction::AddInput(_) =>
                             _ = self.inputs.pop(),
 
+                        AppAction::SetInputName{ref from, ..} =>
+                            _ = ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?.get_mut()?
+                                .set_name(from.clone()),
+
+                        AppAction::ReverseInput =>
+                            ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?.get_mut()?
+                                .changes_mut().reversed.flip(),
+
                         _ => ()
                     }
                 }
@@ -568,6 +576,14 @@ impl Sequencer {
 
                         AppAction::AddInput(ref input) =>
                             self.inputs.push(input.clone()),
+
+                        AppAction::SetInputName{ref to, ..} =>
+                            _ = ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?
+                                .get_mut()?.set_name(to.clone()),
+
+                        AppAction::ReverseInput =>
+                            ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?
+                                .get_mut()?.changes_mut().reversed.flip(),
 
                         _ => ()
                     }

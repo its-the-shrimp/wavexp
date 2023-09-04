@@ -1020,7 +1020,7 @@ impl<T: GraphPoint> GraphEditor<T> {
             }
 
             AppEvent::Frame(_) if self.redraw => {
-                let canvas: HtmlCanvasElement = self.canvas().cast().to_app_result()?;
+                let canvas: HtmlCanvasElement = self.canvas.cast().to_app_result()?;
                 let size = canvas.size().map(R64::from);
                 let snap_step = [ctx.snap_step(), T::Y_SNAP];
                 let canvas_ctx = canvas.get_2d_context()?;

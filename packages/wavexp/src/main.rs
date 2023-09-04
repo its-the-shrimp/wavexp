@@ -11,6 +11,7 @@
 #![feature(let_chains)]
 #![feature(if_let_guard)]
 #![feature(try_find)]
+
 #![allow(clippy::unit_arg)]
 #![allow(clippy::option_map_unit_fn)]
 #![allow(clippy::comparison_chain)]

@@ -5,16 +5,14 @@ use std::{
     borrow::Cow,
     iter::once,
     mem::{replace, variant_count, transmute},
-    num::NonZeroUsize,
-    rc::Rc};
+    num::NonZeroUsize};
 use js_sys::Math::random;
 use wasm_bindgen::JsCast;
 use web_sys::{
     Path2d,
     AudioBuffer,
     AudioNode,
-    AudioBufferOptions,
-    PointerEvent};
+    AudioBufferOptions};
 use yew::{
     html,
     Html,
@@ -36,15 +34,13 @@ use wavexp_utils::{
     js_function,
     AppError,
     SharedExt,
-    AwareRefMut,
-    ResultExt};
+    AwareRefMut};
 use crate::{
-    input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas, Counter},
+    input::{Slider, Button, Buttons, Cursor, GraphEditorCanvas, Counter, AudioInputButton},
     visual::{GraphEditor, GraphPoint},
     global::{AppContext, AppEvent, AppAction, Popup},
     sequencer::{Sequencer, PlaybackContext},
-    sound_internals::{TimeStretcherNode, AudioInput},
-    img};
+    sound_internals::{TimeStretcherNode, AudioInput}};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -723,7 +719,8 @@ impl GraphPoint for CustomBlock {
         _:                        &Path2d,
         (sb_offset, n_reps, len): Self::VisualContext
     ) -> AppResult<()> {
-        let len = len.secs_to_beats(sequencer.bps());
+        let bps = sequencer.bps();
+        let len = len.secs_to_beats(bps);
         let step = &canvas_size.div(&editor.scale());
         let offset = &R64::array_from(editor.offset());
         for block in editor.iter() {
@@ -733,7 +730,7 @@ impl GraphPoint for CustomBlock {
 
         let total_len = editor.last().map_or_default(|x| x.offset + len);
         Ok(if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
-            let progress = (ctx.frame() - start).secs_to_beats(sequencer.bps()) - sb_offset;
+            let progress = (ctx.frame() - start).secs_to_beats(bps) - sb_offset;
             if progress < total_len * n_reps {
                 editor.force_redraw();
                 let x = R64::new_or(progress, *progress % *total_len) * step[0] - offset[0];
@@ -753,7 +750,7 @@ pub enum Sound {
     Noise{pattern: Shared<GraphEditor<NoteBlock>>, src: AudioBuffer,
         volume: R32, attack: Beats, decay: Beats, sustain: R32, release: Beats,
         rep_count: NonZeroUsize},
-    Custom{pattern: Shared<GraphEditor<CustomBlock>>, src: Shared<AudioInput>,
+    Custom{pattern: Shared<GraphEditor<CustomBlock>>, src: Option<Shared<AudioInput>>,
         volume: R32, attack: Beats, decay: Beats, sustain: R32, release: Beats,
         rep_count: NonZeroUsize, speed: R32}
 }
@@ -788,7 +785,7 @@ impl Sound {
 
             SoundType::Custom => 
                 Self::Custom{pattern: default(),
-                    src: default(),
+                    src: None,
                     volume: r32![1], attack: r64![0], decay: r64![0], sustain: r32![1], release: r64![0],
                     rep_count: NonZeroUsize::MIN, speed: r32![1]}
         })
@@ -801,6 +798,12 @@ impl Sound {
             Self::Noise{..} => "White Noise",
             Self::Custom{..} => "Custom"
         }
+    }
+
+    pub fn prepare(&mut self) -> AppResult<()> {
+        Ok(if let Sound::Custom{src, ..} = self && let Some(src) = src {
+            src.get_mut()?.bake()?;
+        })
     }
 
     pub fn play(&mut self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> AppResult<()> {
@@ -885,10 +888,11 @@ impl Sound {
             }
 
             Sound::Custom{ref pattern, ref src, volume, attack, decay, mut sustain, release, rep_count, speed} => {
+                let Some(src) = src else {return Ok(())};
+                let src = src.get()?;
                 let pat = pattern.get()?;
                 let Some(last) = pat.last() else {return Ok(())};
-                let src = src.get()?;
-                let len = src.duration() / speed;
+                let len = src.baked_duration().secs_to_beats(bps) / speed;
                 let pat_len = last.offset.to_secs(bps) + len;
 
                 for rep in 0 .. rep_count.get() {
@@ -913,7 +917,7 @@ impl Sound {
                         stretcher.rate().set_value(1.0 / *speed);
 
                         let block_core = ctx.create_buffer_source()?;
-                        block_core.set_buffer(src.inner());
+                        block_core.set_buffer(src.baked().to_app_result()?.into());
                         //block_core.playback_rate().set_value(*speed);
                         block_core
                             .connect_with_audio_node(&stretcher)?
@@ -942,10 +946,10 @@ impl Sound {
             Self::Noise{pattern, ..} => pattern.get()?
                 .last().map_or_default(|x| x.offset + x.len),
 
-            Self::Custom{pattern, src, speed, ..} => match pattern.get()?.last() {
-                Some(x) => x.offset + src.get()?.duration().secs_to_beats(bps) / speed,
-                None => default()
-            }
+            Self::Custom{pattern, src, speed, ..} =>
+            if let Some(pat) = pattern.get()?.last() && let Some(src) = src {
+                pat.offset + src.get()?.baked_duration().secs_to_beats(bps) / speed
+            } else {r64![0]}
         })
     }
 
@@ -958,53 +962,57 @@ impl Sound {
         }
     }
 
-    pub fn params(&self, ctx: &AppContext, sequencer: &Sequencer) -> Html {
-        let setter = ctx.event_emitter();
-        match self {
+    pub fn params(&self, ctx: &AppContext, sequencer: &Sequencer) -> AppResult<Html> {
+        let emitter = ctx.event_emitter();
+        Ok(match self {
             Self::None => html!{<div class="horizontal-menu">
                 {for Sound::TYPES.iter().map(|x| html!{
                     <Button name={x.name()}
-                        setter={setter.reform(|_| AppEvent::SetBlockType(*x))}>
+                        setter={emitter.reform(|_| AppEvent::SetBlockType(*x))}>
                         <p>{x.name()}</p>
                     </Button>
                 })}
             </div>},
 
             Self::Note {pattern, volume, attack, decay, sustain, release, rep_count, ..} |
-            Self::Noise{pattern, volume, attack, decay, sustain, release, rep_count, ..} => match ctx.selected_tab() {
+            Self::Noise{pattern, volume, attack, decay, sustain, release, rep_count, ..} =>
+            match ctx.selected_tab() {
                 0 /* General */ => html!{<div id="inputs">
                     <Slider key="noise-vol"
-                    setter={setter.reform(|x| AppEvent::Volume(R32::from(x)))}
+                    setter={emitter.reform(|x| AppEvent::Volume(R32::from(x)))}
                     name="Noise Volume"
                     initial={*volume}/>
                     <Counter key="noise-repcnt"
-                    setter={setter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
-                    fmt={|x| format!("{}", usize::from(x))}
+                    setter={emitter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
+                    fmt={|x| format!("{x:.0}")}
                     name="Number Of Pattern Repetitions"
                     min={r64![1]}
                     initial={*rep_count}/>
                 </div>},
+
                 1 /* Envelope */ => html!{<div id="inputs">
                     <Counter key="noise-att"
-                    setter={setter.reform(AppEvent::Attack)}
+                    setter={emitter.reform(AppEvent::Attack)}
                     name="Noise Attack Time" postfix="Beats"
                     initial={*attack}/>
                     <Counter key="noise-dec"
-                    setter={setter.reform(AppEvent::Decay)}
+                    setter={emitter.reform(AppEvent::Decay)}
                     name="Noise Decay Time" postfix="Beats"
                     initial={*decay}/>
                     <Slider key="noise-sus"
-                    setter={setter.reform(|x| AppEvent::Sustain(R32::from(x)))}
+                    setter={emitter.reform(|x| AppEvent::Sustain(R32::from(x)))}
                     name="Noise Sustain Level"
                     initial={*sustain}/>
                     <Counter key="noise-rel"
-                    setter={setter.reform(AppEvent::Release)}
+                    setter={emitter.reform(AppEvent::Release)}
                     name="Noise Release Time" postfix="Beats"
                     initial={*release}/>
                 </div>},
+
                 2 /* Pattern */ => html!{
-                    <GraphEditorCanvas<NoteBlock> editor={pattern} emitter={setter}/>
+                    <GraphEditorCanvas<NoteBlock> editor={pattern} {emitter}/>
                 },
+
                 tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
             }
 
@@ -1012,103 +1020,52 @@ impl Sound {
             match ctx.selected_tab() {
                 0 /* General */ => html!{<div id="inputs">
                     <Slider key="custom-vol"
-                    setter={setter.reform(|x| AppEvent::Volume(R32::from(x)))}
+                    setter={emitter.reform(|x| AppEvent::Volume(R32::from(x)))}
                     name="Noise Volume"
                     initial={*volume}/>
                     <Counter key="custom-repcnt"
-                    setter={setter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
-                    fmt={|x| format!("{:.0}", x)}
+                    setter={emitter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
+                    fmt={|x| format!("{x:.0}")}
                     name="Number Of Pattern Repetitions"
                     min={r64![1]}
                     initial={*rep_count}/>
                     <Counter key="note-speed"
-                    setter={setter.reform(|x| AppEvent::Speed(R32::from(x)))}
+                    setter={emitter.reform(|x| AppEvent::Speed(R32::from(x)))}
                     fmt={|x| format!("{x:.2}x")}
                     name="Playback speed"
                     initial={*speed}/>
-                    <Button name="Audio input" help="Click to change" class="wide"
-                    setter={setter.reform(|_| AppEvent::OpenPopup(Popup::ChooseInput))}>
-                        if let Some((chosen, input)) = src.get().report().map(|x| (x.inner().is_some(), x)) {
-                            <div class="inner-button-panel">
-                                if input.playing() {
-                                    <Button name="Stop playing" help="Click to stop the playback"
-                                    setter={{
-                                        let s = Rc::clone(src);
-                                        setter.reform(move |e: PointerEvent| {
-                                            e.stop_propagation();
-                                            AppEvent::StopPlay(Some(s.clone()))
-                                        })
-                                    }}>
-                                        <img::Stop/>
-                                    </Button>
-                                } else if chosen {
-                                    <Button name="Play audio input" help="Click to hear how the input sounds"
-                                    setter={{
-                                        let s = Rc::clone(src);
-                                        setter.reform(move |e: PointerEvent| {
-                                            e.stop_propagation();
-                                            AppEvent::PreparePlay(Some(s.clone()))
-                                        })
-                                    }}>
-                                        <img::Play/>
-                                    </Button>
-                                } else {
-                                    <Button class="unavailable" name="Play audio input (not chosen)"
-                                    help="Choose the audio input for the sound block to play it here"
-                                    setter={|e: PointerEvent| e.stop_propagation()}>
-                                        <img::Play/>
-                                    </Button>
-                                }
-                                <p>{input.add_ctx(sequencer).to_string()}</p>
-                                if chosen {
-                                    <Button name="Edit audio input" help="Click to edit the audio input"
-                                    setter={{
-                                        let s = Rc::clone(src);
-                                        setter.reform(move |e: PointerEvent| {
-                                            e.stop_propagation();
-                                            AppEvent::OpenPopup(Popup::EditInput(s.clone()))
-                                        })
-                                    }}>
-                                        <img::Settings/>
-                                    </Button>
-                                } else {
-                                    <Button class="unavailable" name="Edit audio input (not chosen)"
-                                    help="Choose the audio input for the sound block to edit it \
-                                          by clicking here"
-                                    setter={|e: PointerEvent| e.stop_propagation()}>
-                                        <img::Settings/>
-                                    </Button>
-                                }
-                            </div>
-                        } else {
-                            <p style="color:red">{"Failed to access audio input"}</p>
-                        }
-                    </Button>
+                    <AudioInputButton name="Audio input" help="Click to change"
+                    onclick={emitter.reform(|_| AppEvent::OpenPopup(Popup::ChooseInput))}
+                    playing={sequencer.playback_ctx().played_input().is_some()}
+                    bps={sequencer.bps()} {emitter} input={src}/>
                 </div>},
+
                 1 /* Envelope */ => html!{<div id="inputs">
                     <Counter key="custom-att"
-                    setter={setter.reform(AppEvent::Attack)}
+                    setter={emitter.reform(AppEvent::Attack)}
                     name="Noise Attack Time" postfix="Beats"
                     initial={*attack}/>
                     <Counter key="custom-dec"
-                    setter={setter.reform(AppEvent::Decay)}
+                    setter={emitter.reform(AppEvent::Decay)}
                     name="Noise Decay Time" postfix="Beats"
                     initial={*decay}/>
                     <Slider key="custom-sus"
-                    setter={setter.reform(|x| AppEvent::Sustain(R32::from(x)))}
+                    setter={emitter.reform(|x| AppEvent::Sustain(R32::from(x)))}
                     name="Noise Sustain Level"
                     initial={*sustain}/>
                     <Counter key="custom-rel"
-                    setter={setter.reform(AppEvent::Release)}
+                    setter={emitter.reform(AppEvent::Release)}
                     name="Noise Release Time" postfix="Beats"
                     initial={*release}/>
                 </div>},
+
                 2 /* Pattern */ => html!{
-                    <GraphEditorCanvas<CustomBlock> editor={pattern} emitter={setter}/>
+                    <GraphEditorCanvas<CustomBlock> editor={pattern} {emitter}/>
                 },
+
                 tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
             }
-        }
+        })
     }
 
     pub fn handle_event(
@@ -1224,8 +1181,8 @@ impl Sound {
                 }
 
                 AppEvent::AddInput(to) | AppEvent::SelectInput(to) => {
-                    ctx.register_action(AppAction::SelectInput{from: src.clone(), to: to.clone()});
-                    *src = to.clone();
+                    ctx.register_action(AppAction::SelectInput{from: src.clone(), to: Some(to.clone())});
+                    *src = Some(to.clone());
                     ctx.emit_event(AppEvent::RedrawEditorPlane)
                 }
 
@@ -1233,8 +1190,8 @@ impl Sound {
                     if ctx.selected_tab() == 2 {
                         pattern.get_mut()?
                             .handle_event(e, ctx, sequencer, ||
-                                (offset, *rep_count, src.get().map_or_default(|x|
-                                    x.add_ctx(sequencer).duration() / *speed)))?;
+                                (offset, *rep_count, src.as_ref().and_then(|x| x.get().ok())
+                                    .map_or_default(|x| x.baked_duration() / *speed)))?;
                     }
 
                     match e {
