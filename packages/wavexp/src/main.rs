@@ -16,13 +16,13 @@
 #![allow(clippy::option_map_unit_fn)]
 #![allow(clippy::comparison_chain)]
 
+mod sound_types;
 mod img;
 mod visual;
 mod input;
 mod sound;
 mod global;
 mod sequencer;
-mod sound_internals;
 
 pub use wavexp_utils;
 pub use js_sys;

@@ -33,7 +33,7 @@ use wavexp_utils::{
     RoundTo,
     FlippedArray,
     default,
-    WasmCell,
+    cell::WasmCell,
     Alias,
     ToEveryNth,
     ToIterIndicesMut,
@@ -307,27 +307,13 @@ pub trait GraphPoint: Sized + Ord {
         cursor: Cursor,
         first:  bool
     ) -> AppResult<()> {Ok(())}
-    /// Handle the user canceling an action.
-    /// The handler is only called if the graph editor doesn't know how to handle the action.
-    fn on_undo(
-        editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        action: &AppAction
-    ) -> AppResult<()>;
-    /// Handle the user canceling cancellation of an action.
-    /// The handler is only called if the graph editor doesn't know how to handle the action.
-    fn on_redo(
-        editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        action: &AppAction
-    ) -> AppResult<()>;
     /// Handle request for a redraw.
     /// `editor` is the editor that needs redraw.
     /// `ctx` is the application context of the editor.
     /// `sequencer` is the the app's global sequencer.
     /// `canvas_size` is canvas's dimensions in pixels.
     /// Points on a canvas must be confined to these dimensions to appear on the screen.
-    /// `solid` is the path that will be stroked with a solid line.
+    /// `solid` is the path that will be stroked with a solid line and filled with light background color.
     /// `dotted` is the path that will be stroked with a dotted line.
     /// `visual_ctx` is the visual context defined for the graph point, passed to this handler
     /// through `GraphEditor::handle_event`.
@@ -382,7 +368,7 @@ enum Focus {
     Selection{origin: ConfinedAlignedUserPoint, end: ConfinedAlignedUserPoint, meta: bool}
 }
 
-static GRAPH_EDITOR_COUNT: WasmCell<Cell<usize>> = WasmCell::new(Cell::new(AnyGraphEditor::INVALID_ID + 1));
+static GRAPH_EDITOR_COUNT: WasmCell<Cell<usize>> = WasmCell(Cell::new(AnyGraphEditor::INVALID_ID + 1));
 
 /// base of `GraphEditor`, distinguished from the former to ease working with cases when the
 /// contained point type doesn't matter
@@ -983,7 +969,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         self.selection_size = prev_size;
                     }
 
-                    _ => T::on_undo(self, ctx, action)?
+                    _ => ()
                 }
             }
 
@@ -1008,14 +994,15 @@ impl<T: GraphPoint> GraphEditor<T> {
                         T::move_point(Err(&mut self.selection_src), delta, meta)
                     }
 
-                    AppAction::SetSelection{editor_id, ref cur_ids, cur_src, cur_size, ..} => if editor_id == self.id {
+                    AppAction::SetSelection{editor_id, ref cur_ids, cur_src, cur_size, ..} =>
+                    if editor_id == self.id {
                         self.redraw = true;
                         self.selection = cur_ids.to_vec();
                         self.selection_src = cur_src;
                         self.selection_size = cur_size;
                     }
 
-                    _ => T::on_redo(self, ctx, action)?
+                    _ => ()
                 }
             }
 
@@ -1101,7 +1088,6 @@ impl<T: GraphPoint> GraphEditor<T> {
                 canvas_ctx.fill_with_path_2d(&solid);
                 canvas_ctx.stroke_with_path(&solid);
                 canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![number 10.0, number 10.0]))?;
-                canvas_ctx.fill_with_path_2d(&dotted);
                 canvas_ctx.stroke_with_path(&dotted);
                 canvas_ctx.set_line_dash(eval_once!(JsValue: js_array![]))?;
             }

@@ -2,12 +2,14 @@
 #![feature(const_float_classify)]
 #![feature(never_type)]
 #![feature(try_blocks)]
+#![feature(raw_ref_op)]
 
+pub mod cell;
 use std::{
     ptr,
     mem::{take, transmute_copy, MaybeUninit, forget},
     fmt::{self, Debug, Formatter, Display},
-    ops::{Neg, Range, Deref, DerefMut, RangeBounds, 
+    ops::{Neg, Range, Deref, RangeBounds, 
         Add, Sub, Mul, Div, Rem,
         AddAssign, SubAssign, MulAssign, DivAssign, RemAssign},
     iter::{successors, Sum},
@@ -16,8 +18,7 @@ use std::{
     num::{TryFromIntError,
         NonZeroU8, NonZeroU16, NonZeroU32, NonZeroUsize, NonZeroU64,
         NonZeroI8, NonZeroI16, NonZeroI32, NonZeroIsize, NonZeroI64},
-    cell::{BorrowError, BorrowMutError, Ref, RefMut},
-    rc::Rc};
+    cell::{BorrowError, BorrowMutError}};
 pub use js_sys;
 pub use wasm_bindgen;
 use wasm_bindgen::{JsValue, JsCast};
@@ -29,73 +30,7 @@ use web_sys::{
     Element,
     console::{warn_1, warn_2},
     HtmlElement};
-use yew::{
-    html::IntoPropValue,
-    AttrValue,
-    scheduler::Shared};
-
-pub struct AwareRef<'a, T> {
-    inner: Ref<'a, T>,
-    outer: &'a Shared<T>
-}
-
-impl<'a, T> Deref for AwareRef<'a, T> {
-    type Target = Ref<'a, T>;
-    fn deref(&self) -> &Self::Target {&self.inner}
-}
-
-impl<'a, T> AwareRef<'a, T> {
-    pub fn get_outer(&self) -> Shared<T> {Rc::clone(self.outer)}
-}
-
-pub struct AwareRefMut<'a, T> {
-    inner: RefMut<'a, T>,
-    outer: &'a Shared<T>
-}
-
-impl<'a, T> Deref for AwareRefMut<'a, T> {
-    type Target = RefMut<'a, T>;
-    fn deref(&self) -> &Self::Target {&self.inner}
-}
-
-impl<'a, T> DerefMut for AwareRefMut<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.inner}
-}
-
-impl<'a, T> AwareRefMut<'a, T> {
-    pub fn get_outer(&self) -> Shared<T> {Rc::clone(self.outer)}
-}
-
-pub trait SharedExt<T> {
-    fn get(&self)           -> AppResult<Ref<'_,         T>>;
-    fn get_mut(&self)       -> AppResult<RefMut<'_,      T>>;
-    fn get_aware(&self)     -> AppResult<AwareRef<'_,    T>>;
-    fn get_aware_mut(&self) -> AppResult<AwareRefMut<'_, T>>;
-}
-
-impl<T> SharedExt<T> for Shared<T> {
-    fn get(&self) -> AppResult<Ref<'_, T>> {
-        self.try_borrow().map_err(AppError::from)
-    }
-
-    fn get_mut(&self) -> AppResult<RefMut<'_, T>> {
-        self.try_borrow_mut().map_err(AppError::from)
-    }
-
-    fn get_aware(&self) -> AppResult<AwareRef<'_, T>> {
-        match self.try_borrow() {
-            Ok(inner) => Ok(AwareRef{inner, outer: self}),
-            Err(e) => Err(AppError::from(e))
-        }
-    }
-
-    fn get_aware_mut(&self) -> AppResult<AwareRefMut<'_, T>> {
-        match self.try_borrow_mut() {
-            Ok(inner) => Ok(AwareRefMut{inner, outer: self}),
-            Err(e) => Err(AppError::from(e))
-        }
-    }
-}
+use yew::{html::IntoPropValue, AttrValue};
 
 pub struct EveryNth<'a, T> {
     iter: &'a [T],
@@ -462,23 +397,6 @@ impl<T, const OUTER: usize, const INNER: usize> FlippedArray<T, OUTER, INNER> fo
     }
 }
 
-/// this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
-/// them from containing types that don't implement `Sync`. On any other architecture this
-/// limitation makes sense, but in Webassembly, which doesn't support threading, this limitation is meaningless.
-pub struct WasmCell<T>(T);
-
-#[cfg(target_arch = "wasm32")]
-unsafe impl<T> Sync for WasmCell<T> {}
-
-impl<T> Deref for WasmCell<T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target {&self.0}
-}
-
-impl<T> WasmCell<T> {
-    pub const fn new(val: T) -> Self {Self(val)}
-}
-
 pub struct SliceRef<'a, T: ?Sized> {
     inner: &'a T,
     index: usize
@@ -572,7 +490,8 @@ macro_rules! js_assert {
 #[macro_export]
 macro_rules! eval_once {
     ($t:ty : $e:expr) => {{
-        static RES: $crate::WasmCell<std::cell::OnceCell<$t>> = $crate::WasmCell::new(std::cell::OnceCell::new());
+        static RES: $crate::cell::WasmCell<std::cell::OnceCell<$t>>
+            = $crate::cell::WasmCell(std::cell::OnceCell::new());
         RES.get_or_init(|| $e)
     }};
 }

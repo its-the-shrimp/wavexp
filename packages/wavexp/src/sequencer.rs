@@ -4,7 +4,6 @@ use std::{
     borrow::Cow,
     iter::once,
     fmt::{Display, Formatter, self},
-    cell::RefCell,
     rc::Rc};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
@@ -22,9 +21,8 @@ use wavexp_utils::{
     AppResultUtils,
     now,
     js_function,
-    SharedExt,
-    AwareRefMut,
-    BoolExt};
+    BoolExt,
+    cell::{Shared, SharedAwareRefMut}};
 use web_sys::{
     Path2d,
     HtmlCanvasElement,
@@ -38,14 +36,13 @@ use yew::{
     Html,
     html,
     AttrValue,
-    TargetCast,
-    scheduler::Shared};
+    TargetCast};
 use crate::{
-    sound::{Sound, Beats, Secs, FromBeats},
+    sound::{Sound, Beats, Secs, FromBeats, AudioInput},
     visual::{GraphPoint, GraphEditor},
     global::{AppContext, AppAction, AppEvent},
     input::{Cursor, Buttons, Slider, Tab, Button, AudioInputButton},
-    sound_internals::{TimeStretcherNode, AudioInput}, img};
+    img};
 
 #[derive(Debug, Clone)]
 pub struct SoundBlock {
@@ -214,26 +211,6 @@ impl GraphPoint for SoundBlock {
             [m.into(), "Hold & drag to move".into()]
         };
         Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
-    }
-
-    fn on_undo(
-        editor: &mut GraphEditor<Self>,
-        _:      &mut AppContext,
-        action: &AppAction
-    ) -> AppResult<()> {
-        if let &AppAction::AddSoundBlock{block_id, ..} = action {
-            editor.remove_points(once(block_id), drop)
-        } else {Ok(())}
-    }
-
-    fn on_redo(
-        editor: &mut GraphEditor<Self>,
-        _:      &mut AppContext,
-        action: &AppAction
-    ) -> AppResult<()> {
-        Ok(if let &AppAction::AddSoundBlock{offset, layer, block_id} = action {
-            unsafe{editor.insert_point(block_id, SoundBlock{sound: default(), layer, offset})}
-        })
     }
 
     fn on_redraw(
@@ -413,30 +390,18 @@ impl Sequencer {
         }
     }
 
-    pub fn handle_event(self: &mut AwareRefMut<'_, Self>, event: &AppEvent, ctx: &mut AppContext)
+    pub fn handle_event(self: &mut SharedAwareRefMut<'_, Self>, event: &AppEvent, ctx: &mut AppContext)
     -> AppResult<()> {
-        Ok(match event {
-            AppEvent::PreparePlay(input) => {
+        Ok(match *event {
+            AppEvent::PreparePlay(ref input) => {
                 if self.audio_ctx.is_instance_of::<AudioContext>() {
                     self.playback_ctx = PlaybackContext::None;
                     self.gain.disconnect()?;
-                    ctx.emit_event(AppEvent::StartPlay(input.clone()))
                 } else {
                     self.audio_ctx = AudioContext::new()?.into();
                     self.analyser = self.audio_ctx.create_analyser()?;
                     self.analyser.connect_with_audio_node(&self.audio_ctx.destination())?;
                     self.ctx_created_at = now().to_app_result()?;
-
-                    let worklet = self.audio_ctx.audio_worklet()?;
-                    let emitter = ctx.event_emitter().clone();
-                    let input = input.clone();
-                    spawn_local(async move {
-                        let res: AppResult<!> = try {
-                            TimeStretcherNode::register(worklet).await?;
-                            return emitter.emit(AppEvent::StartPlay(input))
-                        };
-                        res.report();
-                    });
                 }
                 if let Some(input) = input {
                     input.get_mut()?.bake()?;
@@ -449,9 +414,10 @@ impl Sequencer {
                 self.gain = self.audio_ctx.create_gain()?;
                 self.gain.gain().set_value(*volume);
                 self.gain.connect_with_audio_node(&self.analyser)?;
+                ctx.emit_event(AppEvent::StartPlay(input.clone()))
             }
 
-            AppEvent::StartPlay(input) => {
+            AppEvent::StartPlay(ref input) => {
                 let now = now().to_app_result()? - self.ctx_created_at;
                 if let Some(input) = input {
                     let player = self.audio_ctx.create_buffer_source()?;
@@ -488,7 +454,7 @@ impl Sequencer {
                 temp.click();
             }
 
-            AppEvent::SetInputName(e) => {
+            AppEvent::SetInputName(ref e) => {
                 let target: HtmlInputElement = e.target_dyn_into().to_app_result()?;
                 let to: Rc<str> = target.value().into();
                 if !to.is_empty() {
@@ -504,33 +470,33 @@ impl Sequencer {
                     .changes_mut().reversed.flip();
             }
 
-            AppEvent::AudioUploaded(e) => {
+            AppEvent::AudioUploaded(ref e) => {
                 let target: HtmlInputElement = e.target_dyn_into().to_app_result()?;
                 let emitter = ctx.event_emitter().clone();
 
-                let seq = self.get_outer();
+                let seq = self.outer();
                 spawn_local(async move {
                     let res: AppResult<!> = try {
                         let file = target.files().and_then(|x| x.get(0)).to_app_result()?;
                         let input = AudioInput::new_file(file, seq).await?;
-                        return emitter.emit(AppEvent::AddInput(Rc::new(RefCell::new(input))))
+                        return emitter.emit(AppEvent::AddInput(input.into()))
                     };
                     res.report();
                 })
             }
 
-            AppEvent::AddInput(input) => {
+            AppEvent::AddInput(ref input) => {
                 ctx.register_action(AppAction::AddInput(input.clone()));
                 self.inputs.push(input.clone());
             }
 
-            &AppEvent::MasterVolume(to) => unsafe {
+            AppEvent::MasterVolume(to) => unsafe {
                 let gain = self.gain.gain();
                 ctx.register_action(AppAction::SetMasterVolume{from: R32::new_unchecked(gain.value()), to});
                 gain.set_value(*to);
             }
 
-            &AppEvent::Bpm(mut to) => {
+            AppEvent::Bpm(mut to) => {
                 to /= 60;
                 ctx.register_action(AppAction::SetTempo{from: self.bps, to}); 
                 self.bps = to
@@ -539,7 +505,8 @@ impl Sequencer {
             AppEvent::RedrawEditorPlane => self.pattern.get_mut()?
                 .force_redraw(),
 
-            e @AppEvent::Undo(actions) => {
+            AppEvent::Undo(ref actions) => {
+                let mut pat = self.get_sub_ref_mut(|x| &x.pattern)?;
                 for action in actions.iter() {
                     match *action {
                         AppAction::SetTempo{from, ..} =>
@@ -552,20 +519,26 @@ impl Sequencer {
                             _ = self.inputs.pop(),
 
                         AppAction::SetInputName{ref from, ..} =>
-                            _ = ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?.get_mut()?
+                            _ = ctx.popup().and_then(|x| x.as_edit_input())
+                                .to_app_result()?.get_mut()?
                                 .set_name(from.clone()),
 
                         AppAction::ReverseInput =>
-                            ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?.get_mut()?
+                            ctx.popup().and_then(|x| x.as_edit_input())
+                                .to_app_result()?.get_mut()?
                                 .changes_mut().reversed.flip(),
+
+                        AppAction::AddSoundBlock{block_id, ..} =>
+                            pat.remove_points(once(block_id), drop)?,
 
                         _ => ()
                     }
                 }
-                self.pattern.get_mut()?.handle_event(e, ctx, &*self, || ())?
+                pat.handle_event(event, ctx, &*self, || ())?
             }
 
-            e @AppEvent::Redo(actions) => {
+            AppEvent::Redo(ref actions) => {
+                let mut pat = self.get_sub_ref_mut(|x| &x.pattern)?;
                 for action in actions.iter() {
                     match *action {
                         AppAction::SetTempo{to, ..} =>
@@ -585,13 +558,17 @@ impl Sequencer {
                             ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?
                                 .get_mut()?.changes_mut().reversed.flip(),
 
+                        AppAction::AddSoundBlock{offset, layer, block_id} => unsafe {
+                            pat.insert_point(block_id, SoundBlock{sound: default(), layer, offset})
+                        }
+
                         _ => ()
                     }
                 }
-                self.pattern.get_mut()?.handle_event(e, ctx, &*self, || ())?
+                pat.handle_event(event, ctx, &*self, || ())?
             }
 
-            e => self.pattern.get_mut()?.handle_event(e, ctx, &*self, || ())?
+            _ => self.pattern.get_mut()?.handle_event(event, ctx, &*self, || ())?
         })
     }
 }

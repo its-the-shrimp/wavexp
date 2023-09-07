@@ -18,7 +18,9 @@ use yew::{
     AttrValue,
     Callback,
     Properties,
-    NodeRef, function_component, scheduler::Shared, classes};
+    NodeRef,
+    function_component,
+    classes};
 use wavexp_utils::{
     R64,
     Point,
@@ -31,11 +33,12 @@ use wavexp_utils::{
     AppResult,
     AppResultUtils,
     Pipe,
-    r64,
-    SharedExt};
+    r64, cell::Shared};
 use crate::{
     visual::{GraphPoint, GraphEditor},
-    global::{AppEvent, Popup}, sound_internals::AudioInput, sound::Beats, img};
+    global::{AppEvent, Popup},
+    sound::{Beats, AudioInput},
+    img};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Buttons {
@@ -508,7 +511,7 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                     } else {
                         <Button name="Play audio input" help="Click to hear how the input sounds"
                         setter={{
-                            let s = input.get_outer();
+                            let s = input.outer();
                             emitter.reform(move |e: PointerEvent| {
                                 e.stop_propagation();
                                 AppEvent::PreparePlay(Some(s.clone()))
@@ -520,7 +523,7 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                     <p>{input.desc(*bps)}</p>
                     <Button name="Edit audio input" help="Click to edit the audio input"
                     setter={{
-                        let s = input.get_outer();
+                        let s = input.outer();
                         emitter.reform(move |e: PointerEvent| {
                             e.stop_propagation();
                             AppEvent::OpenPopup(Popup::EditInput(s.clone()))

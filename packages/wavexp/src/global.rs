@@ -5,7 +5,6 @@ use std::{
     cmp::Ordering,
     iter::once,
     num::NonZeroUsize,
-    cell::RefCell,
     rc::Rc};
 use js_sys::Function;
 use wasm_bindgen::{
@@ -23,7 +22,7 @@ use yew::{
     Html,
     html,
     AttrValue,
-    Callback, scheduler::Shared};
+    Callback};
 use wavexp_utils::{
     R64,
     R32,
@@ -38,15 +37,15 @@ use wavexp_utils::{
     AppResultUtils,
     ToAttrValue,
     now,
-    SharedExt,
     ArrayExt,
-    js_function};
+    js_function, cell::Shared};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, Note, NoteBlock, CustomBlock},
+    sound::{MSecs, Secs, Beats, SoundType, Note, AudioInput},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
     input::{Button, Switch, GraphEditorCanvas, AudioInputButton},
     sequencer::{SoundBlock, Sequencer},
-    sound_internals::AudioInput, img};
+    img,
+    sound_types::{NoteBlock, NoiseBlock, CustomBlock}};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, PartialEq, Clone)]
@@ -149,7 +148,7 @@ pub enum AppEvent {
 }
 
 /// a globally registered cancelable action
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AppAction {
     /// start the session; added to the action stack by default and is always the first one
     Start,
@@ -172,6 +171,8 @@ pub enum AppAction {
     AddSoundBlock{block_id: usize, offset: R64, layer: i32},
     /// add a note block to a graph editor
     AddNoteBlock{block_id: usize, offset: R64, value: Note},
+    /// add a noise block to a graph editor
+    AddNoiseBlock{block_id: usize, offset: R64, pitch: Note},
     /// add a custom audio block to a graph editor
     AddCustomBlock(usize, CustomBlock),
     /// select a sound block
@@ -181,13 +182,10 @@ pub enum AppAction {
     SetBlockType(SoundType),
     /// switch tabs in the side editor
     SwitchTab{from: usize, to: usize},
-    /// remove sound blocks
-    RemoveSoundBlock{block_id: usize, block: SoundBlock,
-        prev_selected_tab: usize},
-    /// remove note blocks
-    RemoveNoteBlocks(Box<[(usize, NoteBlock)]>),
     /// change the length of note blocks, optionally removing some
     StretchNoteBlocks{delta_x: R64, delta_y: isize, removed: Box<[(usize, NoteBlock)]>},
+    /// change the length of noise blocks, optionally removing some
+    StretchNoiseBlocks{delta_x: R64, delta_y: isize, removed: Box<[(usize, NoiseBlock)]>},
     /// change sound's volume
     SetVolume{from: R32, to: R32},
     /// change sound's attack time
@@ -206,8 +204,14 @@ pub enum AppAction {
     SetMasterVolume{from: R32, to: R32},
     /// set repetition count of a sound block
     SetRepCount{from: NonZeroUsize, to: NonZeroUsize},
+    /// remove a sound block
+    RemoveSoundBlock{block_id: usize, block: SoundBlock, prev_selected_tab: usize},
+    /// remove note blocks
+    RemoveNoteBlocks(Box<[(usize, NoteBlock)]>),
     /// remove custom blocks
     RemoveCustomBlocks(Box<[(usize, CustomBlock)]>),
+    /// remvove noise blocks
+    RemoveNoiseBlocks(Box<[(usize, NoiseBlock)]>),
     /// set playback speed of the audio source of a Custom Audio sound block
     SetSpeed{from: R32, to: R32},
     /// register a new audio input
@@ -256,8 +260,16 @@ impl AppAction {
                 Some("Remove Sound Block"),
             Self::RemoveNoteBlocks(..) =>
                 Some("Remove Note Blocks"),
-            Self::StretchNoteBlocks{..} =>
-                Some("Drag & Remove Blocks"),
+            Self::StretchNoteBlocks{removed, ..} => Some(if removed.is_empty() {
+                "Stretch Note Blocks"
+            } else {
+                "Stretch & Remove Note Blocks"
+            }),
+            Self::StretchNoiseBlocks{removed, ..} => Some(if removed.is_empty() {
+                "Stretch Noise Blocks"
+            } else {
+                "Stretch & Remove Noise Blocks"
+            }),
             Self::SetVolume{..} =>
                 Some("Set Volume"),
             Self::SetAttack{..} =>
@@ -281,8 +293,15 @@ impl AppAction {
             } else {
                 "Remove Custom Audio Blocks"
             }),
+            Self::RemoveNoiseBlocks(removed) => Some(if removed.len() == 1 {
+                "Remove Noise Block"
+            } else {
+                "Remove Noise Blocks"
+            }),
             Self::AddCustomBlock(..) =>
                 Some("Add Custom Audio Block"),
+            Self::AddNoiseBlock{..} =>
+                Some("Add Noise Block"),
             Self::SetSpeed{..} =>
                 Some("Set Custom Audio's Playback Speed"),
             Self::AddInput(..) =>
@@ -335,7 +354,7 @@ impl AppAction {
 }
 
 /// Handles rendering of a pop-up window in the center of the screen.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Popup {
     /// Choose the audio input for the selected sound block.
     ChooseInput,
@@ -361,7 +380,7 @@ impl Popup {
                                     <AudioInputButton class="extend-inner-button-panel"
                                     bps={sequencer.bps()} {input} {emitter}
                                     onclick={{
-                                        let i = Rc::clone(input);
+                                        let i = input.clone();
                                         emitter.reform(move |_| AppEvent::SelectInput(i.clone()))
                                     }}
                                     playing={sequencer.playback_ctx().played_input()
@@ -488,7 +507,7 @@ impl Component for App {
         let res = Self{
             selected_block: None,
             hint_handler: default(),
-            sequencer: Rc::new(RefCell::new(Sequencer::new().unwrap())),
+            sequencer: Sequencer::new().unwrap().into(),
             frame_emitter: js_function!(|x| cb.emit(R64::new_or(r64![0], x))),
             sound_visualiser, ctx};
         window().request_animation_frame(&res.frame_emitter).unwrap();
@@ -714,11 +733,7 @@ impl Component for App {
                         <div id="tab-list">
                             {block.tabs(&self.ctx)}
                         </div>
-                        if let Some(params) = block.sound.params(&self.ctx, &sequencer).report() {
-                            {params}
-                        } else {
-                            <p style="color:red">{"Failed to get parameters of the sound block"}</p>
-                        }
+                        {block.sound.params(&self.ctx, &sequencer)}
                         <div id="general-ctrl" class="dark-bg">
                             <Button name="Back to project-wide settings"
                             setter={setter.reform(|_| AppEvent::Select(None))}>
