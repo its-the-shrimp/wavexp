@@ -1,3 +1,4 @@
+#![feature(downcast_unchecked)]
 #![feature(iter_advance_by)]
 #![feature(arbitrary_self_types)]
 #![feature(try_blocks)]
@@ -16,11 +17,10 @@
 #![allow(clippy::option_map_unit_fn)]
 #![allow(clippy::comparison_chain)]
 
-mod sound_types;
+mod sound;
 mod img;
 mod visual;
 mod input;
-mod sound;
 mod global;
 mod sequencer;
 

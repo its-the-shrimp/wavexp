@@ -1,3 +1,10 @@
+mod note;
+use note::*;
+mod noise;
+use noise::*;
+mod custom;
+use custom::*;
+
 use std::{
     ops::{Add, Sub, AddAssign, SubAssign, Div},
     fmt::{self, Display, Formatter},
@@ -19,8 +26,7 @@ use wavexp_utils::{
 use crate::{
     input::Button,
     global::{AppContext, AppEvent, AppAction},
-    sequencer::Sequencer,
-    sound_types::{NoteSound, NoiseSound, CustomSound}};
+    sequencer::Sequencer};
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -170,9 +176,8 @@ impl Note {
     }
 
     pub fn pitch_coef(&self) -> R64 {
-        R64::from(*self - Self::MID).div(12u8).exp2()
+        r64!{*self - Self::MID}.div(12u8).exp2()
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -314,7 +319,7 @@ impl Sound {
         }
     }
 
-    pub fn play(&mut self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> AppResult<()> {
+    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> AppResult<()> {
         match self {
             Self::None          => Ok(()),
             Self::Note(inner)   => inner.play(plug, now, self_offset, bps),

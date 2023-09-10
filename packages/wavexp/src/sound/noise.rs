@@ -1,7 +1,7 @@
 use std::{
-    ops::{Range, Deref},
+    ops::{Range, RangeInclusive},
     num::NonZeroUsize,
-    iter::once, mem::replace, borrow::Cow};
+    mem::replace};
 use js_sys::Math::random;
 use wavexp_utils::{
     AppResult,
@@ -14,7 +14,9 @@ use wavexp_utils::{
     Pipe,
     js_function,
     AppError,
-    AppResultUtils, cell::{Shared, SharedAwareRefMut}, SliceExt};
+    AppResultUtils,
+    cell::{Shared, SharedAwareRefMut},
+    RangeExt};
 use web_sys::{Path2d, AudioBuffer, AudioBufferOptions, AudioNode};
 use yew::{Html, html};
 use wasm_bindgen::JsCast;
@@ -23,7 +25,7 @@ use crate::{
     visual::{GraphPoint, GraphEditor},
     global::{AppContext, AppAction, AppEvent},
     sequencer::{Sequencer, PlaybackContext},
-    input::{Slider, Counter, GraphEditorCanvas, Buttons, Cursor}};
+    input::{Slider, Counter, GraphEditorCanvas}};
 use super::CustomBlock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -44,6 +46,10 @@ impl GraphPoint for NoiseBlock {
     type Y = Note;
     /// (sound block offset, number of repetitions of the pattern)
     type VisualContext = (Beats, NonZeroUsize);
+
+    fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
+        Self{offset, pitch: Note::from_index(y.into()).recip(), len: r64![1]}
+    }
 
     fn inner(&self) -> &Self::Inner {&self.len}
     fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.len}
@@ -75,13 +81,14 @@ impl GraphPoint for NoiseBlock {
 
     fn in_hitbox(
         &self,
-        point: [R64; 2],
+        area:  &[RangeInclusive<R64>; 2],
         _:     &AppContext,
         _:     &Sequencer,
         _:     Self::VisualContext
     ) -> AppResult<bool> {
-        Ok(self.pitch.recip().index() == *point[1] as usize
-            && (self.offset .. self.offset + self.len).contains(&point[0]))
+        Ok(area[1].clone().map_bounds(usize::from).contains(&self.pitch.recip().index())
+            && (self.offset ..= self.offset + self.len)
+                .overlap(&area[0]))
     }
 
     fn on_redraw(
@@ -98,7 +105,7 @@ impl GraphPoint for NoiseBlock {
         let offset = &R64::array_from(editor.offset());
         for block in editor.iter() {
             let [x, y] = block.loc().mul(step).sub(offset);
-            solid.rect(*x, *y, *block.len / *block.pitch.pitch_coef() * *step[0], *step[1]);
+            solid.rect(*x, *y, *block.len * *step[0], *step[1]);
         }
 
         let total_len = editor.last().map_or_default(|x| x.offset + x.len);
@@ -113,115 +120,7 @@ impl GraphPoint for NoiseBlock {
         })
     }
 
-    fn on_plane_hover(
-        editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        cursor: Cursor,
-        _:      impl Deref<Target = [R64; 2]>,
-        first:  bool
-    ) -> AppResult<()> {
-        if !first && editor.last_cursor().is_some_and(|x| *x == *cursor) {return Ok(())}
-        let [m, a] = match *cursor {
-            Buttons{left: false, shift: true, ..} =>
-                [Self::EDITOR_NAME.into(),
-                "Press and hold to zoom".into()],
-            Buttons{left: true, shift: true, ..} =>
-                [Cow::from(Self::EDITOR_NAME) + ": zooming",
-                "Release to stop".into()],
-            Buttons{left: false, meta: false, ..} =>
-                [Self::EDITOR_NAME.into(),
-                "Hold & drag to move around (press Meta for actions)".into()],
-            Buttons{left: false, meta: true, ..} =>
-                [Self::EDITOR_NAME.into(),
-                "Click to add note, hold & drag to select".into()],
-            Buttons{left: true, meta: false, ..} => 
-                [Cow::from(Self::EDITOR_NAME) + ": Moving",
-                "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                [Cow::from(Self::EDITOR_NAME) + ": Selecting",
-                "Release to select".into()]
-        };
-        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
-    }
-
-    fn on_point_hover(
-        editor:   &mut GraphEditor<Self>,
-        ctx:      &mut AppContext,
-        cursor:   Cursor,
-        point_id: usize,
-        first:    bool
-    ) -> AppResult<()> {
-        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return Ok(())}
-        let m = Self::fmt_loc(unsafe{editor.get_unchecked(point_id)}.loc());
-        let [m, a] = match *cursor {
-            Buttons{left: false, ..} =>
-                [m.into(), "LMB to move, LMB + Meta to stretch".into()],
-            Buttons{left: true, meta: false, ..} =>
-                [(m + ": Moving").into(), "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                [(m + ": Stretching").into(), "Release to stop".into()],
-        };
-        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
-    }
-
-    fn on_selection_hover(
-        editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        cursor: Cursor,
-        first:  bool
-    ) -> AppResult<()> {
-        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return Ok(())}
-        let m = {let n = editor.selection().len(); format!("{n} block{}", if n == 1 {""} else {"s"})};
-        let [m, a] = match *cursor {
-            Buttons{left: false, ..} =>
-                [m.into(), "LMB to move, LMB + Meta to stretch".into()],
-            Buttons{left: true, meta: false, ..} =>
-                [(m + ": Moving").into(), "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                [(m + ": Stretching").into(), "Release to stop".into()],
-        };
-        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
-    }
-
-
     fn fmt_loc(loc: [R64; 2]) -> String {CustomBlock::fmt_loc(loc)}
-
-    fn on_click(
-        editor:        &mut GraphEditor<Self>,
-        ctx:           &mut AppContext,
-        cursor:        Cursor,
-        pressed_at:    impl Deref<Target = [R64; 2]>,
-        released_at:   impl Deref<Target = [R64; 2]>,
-        old_selection: Option<&[usize]>
-    ) -> AppResult<Option<AppAction>> {
-        if !cursor.meta {return Ok(None)}
-
-        let delta = released_at.sub(&pressed_at);
-        Ok(if delta.all(|x| *x == 0) {
-            if !editor.selection().is_empty() || old_selection.map_or(false, |x| !x.is_empty()) {
-                return Ok(None)
-            }
-            let [offset, y] = *released_at;
-            let pitch = Note::from_index(y.into()).recip();
-            let block_id = editor.add_point(Self{offset, pitch, len: r64![1]});
-            ctx.emit_event(AppEvent::RedrawEditorPlane);
-            Some(AppAction::AddNoiseBlock{block_id, offset, pitch})
-        } else {
-            ctx.emit_event(AppEvent::RedrawEditorPlane);
-            let mut removed = Vec::with_capacity(editor.selection().len());
-            let (delta_x, delta_y) = (delta[0], isize::from(delta[1]));
-            editor.filter_selected(|x| x.1.len > 0, |mut x| {
-                x.1.len -= delta_x;
-                x.1.pitch += delta_y;
-                removed.push(x)
-            });
-            match removed.len() {
-                0 => None,
-                n if n == removed.capacity() => Some(AppAction::RemoveNoiseBlocks(removed.into_boxed_slice())),
-                _ => Some(AppAction::StretchNoiseBlocks{delta_x, delta_y, removed: removed.into_boxed_slice()})
-            }
-        })
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -255,10 +154,10 @@ impl NoiseSound {
             rep_count: NonZeroUsize::MIN})
     }
 
-    pub fn play(&mut self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> AppResult<()> {
+    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> AppResult<()> {
         let pat = self.pattern.get()?;
         let Some(last) = pat.last() else {return Ok(())};
-        let pat_len = (last.offset + last.len / last.pitch.pitch_coef()).to_secs(bps);
+        let pat_len = (last.offset + last.len).to_secs(bps);
         let ctx = plug.context();
 
         Ok(for rep in 0 .. self.rep_count.get() {
@@ -271,18 +170,16 @@ impl NoiseSound {
                 at += self.attack.to_secs(bps);
                 gain.linear_ramp_to_value_at_time(*self.volume, *at)?;
                 at += self.decay.to_secs(bps);
-                self.sustain *= self.volume;
-                gain.linear_ramp_to_value_at_time(*self.sustain, *at)?;
-                at = start + len.to_secs(bps) / pitch.pitch_coef();
-                gain.set_value_at_time(*self.sustain, *at)?;
-                at += self.release.to_secs(bps);
+                let sus = self.sustain * self.volume;
+                gain.linear_ramp_to_value_at_time(*sus, *at)?;
+                at = start + len.to_secs(bps);
+                gain.set_value_at_time(*sus, *at - *self.release.to_secs(bps))?;
                 gain.linear_ramp_to_value_at_time(0.0, *at)?;
 
                 let block_core = ctx.create_buffer_source()?;
                 block_core.set_buffer(Some(&self.src));
-                if at - start > 1 {
-                    block_core.set_loop(true);
-                }
+                block_core.playback_rate().set_value(*pitch.pitch_coef() as f32);
+                block_core.set_loop(true);
                 block_core.connect_with_audio_node(&block)?
                     .connect_with_audio_node(plug)?;
                 block_core.start_with_when(*start)?;
@@ -297,7 +194,7 @@ impl NoiseSound {
 
     pub fn len(&self, _: Beats) -> AppResult<Beats> {
         Ok(self.pattern.get()?
-            .last().map_or_default(|x| x.offset + x.len / x.pitch.pitch_coef()))
+            .last().map_or_default(|x| x.offset + x.len))
     }
 
     pub fn rep_count(&self) -> NonZeroUsize {self.rep_count}
@@ -405,18 +302,6 @@ impl NoiseSound {
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }
 
-                        AppAction::AddNoiseBlock{block_id, ..} => {
-                            pat.remove_points(once(block_id), drop)?;
-                            ctx.emit_event(AppEvent::RedrawEditorPlane)
-                        }
-
-                        AppAction::RemoveNoiseBlocks(ref blocks) => {
-                            for &(at, b) in blocks.as_ref() {
-                                unsafe{pat.insert_point(at, b)}
-                            }
-                            ctx.emit_event(AppEvent::RedrawEditorPlane)
-                        }
-
                         _ => (),
                     }
                 }
@@ -447,16 +332,6 @@ impl NoiseSound {
 
                         AppAction::SetRepCount{to, ..} => {
                             self.rep_count = to;
-                            ctx.emit_event(AppEvent::RedrawEditorPlane)
-                        }
-
-                        AppAction::AddNoiseBlock{block_id, offset, pitch} => {
-                            unsafe{pat.insert_point(block_id, NoiseBlock{offset, pitch, len: r64![1]})};
-                            ctx.emit_event(AppEvent::RedrawEditorPlane)
-                        }
-
-                        AppAction::RemoveNoiseBlocks(ref removed) => {
-                            pat.remove_points(removed.iter().map(|(id, _)| *id), drop)?;
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }
 

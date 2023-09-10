@@ -1,23 +1,21 @@
 use std::{
     num::NonZeroUsize,
     cmp::Ordering,
-    ops::{Range, Deref},
-    borrow::Cow,
-    mem::replace,
-    iter::once};
+    ops::{Range, RangeInclusive},
+    mem::replace};
 use wavexp_utils::{
     r64, R64,
     R32, r32,
     AppResult,
     ArrayExt,
-    SliceExt,
     default,
     OptionExt,
     ArrayFrom,
     js_function,
     AppError,
     AppResultUtils,
-    cell::{Shared, SharedAwareRefMut}};
+    cell::{Shared, SharedAwareRefMut},
+    RangeExt};
 use wasm_bindgen::JsCast;
 use web_sys::{Path2d, AudioNode};
 use yew::{html, Html};
@@ -26,7 +24,7 @@ use crate::{
     sound::{Beats, Note, FromBeats, Secs},
     sequencer::{PlaybackContext, Sequencer},
     global::{AppContext, AppAction, AppEvent},
-    input::{Cursor, Buttons, Slider, Counter, GraphEditorCanvas}};
+    input::{Cursor, Slider, Counter, GraphEditorCanvas}};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoteBlock {
@@ -66,6 +64,10 @@ impl GraphPoint for NoteBlock {
     /// (sound block offset, number of repetitions of the pattern)
     type VisualContext = (Beats, NonZeroUsize);
 
+    fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
+        Self{offset, value: Note::from_index(y.into()).recip(), len: r64![1]}
+    }
+
     fn inner(&self) -> &Self::Inner {&self.len}
     fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.len}
 
@@ -98,13 +100,13 @@ impl GraphPoint for NoteBlock {
 
     fn in_hitbox(
         &self,
-        point: [R64; 2],
+        area:  &[RangeInclusive<R64>; 2],
         _:     &AppContext,
         _:     &Sequencer,
         _:     Self::VisualContext
     ) -> AppResult<bool> {
-        Ok(self.value.recip().index() == *point[1] as usize
-            && (self.offset .. self.offset + self.len).contains(&point[0]))
+        Ok(area[1].clone().map_bounds(usize::from).contains(&self.value.recip().index())
+            && (self.offset ..= self.offset + self.len).overlap(&area[0]))
     }
 
     fn fmt_loc(loc: [R64; 2]) -> String {
@@ -122,113 +124,6 @@ impl GraphPoint for NoteBlock {
         Ok(if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
             ctx.emit_event(AppEvent::RedrawEditorPlane)
         })
-    }
-
-    fn on_click(
-        editor:        &mut GraphEditor<Self>,
-        ctx:           &mut AppContext,
-        cursor:        Cursor,
-        pressed_at:    impl Deref<Target = [R64; 2]>,
-        released_at:   impl Deref<Target = [R64; 2]>,
-        old_selection: Option<&[usize]>
-    ) -> AppResult<Option<AppAction>> {
-        if !cursor.meta {return Ok(None)}
-
-        let delta = released_at.sub(&pressed_at);
-        Ok(if delta.all(|x| *x == 0) {
-            if !editor.selection().is_empty() || old_selection.map_or(false, |x| !x.is_empty()) {
-                return Ok(None)
-            }
-            let [offset, y] = *released_at;
-            let value = Note::from_index(y.into()).recip();
-            let block_id = editor.add_point(Self{offset, value, len: r64![1]});
-            ctx.emit_event(AppEvent::RedrawEditorPlane);
-            Some(AppAction::AddNoteBlock{block_id, offset, value})
-        } else {
-            ctx.emit_event(AppEvent::RedrawEditorPlane);
-            let mut removed = Vec::with_capacity(editor.selection().len());
-            let (delta_x, delta_y) = (delta[0], isize::from(delta[1]));
-            editor.filter_selected(|x| x.1.len > 0, |mut x| {
-                x.1.len -= delta_x;
-                x.1.value += delta_y;
-                removed.push(x)
-            });
-            match removed.len() {
-                0 => None,
-                n if n == removed.capacity() => Some(AppAction::RemoveNoteBlocks(removed.into_boxed_slice())),
-                _ => Some(AppAction::StretchNoteBlocks{delta_x, delta_y, removed: removed.into_boxed_slice()})
-            }
-        })
-    }
-
-    fn on_plane_hover(
-        editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        cursor: Cursor,
-        _:      impl Deref<Target = [R64; 2]>,
-        first:  bool
-    ) -> AppResult<()> {
-        if !first && editor.last_cursor().is_some_and(|x| *x == *cursor) {return Ok(())}
-        let [m, a] = match *cursor {
-            Buttons{left: false, shift: true, ..} =>
-                [Self::EDITOR_NAME.into(),
-                "Press and hold to zoom".into()],
-            Buttons{left: true, shift: true, ..} =>
-                [Cow::from(Self::EDITOR_NAME) + ": zooming",
-                "Release to stop".into()],
-            Buttons{left: false, meta: false, ..} =>
-                [Self::EDITOR_NAME.into(),
-                "Hold & drag to move around (press Meta for actions)".into()],
-            Buttons{left: false, meta: true, ..} =>
-                [Self::EDITOR_NAME.into(),
-                "Click to add note, hold & drag to select".into()],
-            Buttons{left: true, meta: false, ..} => 
-                [Cow::from(Self::EDITOR_NAME) + ": Moving",
-                "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                [Cow::from(Self::EDITOR_NAME) + ": Selecting",
-                "Release to select".into()]
-        };
-        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
-    }
-
-    fn on_point_hover(
-        editor:   &mut GraphEditor<Self>,
-        ctx:      &mut AppContext,
-        cursor:   Cursor,
-        point_id: usize,
-        first:    bool
-    ) -> AppResult<()> {
-        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return Ok(())}
-        let m = Self::fmt_loc(unsafe{editor.get_unchecked(point_id)}.loc());
-        let [m, a] = match *cursor {
-            Buttons{left: false, ..} =>
-                [m.into(), "LMB to move, LMB + Meta to stretch".into()],
-            Buttons{left: true, meta: false, ..} =>
-                [(m + ": Moving").into(), "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                [(m + ": Stretching").into(), "Release to stop".into()],
-        };
-        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
-    }
-
-    fn on_selection_hover(
-        editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        cursor: Cursor,
-        first:  bool
-    ) -> AppResult<()> {
-        if !first && editor.last_cursor().is_some_and(|x| x.left == cursor.left) {return Ok(())}
-        let m = {let n = editor.selection().len(); format!("{n} note{}", if n == 1 {""} else {"s"})};
-        let [m, a] = match *cursor {
-            Buttons{left: false, ..} =>
-                [m.into(), "LMB to move, LMB + Meta to stretch".into()],
-            Buttons{left: true, meta: false, ..} =>
-                [(m + ": Moving").into(), "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                [(m + ": Stretching").into(), "Release to stop".into()],
-        };
-        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
     }
 
     fn on_redraw(
@@ -284,7 +179,7 @@ impl NoteSound {
 
     pub fn prepare(&self) -> AppResult<()> {Ok(())}
 
-    pub fn play(&mut self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> AppResult<()> {
+    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> AppResult<()> {
         let pat = self.pattern.get()?;
         let Some(last) = pat.last() else {return Ok(())};
         let pat_len = (last.offset + last.len).to_secs(bps);
@@ -300,11 +195,10 @@ impl NoteSound {
                 at += self.attack.to_secs(bps);
                 gain.linear_ramp_to_value_at_time(*self.volume, *at)?;
                 at += self.decay.to_secs(bps);
-                self.sustain *= self.volume;
-                gain.linear_ramp_to_value_at_time(*self.sustain, *at)?;
+                let sus = self.sustain * self.volume;
+                gain.linear_ramp_to_value_at_time(*sus, *at)?;
                 at = start + len.to_secs(bps);
-                gain.set_value_at_time(*self.sustain, *at)?;
-                at += self.release.to_secs(bps);
+                gain.set_value_at_time(*sus, *at - *self.release.to_secs(bps))?;
                 gain.linear_ramp_to_value_at_time(0.0, *at)?;
 
                 let block_core = ctx.create_oscillator()?;
@@ -431,29 +325,6 @@ impl NoteSound {
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }
 
-                        AppAction::AddNoteBlock{block_id, ..} => {
-                            pat.remove_points(once(block_id), drop)?;
-                            ctx.emit_event(AppEvent::RedrawEditorPlane)
-                        }
-
-                        AppAction::RemoveNoteBlocks(ref blocks) => {
-                            for &(at, b) in blocks.iter() {
-                                unsafe{pat.insert_point(at, b)}
-                            }
-                            ctx.emit_event(AppEvent::RedrawEditorPlane)
-                        }
-
-                        AppAction::StretchNoteBlocks{delta_x, delta_y, ref removed} => {
-                            for mut b in pat.iter_selection_mut() {
-                                *b.inner() -= delta_x;
-                                *b.y() += delta_y;
-                            }
-                            for &(id, b) in removed.iter() {
-                                unsafe{pat.insert_point(id, b)}
-                            }
-                            pat.expand_selection(removed.iter().map(|(id, _)| *id))?;
-                        }
-
                         _ => (),
                     }
                 }
@@ -485,24 +356,6 @@ impl NoteSound {
                         AppAction::SetRepCount{to, ..} => {
                             self.rep_count = to;
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
-                        }
-
-                        AppAction::AddNoteBlock{offset, value, block_id} => {
-                            unsafe{pat.insert_point(block_id, NoteBlock{offset, value, len: r64![1]})};
-                            ctx.emit_event(AppEvent::RedrawEditorPlane)
-                        }
-
-                        AppAction::RemoveNoteBlocks(ref blocks) => {
-                            pat.remove_points(blocks.iter().map(|(id, _)| *id), drop)?;
-                            ctx.emit_event(AppEvent::RedrawEditorPlane)
-                        }
-
-                        AppAction::StretchNoteBlocks{delta_x, delta_y, ref removed} => {
-                            pat.remove_points(removed.iter().map(|(id, _)| *id), drop)?;
-                            for mut b in pat.iter_selection_mut() {
-                                *b.inner() += delta_x;
-                                *b.y() -= delta_y;
-                            }
                         }
 
                         _ => (),

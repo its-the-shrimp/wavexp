@@ -1,15 +1,14 @@
 use std::{
     borrow::Cow,
     slice::from_ref,
-    mem::{take, MaybeUninit},
+    mem::take,
     cmp::Ordering,
     iter::once,
     num::NonZeroUsize,
-    rc::Rc};
+    rc::Rc,
+    any::Any};
 use js_sys::Function;
-use wasm_bindgen::{
-    closure::Closure,
-    JsCast};
+use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::{
     PointerEvent,
     MouseEvent,
@@ -38,17 +37,17 @@ use wavexp_utils::{
     ToAttrValue,
     now,
     ArrayExt,
-    js_function, cell::Shared};
+    js_function,
+    cell::Shared};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, Note, AudioInput},
+    sound::{MSecs, Secs, Beats, SoundType, AudioInput},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
     input::{Button, Switch, GraphEditorCanvas, AudioInputButton},
     sequencer::{SoundBlock, Sequencer},
-    img,
-    sound_types::{NoteBlock, NoiseBlock, CustomBlock}};
+    img};
 
 /// the all-encompassing event type for the app
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub enum AppEvent {
     /// emitted every frame, i.e. roughly every 17 ms
     /// the field is the current time, but in milliseconds, unlike `AppContext::now`
@@ -147,8 +146,16 @@ pub enum AppEvent {
     ReverseInput
 }
 
+/// For `AppAction::RemovePoint`
+#[derive(Debug, Clone)]
+pub struct RemovedPoint {
+    pub point: Rc<dyn Any>,
+    pub index: usize,
+    pub was_selected: bool
+}
+
 /// a globally registered cancelable action
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum AppAction {
     /// start the session; added to the action stack by default and is always the first one
     Start,
@@ -156,25 +163,13 @@ pub enum AppAction {
     DragPlane{editor_id: usize,
         offset_delta: Point, scale_delta: [R64; 2]},
     /// drag a point of a graph editor
-    DragPoint{editor_id: usize, point_id: usize,
-        delta: [R64; 2],
-        meta: bool},
+    DragPoint{editor_id: usize, point_id: usize, delta: [R64; 2]},
     /// drag selection in a graph editor
-    DragSelection{editor_id: usize,
-        delta: [R64; 2],
-        meta: bool},
+    DragSelection{editor_id: usize, delta: [R64; 2]},
     /// change selection in a graph editor
     SetSelection{editor_id: usize,
         prev_ids: Box<[usize]>, prev_src: [R64; 2], prev_size: [R64; 2],
         cur_ids: Box<[usize]>,  cur_src: [R64; 2],  cur_size: [R64; 2]},
-    /// add a sound block to the sequencer
-    AddSoundBlock{block_id: usize, offset: R64, layer: i32},
-    /// add a note block to a graph editor
-    AddNoteBlock{block_id: usize, offset: R64, value: Note},
-    /// add a noise block to a graph editor
-    AddNoiseBlock{block_id: usize, offset: R64, pitch: Note},
-    /// add a custom audio block to a graph editor
-    AddCustomBlock(usize, CustomBlock),
     /// select a sound block
     Select{from: Option<usize>, to: Option<usize>,
         prev_selected_tab: usize},
@@ -182,10 +177,6 @@ pub enum AppAction {
     SetBlockType(SoundType),
     /// switch tabs in the side editor
     SwitchTab{from: usize, to: usize},
-    /// change the length of note blocks, optionally removing some
-    StretchNoteBlocks{delta_x: R64, delta_y: isize, removed: Box<[(usize, NoteBlock)]>},
-    /// change the length of noise blocks, optionally removing some
-    StretchNoiseBlocks{delta_x: R64, delta_y: isize, removed: Box<[(usize, NoiseBlock)]>},
     /// change sound's volume
     SetVolume{from: R32, to: R32},
     /// change sound's attack time
@@ -204,14 +195,6 @@ pub enum AppAction {
     SetMasterVolume{from: R32, to: R32},
     /// set repetition count of a sound block
     SetRepCount{from: NonZeroUsize, to: NonZeroUsize},
-    /// remove a sound block
-    RemoveSoundBlock{block_id: usize, block: SoundBlock, prev_selected_tab: usize},
-    /// remove note blocks
-    RemoveNoteBlocks(Box<[(usize, NoteBlock)]>),
-    /// remove custom blocks
-    RemoveCustomBlocks(Box<[(usize, CustomBlock)]>),
-    /// remvove noise blocks
-    RemoveNoiseBlocks(Box<[(usize, NoiseBlock)]>),
     /// set playback speed of the audio source of a Custom Audio sound block
     SetSpeed{from: R32, to: R32},
     /// register a new audio input
@@ -225,7 +208,11 @@ pub enum AppAction {
     /// change the name of the currently edited audio input.
     SetInputName{from: Rc<str>, to: Rc<str>},
     /// reverse the currently edited audio input.
-    ReverseInput
+    ReverseInput,
+    /// add a point onto a graph editor.
+    AddPoint{editor_id: usize, point_id: usize, point_loc: [R64; 2]},
+    /// remove a point from a graph editor.
+    RemovePoint(usize, Box<[RemovedPoint]>)
 }
 
 impl AppAction {
@@ -246,30 +233,12 @@ impl AppAction {
                 Some("Drag Selection"),
             Self::SetSelection{..} =>
                 None, // "Set Selection"
-            Self::AddSoundBlock{..} =>
-                Some("Add Sound Block"),
-            Self::AddNoteBlock{..} =>
-                Some("Add Note Block"),
             Self::Select{..} =>
                 None, // "Open Sound Block Editor" | "Close Sound Block Editor"
             Self::SetBlockType(..) =>
                 Some("Set Sound Block Type"),
             Self::SwitchTab{..} =>
                 None, // "Switch Tabs",
-            Self::RemoveSoundBlock{..} =>
-                Some("Remove Sound Block"),
-            Self::RemoveNoteBlocks(..) =>
-                Some("Remove Note Blocks"),
-            Self::StretchNoteBlocks{removed, ..} => Some(if removed.is_empty() {
-                "Stretch Note Blocks"
-            } else {
-                "Stretch & Remove Note Blocks"
-            }),
-            Self::StretchNoiseBlocks{removed, ..} => Some(if removed.is_empty() {
-                "Stretch Noise Blocks"
-            } else {
-                "Stretch & Remove Noise Blocks"
-            }),
             Self::SetVolume{..} =>
                 Some("Set Volume"),
             Self::SetAttack{..} =>
@@ -288,20 +257,6 @@ impl AppAction {
                 Some("Set Master Volume"),
             Self::SetRepCount{..} =>
                 Some("Set Sound Block Repetition Count"),
-            Self::RemoveCustomBlocks(removed) => Some(if removed.len() == 1 {
-                "Remove Custom Audio Block"
-            } else {
-                "Remove Custom Audio Blocks"
-            }),
-            Self::RemoveNoiseBlocks(removed) => Some(if removed.len() == 1 {
-                "Remove Noise Block"
-            } else {
-                "Remove Noise Blocks"
-            }),
-            Self::AddCustomBlock(..) =>
-                Some("Add Custom Audio Block"),
-            Self::AddNoiseBlock{..} =>
-                Some("Add Noise Block"),
             Self::SetSpeed{..} =>
                 Some("Set Custom Audio's Playback Speed"),
             Self::AddInput(..) =>
@@ -315,7 +270,14 @@ impl AppAction {
             Self::SetInputName{..} =>
                 Some("Rename Audio Input"),
             Self::ReverseInput =>
-                Some("Reverse Audio Input")
+                Some("Reverse Audio Input"),
+            Self::AddPoint{..} =>
+                Some("Add a point to an editor plane"),
+            Self::RemovePoint(_, points) => Some(if points.len() == 1 {
+                "Remove a point from an editor plane"
+            } else {
+                "Remove points from an editor plane"
+            })
         }
     }
 
@@ -590,16 +552,10 @@ impl Component for App {
                     let mut pattern = sequencer.pattern().get_mut()?;
                     let id = self.selected_block.take().to_app_result()?;
                     let block_id = *pattern.selection().get(id).to_app_result()?;
-                    // Safety: `id` comes from `pattern.selection()`, thus it's guaranteed to be a
-                    // valid index in the `pattern` itself.
-                    let mut removed = MaybeUninit::uninit();
-                    pattern.remove_points(once(block_id), |(_, x)| _ = removed.write(x))?;
-                    let prev_selected_tab = self.ctx.selected_tab.take();
-                    self.ctx.register_action(AppAction::RemoveSoundBlock{
-                        block_id,
-                        block: unsafe{removed.assume_init()},
-                        prev_selected_tab
-                    });
+                    let action = pattern.remove_points(once(block_id))?;
+                    self.ctx.register_action(action);
+                    let from = self.ctx.selected_tab.take();
+                    self.ctx.register_action(AppAction::SwitchTab{from, to: 0});
                 }
 
                 AppEvent::Enter(id, _) => {
@@ -646,13 +602,6 @@ impl Component for App {
                             self.ctx.selected_tab = prev_selected_tab;
                         }
 
-                        AppAction::RemoveSoundBlock{block_id, ref block, prev_selected_tab} => unsafe {
-                            self.sequencer.get()?.pattern().get_mut()?
-                                .insert_point(block_id, block.clone());
-                            self.selected_block = Some(block_id);
-                            self.ctx.selected_tab = prev_selected_tab;
-                        }
-
                         AppAction::SwitchTab{from, ..} =>
                             self.ctx.selected_tab = from,
 
@@ -676,13 +625,6 @@ impl Component for App {
                             self.ctx.selected_tab = 0;
                         }
                         
-                        AppAction::RemoveSoundBlock{block_id, ..} => {
-                            self.sequencer.get()?.pattern().get_mut()?
-                                .remove_points(once(block_id), drop)?;
-                            self.selected_block = None;
-                            self.ctx.selected_tab = 0;
-                        }
-
                         AppAction::SwitchTab{to, ..} =>
                             self.ctx.selected_tab = to,
 

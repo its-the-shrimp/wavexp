@@ -345,7 +345,7 @@ pub struct GraphEditorCanvasProps<T: GraphPoint> {
     pub id: Option<&'static str>
 }
 
-impl<T: 'static + GraphPoint> Component for GraphEditorCanvas<T> {
+impl<T: GraphPoint> Component for GraphEditorCanvas<T> {
     type Message = ();
     type Properties = GraphEditorCanvasProps<T>;
 

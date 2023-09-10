@@ -1,11 +1,12 @@
 use std::{
-    iter::Iterator,
+    iter::{Iterator, once},
     slice::{from_raw_parts, from_mut, Iter},
     mem::{replace, take},
-    ops::{Range, Deref, Not, DerefMut},
-    fmt::Debug,
+    ops::{Range, Deref, DerefMut, RangeInclusive},
+    fmt::{Debug, Formatter, self},
     cmp::{min, Ordering},
-    cell::{LazyCell, Cell}};
+    cell::{LazyCell, Cell},
+    rc::Rc, borrow::Cow};
 use web_sys::{
     HtmlCanvasElement,
     ImageData,
@@ -29,22 +30,21 @@ use wavexp_utils::{
     ArrayFrom,
     IntoArray,
     SliceRef,
-    SliceMove,
     RoundTo,
     FlippedArray,
     default,
     cell::WasmCell,
-    Alias,
     ToEveryNth,
-    ToIterIndicesMut,
     r64,
     js_assert,
     eval_once,
     js_array,
-    AppResult};
+    AppResult,
+    AppResultUtils};
 use crate::{
-    global::{AppEvent, AppContext, AppAction},
-    input::{Buttons, Cursor}, sequencer::Sequencer};
+    global::{AppEvent, AppContext, AppAction, RemovedPoint},
+    input::{Buttons, Cursor},
+    sequencer::Sequencer};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Rgba {
@@ -73,8 +73,8 @@ impl From<Rgba> for u32 {
 	}
 }
 
-impl std::fmt::Display for Rgba {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Rgba {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		write!(f, "#{:02X}{:02X}{:02X}{:02X}", self.r, self.g, self.b, self.a)
 	}
 }
@@ -201,7 +201,7 @@ impl HintHandler {
 }
 
 /// data that can be edited with a generic graph editor defined below
-pub trait GraphPoint: Sized + Ord {
+pub trait GraphPoint: Sized + Clone + Ord + 'static {
     /// the name of the plane that will be displayed as a hint when hovered over it
     const EDITOR_NAME: &'static str;
     /// bounds for the points along the X axis
@@ -228,6 +228,9 @@ pub trait GraphPoint: Sized + Ord {
     /// Such functions are `in_hitbox` and `on_redraw`.
     type VisualContext: Copy;
 
+    /// Creates a new point from the given user coordinates.
+    fn create(editor: &GraphEditor<Self>, at: [R64; 2]) -> Self;
+
     /// inner data of the point
     fn inner(&self) -> &Self::Inner;
     /// mutable inner data of the point
@@ -241,10 +244,10 @@ pub trait GraphPoint: Sized + Ord {
     /// change the location of the point in user coordinates when moved in the UI
     /// `meta` signifies whether the meta key was held while moving the point
     fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], meta: bool);
-    /// returns `true` if the given user coordinates are inside the hitbox of the point
+    /// returns `true` if the given `area` in user coordinates overlaps with the hitbox of the point.
     fn in_hitbox(
         &self,
-        point:      [R64; 2],
+        area:       &[RangeInclusive<R64>; 2],
         ctx:        &AppContext,
         sequencer:  &Sequencer,
         visual_ctx: Self::VisualContext
@@ -261,55 +264,9 @@ pub trait GraphPoint: Sized + Ord {
         delta:  [R64; 2],
         point:  Option<usize>
     ) -> AppResult<()> {Ok(())} 
-    /// Handle the editor space being clicked, i.e. pressed & released.
-    /// The current selection will be available in the `editor` itself.
-    /// If `old_selection` is `None`, it means that it didn't change.
-    /// If `old_selection` is `Some`, it doesn't mean that `editor.selection != old_selection`,
-    /// it just means that selection was changed.
-    /// Returns the action to register after the click; if `None` is returned, the default action
-    /// will be chosen by the graph editor itself.
-    #[allow(unused_variables)] fn on_click(
-        editor:        &mut GraphEditor<Self>,
-        ctx:           &mut AppContext,
-        cursor:        Cursor,
-        pressed_at:    impl Deref<Target = [R64; 2]>,
-        released_at:   impl Deref<Target = [R64; 2]>,
-        old_selection: Option<&[usize]>
-    ) -> AppResult<Option<AppAction>> {Ok(None)}
-    /// Handle cursor moving across the editor plane (not across a selection or a point).
-    /// `loc` is in user coordinates; the location in canvas coordinates is in `cursor`.
-    /// `first` signifies whether this call is the first consecutive one.
-    /// Note: if shift's held down, hovering over a point/selection won't count as such, and this
-    /// Handler will still be called instead of `on_(point/selection)_hover`.
-    #[allow(unused_variables)] fn on_plane_hover(
-        editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        cursor: Cursor,
-        loc:    impl Deref<Target = [R64; 2]>,
-        first:  bool
-    ) -> AppResult<()> {Ok(())}
-    /// Handle cursor moving across a point on the editor plane.
-    /// `point_id` is the index of the point in the editor.
-    /// `first` signifies whether this call is the first consecutive one.
-    #[allow(unused_variables)] fn on_point_hover(
-        editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        cursor: Cursor,
-        point_id: usize,
-        first: bool
-    ) -> AppResult<()> {Ok(())}
-    /// Handle cursor moving across a selection on the editor plane.
-    /// The selection itself is available in `editor`.
-    /// `first` signifies whether this call is the first consecutive one.
-    #[allow(unused_variables)] fn on_selection_hover(
-        editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        cursor: Cursor,
-        first:  bool
-    ) -> AppResult<()> {Ok(())}
     /// Handle request for a redraw.
     /// `editor` is the editor that needs redraw.
-    /// `ctx` is the application context of the editor.
+    /// `ctx` is the application context.
     /// `sequencer` is the the app's global sequencer.
     /// `canvas_size` is canvas's dimensions in pixels.
     /// Points on a canvas must be confined to these dimensions to appear on the screen.
@@ -326,6 +283,14 @@ pub trait GraphPoint: Sized + Ord {
         dotted:      &Path2d,
         visual_ctx:  Self::VisualContext
     ) -> AppResult<()>;
+    /// Handle change of selection area.
+    /// `editor` is the editor, the selection area of which was changed.
+    /// `ctx` is the application context.
+    /// The current selection can be obtained through `editor.selection()`.
+    #[allow(unused_variables)] fn on_selection_change(
+        editor: &mut GraphEditor<Self>,
+        ctx:    &mut AppContext,
+    ) -> AppResult<()> {Ok(())}
 
     /// `loc` is in user coordinates
     fn fmt_loc(loc: [R64; 2]) -> String;
@@ -347,7 +312,7 @@ impl<'a, T: GraphPoint> Deref for GraphPointView<'a, T> {
 
 impl<'a, T: GraphPoint> GraphPointView<'a, T> {
     pub fn inner(&mut self) -> &mut T::Inner {self.0.inner_mut()}
-    pub fn y(&mut self) -> &mut T::Y {self.0.y_mut()}
+    //pub fn y(&mut self) -> &mut T::Y {self.0.y_mut()}
 
     // /// the caller must ensure that the point retains its sorted placement
     // pub unsafe fn unlock(self) -> &'a mut T {self.0}
@@ -359,10 +324,18 @@ type OffsetCanvasPoint = Point;
 /// in user coordinates, aligned to snap step and limited to bounds specified by `GraphPoint::(X/Y)_BOUND`
 type ConfinedAlignedUserPoint = [R64; 2];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SpecialAction {
+    #[default] Select,
+    Add,
+    Remove
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 enum Focus {
     #[default] None,
     Zoom{init_offset: Point, pivot: OffsetCanvasPoint, init_scale: [R64; 2]},
+    // TODO: add `meta` here to ignore meta key held down after the left mouse button
     Plane{origin: ConfinedAlignedUserPoint, init_offset: Point},
     Point{id: usize, last_loc: ConfinedAlignedUserPoint, origin: ConfinedAlignedUserPoint, meta: bool},
     Selection{origin: ConfinedAlignedUserPoint, end: ConfinedAlignedUserPoint, meta: bool}
@@ -383,9 +356,10 @@ pub struct AnyGraphEditor {
     selection_size: [R64; 2],
     last_cursor: Cursor,
     redraw: bool,
-    changed_focus: bool,
+    update_hint: bool,
     grid: Option<(Path2d, [R64; 2])>,
-    id: usize
+    id: usize,
+    special_action: SpecialAction
 }
 
 impl AnyGraphEditor {
@@ -407,10 +381,6 @@ impl AnyGraphEditor {
     /// Coefficients by which a user coordinate point must be
     /// multiplied to get a canvas coordinate point.
     pub fn scale(&self) -> [R64; 2] {self.scale}
-
-    pub fn last_cursor(&self) -> Option<Cursor> {
-        matches!(self.focus, Focus::None).not().then_some(self.last_cursor)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -467,87 +437,87 @@ impl<T: GraphPoint> GraphEditor<T> {
         self.data.iter_mut().map(GraphPointView)
     }
 
-    pub fn iter_selection_mut(&mut self) -> impl Iterator<Item=GraphPointView<'_, T>> {
+    /*pub fn iter_selection_mut(&mut self) -> impl Iterator<Item=GraphPointView<'_, T>> {
         unsafe{self.data.iter_indices_unchecked_mut(&self.inner.selection)}
             .map(GraphPointView)
-    }
+    }*/
 
-    pub fn expand_selection(&mut self, ids: impl Iterator<Item = usize>) -> AppResult<()> {
+    /*pub fn expand_selection(&mut self, ids: impl Iterator<Item = usize>) -> AppResult<()> {
         let len = self.data.len();
         Ok(for id in ids {
             js_assert!(id < len)?;
             self.selection.push_sorted(id);
         })
-    }
+    }*/
 
-    /// # Safety:
+    /*/// # Safety:
     /// `point` must maintin sorted order at index `at`.
     pub unsafe fn insert_point(&mut self, at: usize, point: T) {
         self.redraw = true;
         self.data.insert(at, point);
         SliceMove{from: self.data.len(), to: at}.apply(&mut self.selection)
-    }
+    }*/
 
-    /// returns the index at which the new point will be available
+    /*/// returns the index at which the new point will be available
     pub fn add_point(&mut self, point: T) -> usize {
         self.redraw = true;
         let to = self.data.push_sorted(point);
         SliceMove{from: self.data.len(), to}.apply(&mut self.selection);
         to
-    }
+    }*/
 
-    /// removes the selection area from the plane (not the selected points)
-    pub fn clear_selection_area(&mut self) {self.selection_size = default()}
+    /*/// removes the selection area from the plane (not the selected points)
+    pub fn clear_selection_area(&mut self) {self.selection_size = default()}*/
 
     /// `to_remove` accepts an ID of the selected point and a reference to it,
     /// and returns `true` if the point stays or `false` if the point must be removed.
     /// `sink` is the function that will be called on every removed point.
     /// If there's nothing to do with the points, standard library's `drop` function can be passed.
-    pub fn filter_selected(
-        &mut self,
-        mut to_remove: impl FnMut((usize, &T)) -> bool,
-        mut sink: impl FnMut((usize, T))
-    ) {
+    pub fn filter_selected(&mut self, mut to_remove: impl FnMut((usize, &T)) -> bool) -> AppAction {
+        let mut removed = vec![];
         for i in (0 .. self.selection.len()).rev() {
             unsafe {
-                let selected_id = *self.selection.get_unchecked(i);
-                if !to_remove((selected_id, self.get_unchecked(selected_id))) {
-                    sink((selected_id, self.data.remove_unchecked(selected_id)));
+                let index = *self.selection.get_unchecked(i);
+                if !to_remove((index, self.get_unchecked(index))) {
+                    let point = Rc::new(self.data.remove_unchecked(index));
+                    removed.push(RemovedPoint{point, index, was_selected: true});
                     self.selection.remove_unchecked(i);
                     self.redraw = true;
                 }
             }
         }
+        AppAction::RemovePoint(self.id, removed.into_boxed_slice())
     }
 
     /// `to_remove` iterates over IDs of points that must be removed.
-    /// `sink` is the function that will be called on every removed point.
-    /// If there's nothing to do with the points, standard library's `drop` function can be passed.
-    pub fn remove_points(
-        &mut self,
-        to_remove: impl Iterator<Item = usize> + DoubleEndedIterator,
-        mut sink: impl FnMut((usize, T))
-    ) -> AppResult<()> {
+    /// Returns the action that represents the removal of the points.
+    pub fn remove_points(&mut self, to_remove: impl Iterator<Item = usize> + DoubleEndedIterator)
+    -> AppResult<AppAction> {
         self.redraw = true;
         let GraphEditor{inner, data} = self;
         let mut ids_iter = inner.selection.iter_mut().rev();
         let mut prev_id = data.len();
-        Ok(for id in to_remove.rev() {
-            js_assert!(id < replace(&mut prev_id, id))?;
-            sink((id, data.try_remove(id)?));
-            let rem = loop {
-                let Some(x) = ids_iter.next() else {break 0};
-                match id.cmp(x) {
+        let mut removed = vec![];
+        for index in to_remove.rev() {
+            js_assert!(index < replace(&mut prev_id, index))?;
+            let (rem, was_selected) = loop {
+                let Some(x) = ids_iter.next() else {break (0, false)};
+                match index.cmp(x) {
                     Ordering::Less =>
                         *x -= 1,
-                    Ordering::Equal =>
-                        break unsafe{let x = ids_iter.len(); inner.selection.remove_unchecked(x); x},
+                    Ordering::Equal => break unsafe{
+                        let x = ids_iter.len();
+                        inner.selection.remove_unchecked(x);
+                        (x, true)
+                    },
                     Ordering::Greater =>
-                        break ids_iter.len()
+                        break (ids_iter.len(), false)
                 }
             };
+            removed.push(RemovedPoint{point: Rc::new(data.try_remove(index)?), index, was_selected});
             ids_iter = inner.selection.get_mut(..rem).unwrap_or(&mut []).iter_mut().rev();
-        })
+        }
+        Ok(AppAction::RemovePoint(self.id, removed.into_boxed_slice()))
     }
 
     pub fn force_redraw(&mut self) {self.redraw = true}
@@ -580,55 +550,222 @@ impl<T: GraphPoint> GraphEditor<T> {
         visual_ctx: T::VisualContext
     ) -> AppResult<Option<SliceRef<'_, T>>> {
         Ok(self.data.iter().enumerate()
-            .try_find(|x| x.1.in_hitbox(loc, ctx, sequencer, visual_ctx))?
+            .try_find(|x| x.1.in_hitbox(&loc.map(|x| x ..= x), ctx, sequencer, visual_ctx))?
             .map(|(id, x)| unsafe{SliceRef::raw(x, id)}))
     }
 
     fn point_in_selection(&self, loc: ConfinedAlignedUserPoint) -> bool {
-        loc.sub(&self.selection_src).zip_fold(true, self.selection_size, |r, x, y| r && 0.0 <= *x && x <= y)
+        (r64![0] ..= self.selection_size[0]).contains(&(loc[0] - self.selection_src[0]))
+            && (r64![0] ..= self.selection_size[1]).contains(&(loc[1] - self.selection_src[1]))
+        /*loc.sub(&self.selection_src)
+            .zip_fold(true, self.selection_size, |r, x, y| r && 0.0 <= *x && x <= y)*/
     }
 
-    fn set_zoom_focus(
-        &mut self,
-        ctx: &mut AppContext,
-        cursor: Cursor,
-        loc: impl Deref<Target = [R64; 2]>
-    ) -> AppResult<()> {
-        let first = !matches!(self.focus, Focus::Plane{..});
-        self.focus = Focus::Zoom{init_offset: self.offset,
+    fn update_hint(&self, ctx: &AppContext, cursor: Cursor) {
+        let (main, aux) = match self.focus {
+            Focus::None => return,
+
+            Focus::Zoom{..} => 
+                (Cow::from(T::EDITOR_NAME) + ": zooming",
+                    if cursor.left {"Release to stop"}
+                    else {"Press and hold left mouse button to zoom"}),
+
+            Focus::Plane{..} => {
+                let main = Cow::from(T::EDITOR_NAME);
+                match *cursor {
+                    Buttons{left: false, meta: false, ..} => (main, match self.special_action {
+                        SpecialAction::Select => "Shift - zoom, Meta - select points",
+                        SpecialAction::Add    => "Shift - zoom, Meta - add a point",
+                        SpecialAction::Remove => "Shift - zoom, Meta - remove points",
+                    }),
+
+                    Buttons{left: false, meta: true, ..} => match self.special_action {
+                        // TODO: find a way to replace `format!` with smth const
+                        SpecialAction::Select =>
+                            (main + ": selecting", "Press and hold left mouse button to select"),
+                        SpecialAction::Add =>
+                            (main + ": adding", "Click to add a point"),
+                        SpecialAction::Remove =>
+                            (main + ": removing", "Click on a point to remove it")
+                    }
+
+                    Buttons{left: true, meta: false, ..} =>
+                        (main + ": moving", "Release to stop"),
+
+                    Buttons{left: true, meta: true, ..} => match self.special_action {
+                        SpecialAction::Select =>
+                            (main + ": selecting", "Release to select"),
+                        SpecialAction::Add =>
+                            (main + ": adding a point", "Release to add a point"),
+                        SpecialAction::Remove =>
+                            (main + ": removing a point", "Release and click on a point to remove it"),
+                    }
+                }
+            }
+
+            Focus::Point{id, ..} => {
+                let main = || Cow::from(T::fmt_loc(unsafe{self.data.get_unchecked(id)}.loc()));
+                match *cursor {
+                    Buttons{left: false, meta: false, ..} => (main(), match self.special_action {
+                        SpecialAction::Select => "Shift - zoom, Meta - select points",
+                        SpecialAction::Add    => "Shift - zoom, Meta - add a point",
+                        SpecialAction::Remove => "Shift - zoom, Meta - remove points",
+                    }),
+
+                    Buttons{left: false, meta: true, ..} => match self.special_action {
+                        // TODO: find a way to replace `format!` with smth const
+                        SpecialAction::Select =>
+                            (Cow::from(T::EDITOR_NAME) + ": selecting",
+                                "Press and hold left mouse button to select"),
+                        SpecialAction::Add =>
+                            (Cow::from(T::EDITOR_NAME) + ": adding a point",
+                                "Click on empty space to add a point"),
+                        SpecialAction::Remove =>
+                            (main() + ": removing a point", "Click to remove this point")
+                    }
+
+                    Buttons{left: true, meta: false, ..} =>
+                        (main() + ": moving", "Release to stop"),
+
+                    Buttons{left: true, meta: true, ..} => match self.special_action {
+                        SpecialAction::Select =>
+                            (Cow::from(T::EDITOR_NAME) + ": selecting", "Release to select"),
+                        SpecialAction::Add =>
+                            (Cow::from(T::EDITOR_NAME) + ": adding a point",
+                                "Release and click on empty space to add a point"),
+                        SpecialAction::Remove =>
+                            (main() + ": removing a point", "Release to remove this point")
+                    }
+                }
+            }
+
+            Focus::Selection{..} => {
+                let main = || {
+                    let len = self.selection.len();
+                    Cow::from(format!("{len} block{}", if len == 1 {""} else {"s"}))
+                };
+                match *cursor {
+                    Buttons{left: false, meta: false, ..} => (main(), match self.special_action {
+                        SpecialAction::Select => "Shift - zoom, Meta - select points",
+                        SpecialAction::Add    => "Shift - zoom, Meta - add a point",
+                        SpecialAction::Remove => "Shift - zoom, Meta - remove points",
+                    }),
+
+                    Buttons{left: false, meta: true, ..} => match self.special_action {
+                        // TODO: find a way to replace `format!` with smth const
+                        SpecialAction::Select =>
+                            (Cow::from(T::EDITOR_NAME) + ": selecting",
+                                "Press and hold left mouse button to select"),
+                        SpecialAction::Add =>
+                            (Cow::from(T::EDITOR_NAME) + ": adding a point",
+                                "Click on empty space to add a point"),
+                        SpecialAction::Remove =>
+                            (main() + ": removing selection", "Click to remove this point")
+                    }
+
+                    Buttons{left: true, meta: false, ..} =>
+                        (main() + ": moving", "Release to stop"),
+
+                    Buttons{left: true, meta: true, ..} => match self.special_action {
+                        SpecialAction::Select =>
+                            (Cow::from(T::EDITOR_NAME) + ": selecting",
+                                "Release to select"),
+                        SpecialAction::Add =>
+                            (Cow::from(T::EDITOR_NAME) + ": adding a point",
+                                "Release and click on empty space to add a point"),
+                        SpecialAction::Remove =>
+                            (main() + ": removing selection", "Release to remove the selection")
+                    }
+                }
+            }
+        };
+        ctx.emit_event(AppEvent::SetHint(main, aux.into()));
+    }
+
+    fn set_zoom_focus(&mut self, cursor: Cursor) {
+        self.focus = Focus::Zoom{
             pivot: cursor.point + self.offset,
+            init_offset: self.offset,
             init_scale: self.scale};
-        self.changed_focus = true;
-        T::on_plane_hover(self, ctx, cursor, loc, first)
+        self.update_hint = true;
     }
 
-    fn set_plane_focus(
-        &mut self,
-        ctx: &mut AppContext,
-        cursor: Cursor,
-        loc: impl Deref<Target = [R64; 2]>
-    ) -> AppResult<()> {
+    fn set_plane_focus(&mut self) {
         self.focus = Focus::Plane{origin: default(), init_offset: default()};
-        self.changed_focus = true;
-        T::on_plane_hover(self, ctx, cursor, loc, true)
+        self.update_hint = true;
     }
 
-    fn set_point_focus(
-        &mut self,
-        ctx: &mut AppContext,
-        cursor: Cursor,
-        id: usize
-    ) -> AppResult<()> {
+    fn set_point_focus(&mut self, id: usize) {
         self.focus = Focus::Point{id, last_loc: default(), origin: default(), meta: false};
-        self.changed_focus = true;
-        T::on_point_hover(self, ctx, cursor, id, true)
+        self.update_hint = true;
     }
 
-    fn set_selection_focus(&mut self, ctx: &mut AppContext, cursor: Cursor)
-    -> AppResult<()> {
+    fn set_selection_focus(&mut self) {
         self.focus = Focus::Selection{origin: default(), end: default(), meta: false};
-        self.changed_focus = true;
-        T::on_selection_hover(self, ctx, cursor, true)
+        self.update_hint = true;
+    }
+
+    fn special_action_on_drag(
+        &mut self,
+        _ctx:       &mut AppContext,
+        _sequencer: &Sequencer,
+        _cur_loc:   [R64; 2]
+    ) -> AppResult<()> {
+        Ok(match self.special_action {
+            SpecialAction::Select => (),
+            SpecialAction::Add => (),
+            SpecialAction::Remove => ()
+        })
+    }
+
+    /// Executes the selected special action after a click.
+    fn special_action_on_click(
+        &mut self,
+        ctx:         &mut AppContext,
+        sequencer:   &Sequencer,
+        pressed_at:  [R64; 2],
+        released_at: [R64; 2],
+        visual_ctx:  impl Deref<Target = T::VisualContext>
+    ) -> AppResult<()> {
+        Ok(match self.special_action {
+            SpecialAction::Select => {
+                let area = [pressed_at, released_at].flipped()
+                    .map(|x| (x[0] ..= x[1]).ordered());
+                let prev_ids = self.inner.selection.to_box();
+                self.inner.selection = self.data.iter().enumerate()
+                    .filter_map(|(id, x)|
+                        x.in_hitbox(&area, ctx, sequencer, *visual_ctx)
+                            .report().unwrap_or(false).then_some(id))
+                    .collect();
+                let prev_src  = replace(&mut self.selection_src,
+                    area.clone().map(|x| x.into_inner().0));
+                let prev_size = replace(&mut self.selection_size,
+                    area.clone().map(|x| x.into_inner()).map(|(start, end)| end - start));
+                ctx.register_action(AppAction::SetSelection{
+                    editor_id: self.inner.id,
+                    prev_ids, prev_src, prev_size,
+                    cur_ids: self.selection.to_box(),
+                    cur_src: self.selection_src,
+                    cur_size: self.selection_size});
+                T::on_selection_change(self, ctx)?;
+            }
+
+            SpecialAction::Add => if !matches!(self.focus, Focus::Point{..}) {
+                let new = T::create(self, released_at);
+                let point_id = self.data.push_sorted(new);
+                ctx.register_action(AppAction::AddPoint{
+                    editor_id: self.inner.id,
+                    point_id, point_loc: released_at})
+            }
+
+            SpecialAction::Remove => match self.focus {
+                Focus::Point{id, ..} =>
+                    ctx.register_action(self.remove_points(once(id))?),
+                Focus::Selection{..} =>
+                    ctx.register_action(self.filter_selected(|_| true)),
+                _ => ()
+            }
+        })
     }
 
     fn handle_hover(
@@ -640,7 +777,6 @@ impl<T: GraphPoint> GraphEditor<T> {
     ) -> AppResult<()> {
         let Some(cursor) = cursor else {
             self.focus = Focus::None;
-            self.changed_focus = true;
             return Ok(())
         };
 
@@ -656,7 +792,7 @@ impl<T: GraphPoint> GraphEditor<T> {
             [T::X_BOUND, T::Y_BOUND].fit(cursor_point_user.floor_to(snap_step)));
 
         match &mut self.inner.focus {
-            Focus::None => self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))?,
+            Focus::None => self.set_plane_focus(),
 
             Focus::Zoom{init_offset, init_scale, pivot} => if cursor.left {
                 if !self.inner.last_cursor.left {
@@ -669,11 +805,13 @@ impl<T: GraphPoint> GraphEditor<T> {
                 let point = cursor.point + *init_offset - *pivot;
                 if !T::SCALE_X_BOUND.is_empty() {
                     self.inner.scale[0] = T::SCALE_X_BOUND.fit(r64![50] / size[1] * point.x + init_scale[0]);
-                    self.inner.offset.x = ((init_scale[0] - self.inner.scale[0]) * pivot.x / self.inner.scale[0] + init_offset.x).into();
+                    self.inner.offset.x = ((init_scale[0] - self.inner.scale[0])
+                        * pivot.x / self.inner.scale[0] + init_offset.x).into();
                 }
                 if !T::SCALE_Y_BOUND.is_empty() {
                     self.inner.scale[1] = T::SCALE_Y_BOUND.fit(r64![50] / size[0] * point.y + init_scale[1]);
-                    self.inner.offset.y = ((init_scale[1] - self.inner.scale[1]) * pivot.y / self.inner.scale[1] + init_offset.y).into();
+                    self.inner.offset.y = ((init_scale[1] - self.inner.scale[1])
+                        * pivot.y / self.inner.scale[1] + init_offset.y).into();
                 }
             } else {
                 if self.inner.last_cursor.left {
@@ -689,74 +827,30 @@ impl<T: GraphPoint> GraphEditor<T> {
                     *pivot = cursor.point;
                     self.redraw = true;
                 } else {
-                    self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))?
+                    self.set_plane_focus()
                 }
             }
 
             Focus::Plane{origin, init_offset} => match *cursor {
                 Buttons{shift: true, left: false, ..} =>
-                    self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))?,
+                    self.set_zoom_focus(cursor),
 
                 Buttons{left: false, meta, ..} => if self.inner.last_cursor.left {
-                    let cur_loc = *cursor_point_user;
+                    let cur_loc = *cursor_point_user_aligned_confined;
                     if self.inner.last_cursor.meta {
                         let origin = *origin;
-                        let end = *cursor_point_user_aligned_confined;
-                        let area = [origin, end].flipped().map(|x| (x[0] .. x[1]).ordered());
-                        let prev_src = replace(&mut self.inner.selection_src, area.clone().map(|x| x.start));
-                        let prev_size = replace(&mut self.inner.selection_size, area.clone().map(|x| x.end - x.start));
-
-                        let prev_ids = replace(&mut self.inner.selection, self.data.iter().enumerate()
-                            .filter_map(|(id, x)| x.loc().array_check_in(&area).map(|_| id))
-                            .collect()).to_box();
-                        if let Some(p) = self.point_by_pos(cur_loc, ctx, sequencer, *visual_ctx)? {
-                            self.set_point_focus(ctx, cursor, p.index())?
-                        } else {
-                            self.set_plane_focus(ctx, cursor, &end)?
-                        }
-
-                        let action = T::on_click(self, ctx, cursor,
-                            &origin, &end,
-                            Some(&prev_ids))?;
-                        ctx.register_action(action.unwrap_or_else(|| AppAction::SetSelection{
-                            editor_id: self.id,
-                            prev_ids, prev_src, prev_size,
-                            cur_ids: self.selection.to_box(),
-                            cur_src: self.selection_src,
-                            cur_size: self.selection_size}));
-                    } else if *init_offset != self.inner.offset {
+                        self.special_action_on_click(ctx, sequencer, origin, cur_loc, visual_ctx)?;
+                    } else {
                         let init_offset = *init_offset;
-                        let action = T::on_click(self, ctx, cursor,
-                            Alias(&cursor_point_user_aligned_confined), Alias(&cursor_point_user_aligned_confined),
-                            None)?;
-
-                        ctx.register_action(action.unwrap_or(AppAction::DragPlane{
+                        ctx.register_action(AppAction::DragPlane{
                             editor_id: self.inner.id,
                             offset_delta: self.inner.offset - init_offset,
-                            scale_delta: default()}));
-                    } else {
-                        let prev_ids = take(&mut self.selection).into_boxed_slice();
-                        let prev_size = take(&mut self.selection_size);
-                        let action = T::on_click(self, ctx, cursor,
-                            Alias(&cursor_point_user_aligned_confined), Alias(&cursor_point_user_aligned_confined),
-                            Some(&prev_ids))?;
-
-                        if !prev_ids.is_empty() {
-                            ctx.register_action(AppAction::SetSelection{
-                                editor_id: self.id,
-                                prev_ids, prev_size, prev_src: self.selection_src,
-                                cur_ids: self.selection.to_box(),
-                                cur_size: default(),
-                                cur_src: self.selection_src});
-                        }
-                        if let Some(action) = action {
-                            ctx.register_action(action);
-                        }
+                            scale_delta: default()});
                     }
                 } else if self.point_in_selection(*cursor_point_user) {
-                    self.set_selection_focus(ctx, cursor)?
+                    self.set_selection_focus()
                 } else if let Some(p) = self.point_by_pos(*cursor_point_user, ctx, sequencer, *visual_ctx)? {
-                    self.set_point_focus(ctx, cursor, p.index())?
+                    self.set_point_focus(p.index())
                 } else {
                     self.redraw |= self.last_cursor.meta | meta;
                 }
@@ -765,18 +859,19 @@ impl<T: GraphPoint> GraphEditor<T> {
                     if !self.inner.last_cursor.left {
                         *origin = *cursor_point_user_aligned_confined;
                     } else {self.inner.redraw = true}
+                    self.special_action_on_drag(ctx, sequencer, *cursor_point_user_aligned_confined)?;
                 } else {
                     if !self.inner.last_cursor.left {
                         *init_offset = self.inner.offset;
                     } else {self.inner.redraw = true}
 
                     if !T::OFFSET_X_BOUND.is_empty() {
-                        self.inner.offset.x = T::OFFSET_X_BOUND.map(|x| x * step[0])
+                        self.inner.offset.x = T::OFFSET_X_BOUND.map_bounds(|x| x * step[0])
                             .extend(self.inner.offset.x)
                             .fit(self.inner.offset.x + self.inner.last_cursor.point.x - cursor.point.x);
                     }
                     if !T::OFFSET_Y_BOUND.is_empty() {
-                        self.inner.offset.y = T::OFFSET_Y_BOUND.map(|y| y * step[1])
+                        self.inner.offset.y = T::OFFSET_Y_BOUND.map_bounds(|y| y * step[1])
                             .extend(self.inner.offset.y)
                             .fit(self.inner.offset.y + self.inner.last_cursor.point.y - cursor.point.y);
                     }
@@ -784,51 +879,41 @@ impl<T: GraphPoint> GraphEditor<T> {
             }
 
             Focus::Point{id, last_loc, origin, meta} => if cursor.left {
-                let delta = if !self.inner.last_cursor.left {
-                    *last_loc = *cursor_point_user_aligned_confined;
-                    *origin = *last_loc;
-                    *meta = cursor.meta;
-                    default()
+                if *meta {
+                    self.special_action_on_drag(ctx, sequencer, *cursor_point_user_aligned_confined)?;
                 } else {
-                    let new = *cursor_point_user_aligned_confined;
-                    new.sub(&replace(last_loc, new))
-                };
-                if delta.any(|x| *x != 0) {
-                    T::move_point(Ok(unsafe{self.data.get_unchecked_mut(*id)}), delta, *meta);
-                    unsafe{self.data.reorder_unchecked(*id)}.apply(from_mut(id));
-                    let point = Some(*id);
-                    self.redraw = true;
-                    T::on_move(self, ctx, cursor, delta, point)?
+                    let delta = if !self.inner.last_cursor.left {
+                        *last_loc = *cursor_point_user_aligned_confined;
+                        *origin = *last_loc;
+                        *meta = cursor.meta;
+                        default()
+                    } else {
+                        let new = *cursor_point_user_aligned_confined;
+                        new.sub(&replace(last_loc, new))
+                    };
+                    if delta.any(|x| *x != 0) {
+                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(*id)}), delta, false);
+                        unsafe{self.data.reorder_unchecked(*id)}.apply(from_mut(id));
+                        let point = Some(*id);
+                        self.redraw = true;
+                        T::on_move(self, ctx, cursor, delta, point)?
+                    }
                 }
             } else if self.inner.last_cursor.left {
-                let (meta, src, point_id) = (*meta, *origin, *id);
-                let prev_ids = replace(&mut self.selection, vec![point_id]).into_boxed_slice();
-                let action = T::on_click(self, ctx, cursor,
-                    &src, Alias(&cursor_point_user_aligned_confined),
-                    Some(&prev_ids))?;
-
-                if self.selection[..] != prev_ids[..] {
-                    ctx.register_action(AppAction::SetSelection{
-                        editor_id: self.id,
-                        prev_ids, prev_src: self.selection_src, prev_size: take(&mut self.selection_size),
-                        cur_ids: self.selection.to_box(),
-                        cur_src: self.selection_src,
-                        cur_size: default()});
-                }
-                if let Some(action) = action {
-                    ctx.register_action(action);
+                let (dst, src, point_id) = (*cursor_point_user_aligned_confined, *origin, *id);
+                if *meta {
+                    self.special_action_on_click(ctx, sequencer, src, dst, visual_ctx)?;
                 } else {
-                    let delta = cursor_point_user_aligned_confined.sub(&src);
+                    let delta = dst.sub(&src);
                     if delta.any(|x| *x != 0) {
-                        ctx.register_action(AppAction::DragPoint{
-                            editor_id: self.id, point_id, delta, meta});
+                        ctx.register_action(AppAction::DragPoint{editor_id: self.id, point_id, delta});
                     }
                 }
             } else if cursor.shift {
-                self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))?
+                self.set_zoom_focus(cursor)
             } else if !unsafe{self.data.get_unchecked(*id)}
-            .in_hitbox(*cursor_point_user, ctx, sequencer, *visual_ctx)? {
-                self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))?
+            .in_hitbox(&cursor_point_user.map(|x| x ..= x), ctx, sequencer, *visual_ctx)? {
+                self.set_plane_focus()
             }
 
             Focus::Selection{origin, end, meta} => if cursor.left {
@@ -852,43 +937,33 @@ impl<T: GraphPoint> GraphEditor<T> {
                     T::on_move(self, ctx, cursor, delta, None)?
                 }
             } else if self.inner.last_cursor.left {
-                let (meta, src) = (*meta, take(origin));
+                let (meta, src, dst) = (*meta, take(origin), *cursor_point_user_aligned_confined);
                 *end = default();
-                let action = T::on_click(self, ctx, cursor,
-                    &src, Alias(&cursor_point_user_aligned_confined),
-                    None)?;
-
-                ctx.register_action(action.unwrap_or_else(|| AppAction::DragSelection{
-                    editor_id: self.id,
-                    delta: cursor_point_user_aligned_confined.sub(&src),
-                    meta}));
+                if meta {
+                    self.special_action_on_click(ctx, sequencer, src, dst, visual_ctx)?;
+                } else {
+                    ctx.register_action(AppAction::DragSelection{
+                        editor_id: self.id,
+                        delta: dst.sub(&src)});
+                }
             } else if cursor.shift {
-                self.set_zoom_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))?
+                self.set_zoom_focus(cursor)
             } else if !self.point_in_selection(*cursor_point_user) {
                 if let Some(p) = self.point_by_pos(*cursor_point_user, ctx, sequencer, *visual_ctx)? {
-                    self.set_point_focus(ctx, cursor, p.index())?
+                    self.set_point_focus(p.index())
                 } else {
-                    self.set_plane_focus(ctx, cursor, Alias(&cursor_point_user_aligned_confined))?
+                    self.set_plane_focus()
                 }
             }
         };
 
-        if self.changed_focus {
-            self.changed_focus = false
-        } else {
-            match self.focus {
-                Focus::None => (),
-                Focus::Zoom{..} | Focus::Plane{..} =>
-                    T::on_plane_hover(self, ctx, cursor, cursor_point_user_aligned_confined, false)?,
-                Focus::Point{id, ..} =>
-                    T::on_point_hover(self, ctx, cursor, id, false)?,
-                Focus::Selection{..} =>
-                    T::on_selection_hover(self, ctx, cursor, false)?
-            }
-        }
-
         let old_buttons = *replace(&mut self.last_cursor, cursor);
-        Ok(self.redraw |= *cursor != old_buttons)
+        let buttons_changed = old_buttons != *cursor;
+        self.redraw |= buttons_changed;
+        Ok(if self.update_hint | buttons_changed {
+            self.update_hint = false;
+            self.update_hint(ctx, cursor);
+        })
     }
 
     /// an offset of 0 is assumed
@@ -927,7 +1002,22 @@ impl<T: GraphPoint> GraphEditor<T> {
                 self.handle_hover(Some(e.try_into()?), ctx, sequencer, LazyCell::new(visual_ctx))?;
             }
 
-            AppEvent::KeyPress(id, e) | AppEvent::KeyRelease(id, e) if *id == self.id =>
+            AppEvent::KeyPress(id, e) if *id == self.id => {
+                if !e.repeat() {
+                    self.update_hint = match e.code().as_str() {
+                        "KeyA" => {self.special_action = SpecialAction::Add;    true}
+                        "KeyR" => {self.special_action = SpecialAction::Remove; true}
+                        "KeyS" => {self.special_action = SpecialAction::Select; true}
+                        _ => false
+                    };
+                    if self.update_hint {
+                        self.update_hint(ctx, self.last_cursor);
+                    }
+                }
+                self.handle_hover(Some(self.last_cursor + e), ctx, sequencer, LazyCell::new(visual_ctx))?;
+            }
+
+            AppEvent::KeyRelease(id, e) if *id == self.id =>
                 self.handle_hover(Some(self.last_cursor + e), ctx, sequencer, LazyCell::new(visual_ctx))?,
 
             AppEvent::Leave(id) if *id == self.id =>
@@ -947,26 +1037,39 @@ impl<T: GraphPoint> GraphEditor<T> {
                         self.scale   = self.scale.sub(&scale_delta);
                     }
 
-                    AppAction::DragPoint{editor_id, point_id, mut delta, meta} => if editor_id == self.id {
+                    AppAction::DragPoint{editor_id, point_id, mut delta} => if editor_id == self.id {
                         self.redraw = true;
                         delta = delta.map(|x| -x);
-                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(point_id)}), delta, meta)
+                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(point_id)}), delta, false)
                     }
 
-                    AppAction::DragSelection{editor_id, mut delta, meta} => if editor_id == self.id {
+                    AppAction::DragSelection{editor_id, mut delta} => if editor_id == self.id {
                         self.redraw = true;
                         delta = delta.map(|x| -x);
                         for &id in self.inner.selection.iter() {
-                            T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, meta);
+                            T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, false);
                         }
-                        T::move_point(Err(&mut self.selection_src), delta, meta)
+                        T::move_point(Err(&mut self.selection_src), delta, false)
                     }
 
-                    AppAction::SetSelection{editor_id, ref prev_ids, prev_src, prev_size, ..} => if editor_id == self.id {
+                    AppAction::SetSelection{editor_id, ref prev_ids, prev_src, prev_size, ..} =>
+                    if editor_id == self.id {
                         self.redraw = true;
                         self.selection = prev_ids.to_vec();
                         self.selection_src = prev_src;
                         self.selection_size = prev_size;
+                    }
+
+                    AppAction::AddPoint{editor_id, point_id, ..} if editor_id == self.id =>
+                        _ = self.remove_points(once(point_id))?,
+
+                    AppAction::RemovePoint(editor_id, ref points) if editor_id == self.id => unsafe {
+                        for &RemovedPoint{ref point, index, was_selected} in points.iter() {
+                            self.data.insert(index, point.downcast_ref_unchecked::<T>().clone());
+                            if was_selected {
+                                self.selection.push_sorted(index);
+                            }
+                        }
                     }
 
                     _ => ()
@@ -981,17 +1084,17 @@ impl<T: GraphPoint> GraphEditor<T> {
                         self.scale   = self.scale.add(&scale_delta);
                     }
 
-                    AppAction::DragPoint{editor_id, point_id, delta, meta} => if editor_id == self.id {
+                    AppAction::DragPoint{editor_id, point_id, delta} => if editor_id == self.id {
                         self.redraw = true;
-                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(point_id)}), delta, meta)
+                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(point_id)}), delta, false)
                     }
 
-                    AppAction::DragSelection{editor_id, delta, meta} => if editor_id == self.id {
+                    AppAction::DragSelection{editor_id, delta} => if editor_id == self.id {
                         self.redraw = true;
                         for &id in self.inner.selection.iter() {
-                            T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, meta);
+                            T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, false);
                         }
-                        T::move_point(Err(&mut self.selection_src), delta, meta)
+                        T::move_point(Err(&mut self.selection_src), delta, false)
                     }
 
                     AppAction::SetSelection{editor_id, ref cur_ids, cur_src, cur_size, ..} =>
@@ -1001,6 +1104,14 @@ impl<T: GraphPoint> GraphEditor<T> {
                         self.selection_src = cur_src;
                         self.selection_size = cur_size;
                     }
+
+                    AppAction::AddPoint{editor_id, point_id, point_loc} => if editor_id == self.id {
+                        let new = T::create(self, point_loc);
+                        self.data.insert(point_id, new);
+                    }
+
+                    AppAction::RemovePoint(editor_id, ref points) if editor_id == self.id =>
+                        _ = self.remove_points(points.iter().map(|x| x.index))?,
 
                     _ => ()
                 }

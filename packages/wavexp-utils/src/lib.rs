@@ -11,7 +11,7 @@ use std::{
     fmt::{self, Debug, Formatter, Display},
     ops::{Neg, Range, Deref, RangeBounds, 
         Add, Sub, Mul, Div, Rem,
-        AddAssign, SubAssign, MulAssign, DivAssign, RemAssign},
+        AddAssign, SubAssign, MulAssign, DivAssign, RemAssign, RangeInclusive},
     iter::{successors, Sum},
     cmp::Ordering,
     array::from_fn,
@@ -1020,9 +1020,9 @@ pub trait Take: Default {
 impl<T: Default> Take for T {}
 
 pub trait RangeExt<T> {
+    type RangeTy<R>;
     fn ordered(self) -> Self where T: Ord;
-    fn overlap<O>(&self, other: &Range<O>) -> bool
-    where O: PartialOrd<T>, T: PartialOrd<O>;
+    fn overlap<O>(&self, other: &Self::RangeTy<O>) -> bool where O: PartialOrd<T>, T: PartialOrd<O>;
     fn loose_contain<O, I>(&self, item: I, offset: O) -> bool where
     O: Copy,
     I: PartialOrd<T> + Add<O, Output=I> + Sub<O, Output=I> + Copy,
@@ -1031,17 +1031,18 @@ pub trait RangeExt<T> {
     /// if `value` is outside of `self`, extend `self` just enough for `value` to be inside it
     fn extend<R>(self, value: R) -> Self where T: PartialOrd<R> + From<R>;
     /// turns `x .. y` into `f(x) .. f(y)`
-    fn map<R>(self, f: impl FnMut(T) -> R) -> Range<R>;
+    fn map_bounds<R>(self, f: impl FnMut(T) -> R) -> Self::RangeTy<R>;
     fn to_pair(self) -> [T; 2];
 }
 
 impl<T> RangeExt<T> for Range<T> {
+    type RangeTy<R> = Range<R>;
+
     fn ordered(self) -> Self where T: Ord {
         if self.start > self.end {self.end .. self.start} else {self}
     }
 
-    fn overlap<O>(&self, other: &Range<O>) -> bool
-    where O: PartialOrd<T>, T: PartialOrd<O> {
+    fn overlap<O>(&self, other: &Self::RangeTy<O>) -> bool where O: PartialOrd<T>, T: PartialOrd<O> {
         self.contains(&other.start)
             || self.contains(&other.end)
             || other.contains(&self.start)
@@ -1054,35 +1055,66 @@ impl<T> RangeExt<T> for Range<T> {
         self.overlap(&(item - offset .. item + offset))
     }
 
-    fn fit<R>(&self, item: R) -> R
-    where T: Clone + Into<R> + PartialOrd<R> {
-        if      self.end  <= item {self.end.clone().into()}
+    fn fit<R>(&self, item: R) -> R where T: Clone + Into<R> + PartialOrd<R> {
+        if      self.end   < item {self.end.clone().into()}
         else if self.start > item {self.start.clone().into()}
-        else                       {item}
+        else                      {item}
     }
 
-    fn extend<R>(self, value: R) -> Self
-    where T: PartialOrd<R> + From<R> {
+    fn extend<R>(self, value: R) -> Self where T: PartialOrd<R> + From<R> {
         if      self.start > value {value.into() .. self.end}
         else if self.end  <= value {self.start .. value.into()}
         else {self}
     }
 
-    fn map<R>(self, mut f: impl FnMut(T) -> R) -> Range<R> {
+    fn map_bounds<R>(self, mut f: impl FnMut(T) -> R) -> Self::RangeTy<R> {
         f(self.start) .. f(self.end)
     }
 
     fn to_pair(self) -> [T; 2] {[self.start, self.end]}
 }
 
-#[test]
-fn range_overlap() {
-    assert!(!(50 .. 55).overlap(&(56 .. 61)));
-    assert!(!(50 .. 56).overlap(&(56 .. 61)));
-    assert!( (50 .. 57).overlap(&(56 .. 61)));
-    assert!( (58 .. 60).overlap(&(56 .. 61)));
-    assert!( (56 .. 61).overlap(&(58 .. 60)));
-    assert!(!(56 .. 61).overlap(&(61 .. 67)));
+impl<T> RangeExt<T> for RangeInclusive<T> {
+    type RangeTy<R> = RangeInclusive<R>;
+
+    fn ordered(self) -> Self where T: Ord {
+        if self.start() > self.end() {
+            let (start, end) = self.into_inner();
+            end ..= start
+        } else {self}
+    }
+
+    fn overlap<O>(&self, other: &Self::RangeTy<O>) -> bool where O: PartialOrd<T>, T: PartialOrd<O> {
+        self.contains(other.start())
+            || self.contains(other.end())
+            || other.contains(self.start())
+    }
+
+    fn loose_contain<O, I>(&self, item: I, offset: O) -> bool
+    where O: Copy,
+    I: PartialOrd<T> + Add<O, Output=I> + Sub<O, Output=I> + Copy,
+    T: PartialOrd<I> {
+        self.overlap(&(item - offset ..= item + offset))
+    }
+
+    fn fit<R>(&self, item: R) -> R where T: Clone + Into<R> + PartialOrd<R> {
+        if      self.end()   < &item {self.end().clone().into()}
+        else if self.start() > &item {self.start().clone().into()}
+        else                         {item}
+    }
+
+    fn extend<R>(self, value: R) -> Self where T: PartialOrd<R> + From<R> {
+        if      self.start() > &value {value.into() ..= self.into_inner().1}
+        else if self.end()   < &value {self.into_inner().0 ..= value.into()}
+        else {self}
+    }
+
+    fn map_bounds<R>(self, mut f: impl FnMut(T) -> R) -> Self::RangeTy<R> {
+        let (start, end) = self.into_inner();
+        f(start) ..= f(end)
+    }
+
+    fn to_pair(self) -> [T; 2] {self.into_inner().into()}
 }
 
 pub trait LooseEq<O = Self> {

@@ -1,8 +1,6 @@
 use std::{
-    ops::{Deref, DerefMut, Range, Not},
+    ops::{Deref, DerefMut, Range, Not, RangeInclusive},
     cmp::Ordering,
-    borrow::Cow,
-    iter::once,
     fmt::{Display, Formatter, self},
     rc::Rc};
 use wasm_bindgen::JsCast;
@@ -12,7 +10,6 @@ use wavexp_utils::{
     r64,
     AppResult,
     default,
-    Pipe,
     ArrayExt,
     ArrayFrom,
     document,
@@ -22,7 +19,7 @@ use wavexp_utils::{
     now,
     js_function,
     BoolExt,
-    cell::{Shared, SharedAwareRefMut}};
+    cell::{Shared, SharedAwareRefMut}, RangeExt};
 use web_sys::{
     Path2d,
     HtmlCanvasElement,
@@ -41,7 +38,7 @@ use crate::{
     sound::{Sound, Beats, Secs, FromBeats, AudioInput},
     visual::{GraphPoint, GraphEditor},
     global::{AppContext, AppAction, AppEvent},
-    input::{Cursor, Buttons, Slider, Tab, Button, AudioInputButton},
+    input::{Slider, Tab, Button, AudioInputButton},
     img};
 
 #[derive(Debug, Clone)]
@@ -90,6 +87,10 @@ impl GraphPoint for SoundBlock {
     type Y = i32;
     type VisualContext = ();
 
+    fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
+        Self{sound: default(), layer: y.into(), offset}
+    }
+
     fn inner(&self) -> &Self::Inner {&self.sound}
     fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.sound}
 
@@ -113,104 +114,25 @@ impl GraphPoint for SoundBlock {
 
     fn in_hitbox(
         &self,
-        point:     [R64; 2],
+        area:      &[RangeInclusive<R64>; 2],
         _:         &AppContext,
         sequencer: &Sequencer,
         _:         Self::VisualContext
     ) -> AppResult<bool> {
-        Ok(self.layer == *point[1] as i32
-            && (self.offset .. self.offset + self.sound.len(sequencer.bps())?.max(r64![0.1]))
-                .contains(&point[0]))
+        Ok(area[1].clone().map_bounds(i32::from).contains(&self.layer)
+            && (self.offset ..= self.offset + self.sound.len(sequencer.bps())?.max(r64![0.1]))
+                .overlap(&area[0]))
     }
 
     fn fmt_loc(loc: [R64; 2]) -> String {
         format!("{:.3}, layer {}", loc[0], loc[1].floor())
     }
 
-    fn on_click(
-        editor:        &mut GraphEditor<Self>,
-        ctx:           &mut AppContext,
-        cursor:        Cursor,
-        pressed_at:    impl Deref<Target = [R64; 2]>,
-        released_at:   impl Deref<Target = [R64; 2]>,
-        old_selection: Option<&[usize]>
-    ) -> AppResult<Option<AppAction>> {
-        let sel_is_empty = editor.selection().is_empty();
-        if cursor.meta
-        && sel_is_empty
-        && old_selection.map_or(true, |x| x.is_empty())
-        && *pressed_at == *released_at {
-            let [offset, y] = *released_at;
-            let layer = y.into();
-            let block_id = editor.add_point(SoundBlock{sound: default(), layer, offset});
-            Ok(Some(AppAction::AddSoundBlock{block_id, offset, layer}))
-        } else {
-            ctx.emit_event(AppEvent::Select(sel_is_empty.not().then_some(0)));
-            Ok(None)
-        }
-    }
-
-    fn on_plane_hover(
+    fn on_selection_change(
         editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        cursor: Cursor,
-        _:      impl Deref<Target = [R64; 2]>,
-        first:  bool
+        ctx:    &mut AppContext
     ) -> AppResult<()> {
-        if !first && Some(&*cursor) == editor.last_cursor().as_deref() {return Ok(())}
-        let [m, a] = match *cursor {
-            Buttons{left: false, shift: true, ..} =>
-                [Self::EDITOR_NAME.into(),
-                "Press and hold to zoom".into()],
-            Buttons{left: true, shift: true, ..} =>
-                [Cow::from(Self::EDITOR_NAME) + ": zooming",
-                "Release to stop".into()],
-            Buttons{left: false, meta: false, ..} =>
-                [Self::EDITOR_NAME.into(),
-                "Hold & drag to move around (press Meta for actions)".into()],
-            Buttons{left: false, meta: true, ..} =>
-                [Self::EDITOR_NAME.into(),
-                "Click to add block, hold & drag to select".into()],
-            Buttons{left: true, meta: false, ..} => 
-                [Cow::from(Self::EDITOR_NAME) + ": Moving",
-                "Release to stop".into()],
-            Buttons{left: true, meta: true, ..} =>
-                [Cow::from(Self::EDITOR_NAME) + ": Selecting",
-                "Release to select".into()]
-        };
-        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
-    }
-
-    fn on_point_hover(
-        editor:   &mut GraphEditor<Self>,
-        ctx:      &mut AppContext,
-        cursor:   Cursor,
-        point_id: usize,
-        first:    bool
-    ) -> AppResult<()> {
-        let m = || unsafe{editor.get_unchecked(point_id)}.to_string().into();
-        let [m, a] = if cursor.left {
-            [m() + ": moving", "Release to stop".into()]
-        } else if first {
-            [m(), "Hold & drag to move".into()]
-        } else {return Ok(())};
-        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
-    }
-
-    fn on_selection_hover(
-        editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        cursor: Cursor,
-        first:  bool
-    ) -> AppResult<()> {
-        if !first {return Ok(())}
-        let m = editor.selection().len().pipe(|l| format!("{l} block{}", if l == 1 {""} else {"s"}));
-        let [m, a] = if cursor.left {
-            [(m + ": moving").into(), "Release to stop".into()]
-        } else {
-            [m.into(), "Hold & drag to move".into()]
-        };
-        Ok(ctx.emit_event(AppEvent::SetHint(m, a)))
+        Ok(ctx.emit_event(AppEvent::Select(editor.selection().is_empty().not().then_some(0))))
     }
 
     fn on_redraw(
@@ -528,9 +450,6 @@ impl Sequencer {
                                 .to_app_result()?.get_mut()?
                                 .changes_mut().reversed.flip(),
 
-                        AppAction::AddSoundBlock{block_id, ..} =>
-                            pat.remove_points(once(block_id), drop)?,
-
                         _ => ()
                     }
                 }
@@ -557,10 +476,6 @@ impl Sequencer {
                         AppAction::ReverseInput =>
                             ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?
                                 .get_mut()?.changes_mut().reversed.flip(),
-
-                        AppAction::AddSoundBlock{offset, layer, block_id} => unsafe {
-                            pat.insert_point(block_id, SoundBlock{sound: default(), layer, offset})
-                        }
 
                         _ => ()
                     }
