@@ -183,7 +183,11 @@ impl Note {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AudioInputChanges {
     /// Make the input play backwards.
-    pub reversed: bool
+    pub reversed: bool,
+    /// cut the input from the start.
+    pub cut_start: Beats,
+    /// cut the input from the end.
+    pub cut_end: Beats
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,18 +239,29 @@ impl AudioInput {
 
     /// Bake all of the changes into a buffer that will be accessible through `.baked()` method.
     /// If an error occurs, the input will appear unbaked.
-    pub fn bake(&mut self) -> AppResult<()> {
+    pub fn bake(&mut self, bps: Beats) -> AppResult<()> {
         if self.pending_changes == self.baked_changes {return Ok(())};
         self.baked = AudioBuffer::new(
             AudioBufferOptions::new(self.raw.length(), Sequencer::SAMPLE_RATE as f32)
                 .number_of_channels(Sequencer::CHANNEL_COUNT))?;
+
+        let cut_start = (*self.pending_changes.cut_start.to_secs(bps)
+            * Sequencer::SAMPLE_RATE as f64) as usize;
+        let cut_end = (self.raw.length() as f64
+            - *self.pending_changes.cut_end.to_secs(bps)
+            * Sequencer::SAMPLE_RATE as f64) as usize;
+        // TODO: this doesn't affect anything for some reason.
+        self.duration = R64::from(cut_end - cut_start) / Sequencer::SAMPLE_RATE;
         for i in 0 .. Sequencer::CHANNEL_COUNT {
             let mut data = self.raw.get_channel_data(i)?;
             if self.pending_changes.reversed {
                 data.reverse();
             }
+            data.truncate(cut_end);
+            data.drain(.. cut_start);
             self.baked.copy_to_channel(&data, i as i32)?;
         }
+
         Ok(self.baked_changes = self.pending_changes)
     }
 
@@ -310,12 +325,12 @@ impl Sound {
         }
     }
 
-    pub fn prepare(&mut self) -> AppResult<()> {
+    pub fn prepare(&mut self, bps: Beats) -> AppResult<()> {
         match self {
             Sound::None          => Ok(()),
             Sound::Note(inner)   => inner.prepare(),
             Sound::Noise(inner)  => inner.prepare(),
-            Sound::Custom(inner) => inner.prepare(),
+            Sound::Custom(inner) => inner.prepare(bps),
         }
     }
 

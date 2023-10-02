@@ -169,9 +169,9 @@ impl Default for CustomSound {
 impl CustomSound {
     pub const NAME: &str = "Custom Audio";
 
-    pub fn prepare(&mut self) -> AppResult<()> {
+    pub fn prepare(&mut self, bps: Beats) -> AppResult<()> {
         if let Some(src) = &self.src {
-            src.get_mut()?.bake()
+            src.get_mut()?.bake(bps)
         } else {Ok(())}
     }
 
@@ -254,19 +254,19 @@ impl CustomSound {
             1 /* Envelope */ => html!{<div id="inputs">
                 <Counter key="custom-att"
                 setter={emitter.reform(AppEvent::Attack)}
-                name="Noise Attack Time" postfix="Beats"
+                name="Audio Attack Time" postfix="Beats"
                 initial={self.attack}/>
                 <Counter key="custom-dec"
                 setter={emitter.reform(AppEvent::Decay)}
-                name="Noise Decay Time" postfix="Beats"
+                name="Audio Decay Time" postfix="Beats"
                 initial={self.decay}/>
                 <Slider key="custom-sus"
                 setter={emitter.reform(|x| AppEvent::Sustain(R32::from(x)))}
-                name="Noise Sustain Level"
+                name="Audio Sustain Level"
                 initial={self.sustain}/>
                 <Counter key="custom-rel"
                 setter={emitter.reform(AppEvent::Release)}
-                name="Noise Release Time" postfix="Beats"
+                name="Audio Release Time" postfix="Beats"
                 initial={self.release}/>
             </div>},
 

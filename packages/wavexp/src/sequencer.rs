@@ -2,7 +2,7 @@ use std::{
     ops::{Deref, DerefMut, Range, Not, RangeInclusive},
     cmp::Ordering,
     fmt::{Display, Formatter, self},
-    rc::Rc};
+    rc::Rc, mem::replace};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use wavexp_utils::{
@@ -37,7 +37,7 @@ use yew::{
 use crate::{
     sound::{Sound, Beats, Secs, FromBeats, AudioInput},
     visual::{GraphPoint, GraphEditor},
-    global::{AppContext, AppAction, AppEvent},
+    global::{AppContext, AppAction, AppEvent, Popup},
     input::{Slider, Tab, Button, AudioInputButton},
     img};
 
@@ -326,10 +326,10 @@ impl Sequencer {
                     self.ctx_created_at = now().to_app_result()?;
                 }
                 if let Some(input) = input {
-                    input.get_mut()?.bake()?;
+                    input.get_mut()?.bake(self.bps)?;
                 } else {
                     for mut block in self.pattern.get_mut()?.iter_mut() {
-                        block.inner().prepare()?;
+                        block.inner().prepare(self.bps)?;
                     }
                 }
                 let volume = self.volume();
@@ -380,7 +380,7 @@ impl Sequencer {
                 let target: HtmlInputElement = e.target_dyn_into().to_app_result()?;
                 let to: Rc<str> = target.value().into();
                 if !to.is_empty() {
-                    let from = ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?
+                    let from = ctx.popup().and_then(|x| x.edited_input()).to_app_result()?
                         .get_mut()?.set_name(to.clone());
                     ctx.register_action(AppAction::SetInputName{from, to});
                 }
@@ -388,8 +388,20 @@ impl Sequencer {
 
             AppEvent::ReverseInput => {
                 ctx.register_action(AppAction::ReverseInput);
-                ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?.get_mut()?
+                ctx.popup().and_then(Popup::edited_input).to_app_result()?.get_mut()?
                     .changes_mut().reversed.flip();
+            }
+
+            AppEvent::SetStartCutOff(to) => {
+                let input = ctx.popup().and_then(Popup::edited_input).to_app_result()?;
+                let from = replace(&mut input.get_mut()?.changes_mut().cut_start, to);
+                ctx.register_action(AppAction::SetStartCutOff{from, to});
+            }
+
+            AppEvent::SetEndCutOff(to) => {
+                let input = ctx.popup().and_then(Popup::edited_input).to_app_result()?;
+                let from = replace(&mut input.get_mut()?.changes_mut().cut_end, to);
+                ctx.register_action(AppAction::SetEndCutOff{from, to});
             }
 
             AppEvent::AudioUploaded(ref e) => {
@@ -441,12 +453,12 @@ impl Sequencer {
                             _ = self.inputs.pop(),
 
                         AppAction::SetInputName{ref from, ..} =>
-                            _ = ctx.popup().and_then(|x| x.as_edit_input())
+                            _ = ctx.popup().and_then(|x| x.edited_input())
                                 .to_app_result()?.get_mut()?
                                 .set_name(from.clone()),
 
                         AppAction::ReverseInput =>
-                            ctx.popup().and_then(|x| x.as_edit_input())
+                            ctx.popup().and_then(|x| x.edited_input())
                                 .to_app_result()?.get_mut()?
                                 .changes_mut().reversed.flip(),
 
@@ -470,11 +482,11 @@ impl Sequencer {
                             self.inputs.push(input.clone()),
 
                         AppAction::SetInputName{ref to, ..} =>
-                            _ = ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?
+                            _ = ctx.popup().and_then(|x| x.edited_input()).to_app_result()?
                                 .get_mut()?.set_name(to.clone()),
 
                         AppAction::ReverseInput =>
-                            ctx.popup().and_then(|x| x.as_edit_input()).to_app_result()?
+                            ctx.popup().and_then(|x| x.edited_input()).to_app_result()?
                                 .get_mut()?.changes_mut().reversed.flip(),
 
                         _ => ()

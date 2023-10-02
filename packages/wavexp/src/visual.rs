@@ -1,6 +1,6 @@
 use std::{
     iter::{Iterator, once},
-    slice::{from_raw_parts, from_mut, Iter},
+    slice::{from_raw_parts, Iter},
     mem::{replace, take},
     ops::{Range, Deref, DerefMut, RangeInclusive},
     fmt::{Debug, Formatter, self},
@@ -34,7 +34,7 @@ use wavexp_utils::{
     FlippedArray,
     default,
     cell::WasmCell,
-    ToEveryNth,
+    iter::ToEveryNth,
     r64,
     js_assert,
     eval_once,
@@ -491,6 +491,7 @@ impl<T: GraphPoint> GraphEditor<T> {
 
     /// `to_remove` iterates over IDs of points that must be removed.
     /// Returns the action that represents the removal of the points.
+    // TODO: make it adjust the selection
     pub fn remove_points(&mut self, to_remove: impl Iterator<Item = usize> + DoubleEndedIterator)
     -> AppResult<AppAction> {
         self.redraw = true;
@@ -752,7 +753,8 @@ impl<T: GraphPoint> GraphEditor<T> {
 
             SpecialAction::Add => if !matches!(self.focus, Focus::Point{..}) {
                 let new = T::create(self, released_at);
-                let point_id = self.data.push_sorted(new);
+                let point_id = self.data.len();
+                self.data.push(new);
                 ctx.register_action(AppAction::AddPoint{
                     editor_id: self.inner.id,
                     point_id, point_loc: released_at})
@@ -892,11 +894,10 @@ impl<T: GraphPoint> GraphEditor<T> {
                         new.sub(&replace(last_loc, new))
                     };
                     if delta.any(|x| *x != 0) {
-                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(*id)}), delta, false);
-                        unsafe{self.data.reorder_unchecked(*id)}.apply(from_mut(id));
-                        let point = Some(*id);
+                        let id = *id;
+                        T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, false);
                         self.redraw = true;
-                        T::on_move(self, ctx, cursor, delta, point)?
+                        T::on_move(self, ctx, cursor, delta, Some(id))?
                     }
                 }
             } else if self.inner.last_cursor.left {
@@ -928,12 +929,10 @@ impl<T: GraphPoint> GraphEditor<T> {
                 };
                 if delta.any(|x| *x != 0) {
                     self.inner.redraw = true;
-                    for (ids, id) in self.inner.selection.iter_mut_with_ctx() {
+                    for &id in self.inner.selection.iter() {
                         T::move_point(Ok(unsafe{self.data.get_unchecked_mut(id)}), delta, *meta);
-                        unsafe{self.data.reorder_unchecked(id)}.apply(ids);
                     }
                     T::move_point(Err(&mut self.inner.selection_src), delta, *meta);
-                    self.selection.sort_unstable();
                     T::on_move(self, ctx, cursor, delta, None)?
                 }
             } else if self.inner.last_cursor.left {
@@ -1067,7 +1066,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         for &RemovedPoint{ref point, index, was_selected} in points.iter() {
                             self.data.insert(index, point.downcast_ref_unchecked::<T>().clone());
                             if was_selected {
-                                self.selection.push_sorted(index);
+                                self.selection.push(index);
                             }
                         }
                     }

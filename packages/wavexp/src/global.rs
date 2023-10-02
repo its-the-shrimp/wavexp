@@ -42,7 +42,7 @@ use wavexp_utils::{
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, AudioInput},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
-    input::{Button, Switch, GraphEditorCanvas, AudioInputButton},
+    input::{Button, Switch, GraphEditorCanvas, AudioInputButton, Counter},
     sequencer::{SoundBlock, Sequencer},
     img};
 
@@ -142,8 +142,12 @@ pub enum AppEvent {
     SelectInput(Shared<AudioInput>),
     /// emitted when the edited audio input's name is changed.
     SetInputName(Event),
-    // emitted when the edited audio input needs to be reversed.
-    ReverseInput
+    /// emitted when the edited audio input needs to be reversed.
+    ReverseInput,
+    /// set the starting cut-off of the edited audio input.
+    SetStartCutOff(Beats),
+    /// set the ending cut-off of the edited audio input.
+    SetEndCutOff(Beats)
 }
 
 /// For `AppAction::RemovePoint`
@@ -207,12 +211,16 @@ pub enum AppAction {
     SelectInput{from: Option<Shared<AudioInput>>, to: Option<Shared<AudioInput>>},
     /// change the name of the currently edited audio input.
     SetInputName{from: Rc<str>, to: Rc<str>},
-    /// reverse the currently edited audio input.
-    ReverseInput,
     /// add a point onto a graph editor.
     AddPoint{editor_id: usize, point_id: usize, point_loc: [R64; 2]},
     /// remove a point from a graph editor.
-    RemovePoint(usize, Box<[RemovedPoint]>)
+    RemovePoint(usize, Box<[RemovedPoint]>),
+    /// reverse the currently edited audio input.
+    ReverseInput,
+    /// set the currently edited audio input's starting cut off.
+    SetStartCutOff{from: Beats, to: Beats},
+    /// set the currently edited audio input's ending cut off.
+    SetEndCutOff{from: Beats, to: Beats}
 }
 
 impl AppAction {
@@ -269,15 +277,19 @@ impl AppAction {
                 Some("Select Audio Input"),
             Self::SetInputName{..} =>
                 Some("Rename Audio Input"),
-            Self::ReverseInput =>
-                Some("Reverse Audio Input"),
             Self::AddPoint{..} =>
                 Some("Add a point to an editor plane"),
             Self::RemovePoint(_, points) => Some(if points.len() == 1 {
                 "Remove a point from an editor plane"
             } else {
                 "Remove points from an editor plane"
-            })
+            }),
+            Self::ReverseInput =>
+                Some("Reverse Audio Input"),
+            Self::SetStartCutOff{..} =>
+                Some("Set Starting Cut-Off"),
+            Self::SetEndCutOff{..} =>
+                Some("Set Ending Cut-Off")
         }
     }
 
@@ -387,6 +399,12 @@ impl Popup {
                                     class="dark-bg blue-border" data-main-hint="Audio input name"
                                     onchange={emitter.reform(AppEvent::SetInputName)}/>
                                 </div>
+                                <div style="display: grid; grid-template-columns: repeat(2, 1fr)">
+                                    <Counter name="Start cut-off" initial={input.changes().cut_start}
+                                    setter={emitter.reform(AppEvent::SetStartCutOff)}/>
+                                    <Counter name="End cut-off" initial={input.changes().cut_end} 
+                                    setter={emitter.reform(AppEvent::SetEndCutOff)}/>
+                                </div>
                             } else {
                                 <p style="color:red">{"Failed to access the audio input"}</p>
                             }
@@ -397,7 +415,7 @@ impl Popup {
         }
     }
 
-    pub fn as_edit_input(&self) -> Option<&Shared<AudioInput>> {
+    pub fn edited_input(&self) -> Option<&Shared<AudioInput>> {
         if let Self::EditInput(v) = self {Some(v)} else {None}
     }
 }
