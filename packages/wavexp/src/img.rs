@@ -42,6 +42,15 @@ pub fn Plus() -> Html {
 }
 
 #[function_component]
+pub fn Minus() -> Html {
+    html!{
+        <svg viewBox="0 0 100 100">
+            <rect x=10 y=40 width=80 height=20/>
+        </svg>
+    }
+}
+
+#[function_component]
 pub fn Warning() -> Html {
     html!{
         <svg viewBox="0 0 100 100">
@@ -87,6 +96,15 @@ pub fn LeftArrow() -> Html {
     html!{
         <svg viewBox="0 0 100 100">
             <polygon points="50,15 15,50 50,85 50,70 85,70 85,30 50,30"/>
+        </svg>
+    }
+}
+
+#[function_component]
+pub fn Selection() -> Html {
+    html!{
+        <svg viewBox="0 0 100 100">
+            <rect x=15 y=15 width=70 height=70 fill="transparent" stroke-width=5 stroke-dasharray="15 10"/>
         </svg>
     }
 }

@@ -324,10 +324,14 @@ type OffsetCanvasPoint = Point;
 /// in user coordinates, aligned to snap step and limited to bounds specified by `GraphPoint::(X/Y)_BOUND`
 type ConfinedAlignedUserPoint = [R64; 2];
 
+/// action for a graph editor to perform when Meta key is pressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum SpecialAction {
+pub enum SpecialAction {
+    /// select points
     #[default] Select,
+    /// add points
     Add,
+    /// remove points
     Remove
 }
 
@@ -358,8 +362,7 @@ pub struct AnyGraphEditor {
     redraw: bool,
     update_hint: bool,
     grid: Option<(Path2d, [R64; 2])>,
-    id: usize,
-    special_action: SpecialAction
+    id: usize
 }
 
 impl AnyGraphEditor {
@@ -574,13 +577,13 @@ impl<T: GraphPoint> GraphEditor<T> {
             Focus::Plane{..} => {
                 let main = Cow::from(T::EDITOR_NAME);
                 match *cursor {
-                    Buttons{left: false, meta: false, ..} => (main, match self.special_action {
+                    Buttons{left: false, meta: false, ..} => (main, match ctx.special_action() {
                         SpecialAction::Select => "Shift - zoom, Meta - select points",
                         SpecialAction::Add    => "Shift - zoom, Meta - add a point",
                         SpecialAction::Remove => "Shift - zoom, Meta - remove points",
                     }),
 
-                    Buttons{left: false, meta: true, ..} => match self.special_action {
+                    Buttons{left: false, meta: true, ..} => match ctx.special_action() {
                         // TODO: find a way to replace `format!` with smth const
                         SpecialAction::Select =>
                             (main + ": selecting", "Press and hold left mouse button to select"),
@@ -593,7 +596,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     Buttons{left: true, meta: false, ..} =>
                         (main + ": moving", "Release to stop"),
 
-                    Buttons{left: true, meta: true, ..} => match self.special_action {
+                    Buttons{left: true, meta: true, ..} => match ctx.special_action() {
                         SpecialAction::Select =>
                             (main + ": selecting", "Release to select"),
                         SpecialAction::Add =>
@@ -607,13 +610,13 @@ impl<T: GraphPoint> GraphEditor<T> {
             Focus::Point{id, ..} => {
                 let main = || Cow::from(T::fmt_loc(unsafe{self.data.get_unchecked(id)}.loc()));
                 match *cursor {
-                    Buttons{left: false, meta: false, ..} => (main(), match self.special_action {
+                    Buttons{left: false, meta: false, ..} => (main(), match ctx.special_action() {
                         SpecialAction::Select => "Shift - zoom, Meta - select points",
                         SpecialAction::Add    => "Shift - zoom, Meta - add a point",
                         SpecialAction::Remove => "Shift - zoom, Meta - remove points",
                     }),
 
-                    Buttons{left: false, meta: true, ..} => match self.special_action {
+                    Buttons{left: false, meta: true, ..} => match ctx.special_action() {
                         // TODO: find a way to replace `format!` with smth const
                         SpecialAction::Select =>
                             (Cow::from(T::EDITOR_NAME) + ": selecting",
@@ -628,7 +631,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     Buttons{left: true, meta: false, ..} =>
                         (main() + ": moving", "Release to stop"),
 
-                    Buttons{left: true, meta: true, ..} => match self.special_action {
+                    Buttons{left: true, meta: true, ..} => match ctx.special_action() {
                         SpecialAction::Select =>
                             (Cow::from(T::EDITOR_NAME) + ": selecting", "Release to select"),
                         SpecialAction::Add =>
@@ -646,13 +649,13 @@ impl<T: GraphPoint> GraphEditor<T> {
                     Cow::from(format!("{len} block{}", if len == 1 {""} else {"s"}))
                 };
                 match *cursor {
-                    Buttons{left: false, meta: false, ..} => (main(), match self.special_action {
+                    Buttons{left: false, meta: false, ..} => (main(), match ctx.special_action() {
                         SpecialAction::Select => "Shift - zoom, Meta - select points",
                         SpecialAction::Add    => "Shift - zoom, Meta - add a point",
                         SpecialAction::Remove => "Shift - zoom, Meta - remove points",
                     }),
 
-                    Buttons{left: false, meta: true, ..} => match self.special_action {
+                    Buttons{left: false, meta: true, ..} => match ctx.special_action() {
                         // TODO: find a way to replace `format!` with smth const
                         SpecialAction::Select =>
                             (Cow::from(T::EDITOR_NAME) + ": selecting",
@@ -667,7 +670,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     Buttons{left: true, meta: false, ..} =>
                         (main() + ": moving", "Release to stop"),
 
-                    Buttons{left: true, meta: true, ..} => match self.special_action {
+                    Buttons{left: true, meta: true, ..} => match ctx.special_action() {
                         SpecialAction::Select =>
                             (Cow::from(T::EDITOR_NAME) + ": selecting",
                                 "Release to select"),
@@ -712,11 +715,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         _sequencer: &Sequencer,
         _cur_loc:   [R64; 2]
     ) -> AppResult<()> {
-        Ok(match self.special_action {
-            SpecialAction::Select => (),
-            SpecialAction::Add => (),
-            SpecialAction::Remove => ()
-        })
+        Ok(())
     }
 
     /// Executes the selected special action after a click.
@@ -728,7 +727,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         released_at: [R64; 2],
         visual_ctx:  impl Deref<Target = T::VisualContext>
     ) -> AppResult<()> {
-        Ok(match self.special_action {
+        Ok(match ctx.special_action() {
             SpecialAction::Select => {
                 let area = [pressed_at, released_at].flipped()
                     .map(|x| (x[0] ..= x[1]).ordered());
@@ -1001,19 +1000,9 @@ impl<T: GraphPoint> GraphEditor<T> {
                 self.handle_hover(Some(e.try_into()?), ctx, sequencer, LazyCell::new(visual_ctx))?;
             }
 
-            AppEvent::KeyPress(id, e) if *id == self.id => {
-                if !e.repeat() {
-                    self.update_hint = match e.code().as_str() {
-                        "KeyA" => {self.special_action = SpecialAction::Add;    true}
-                        "KeyR" => {self.special_action = SpecialAction::Remove; true}
-                        "KeyS" => {self.special_action = SpecialAction::Select; true}
-                        _ => false
-                    };
-                    if self.update_hint {
-                        self.update_hint(ctx, self.last_cursor);
-                    }
-                }
-                self.handle_hover(Some(self.last_cursor + e), ctx, sequencer, LazyCell::new(visual_ctx))?;
+            AppEvent::SetSpecialAction(_) => if !matches!(self.focus, Focus::None) {
+                self.update_hint(ctx, self.last_cursor);
+                self.handle_hover(Some(self.last_cursor), ctx, sequencer, LazyCell::new(visual_ctx))?;
             }
 
             AppEvent::KeyRelease(id, e) if *id == self.id =>

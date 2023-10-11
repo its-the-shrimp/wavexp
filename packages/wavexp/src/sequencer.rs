@@ -19,7 +19,8 @@ use wavexp_utils::{
     now,
     js_function,
     BoolExt,
-    cell::{Shared, SharedAwareRefMut}, RangeExt};
+    cell::{Shared, SharedAwareRefMut},
+    RangeExt};
 use web_sys::{
     Path2d,
     HtmlCanvasElement,

@@ -38,11 +38,11 @@ use wavexp_utils::{
     now,
     ArrayExt,
     js_function,
-    cell::Shared};
+    cell::Shared, BoolExt};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, AudioInput},
-    visual::{HintHandler, SoundVisualiser, AnyGraphEditor},
-    input::{Button, Switch, GraphEditorCanvas, AudioInputButton, Counter},
+    sound::{MSecs, Secs, Beats, SoundType, AudioInput, FromBeats},
+    visual::{HintHandler, SoundVisualiser, AnyGraphEditor, SpecialAction},
+    input::{Button, Switch, GraphEditorCanvas, AudioInputButton, Slider},
     sequencer::{SoundBlock, Sequencer},
     img};
 
@@ -147,7 +147,9 @@ pub enum AppEvent {
     /// set the starting cut-off of the edited audio input.
     SetStartCutOff(Beats),
     /// set the ending cut-off of the edited audio input.
-    SetEndCutOff(Beats)
+    SetEndCutOff(Beats),
+    /// set the special action for editor spaces.
+    SetSpecialAction(SpecialAction),
 }
 
 /// For `AppAction::RemovePoint`
@@ -400,9 +402,16 @@ impl Popup {
                                     onchange={emitter.reform(AppEvent::SetInputName)}/>
                                 </div>
                                 <div style="display: grid; grid-template-columns: repeat(2, 1fr)">
-                                    <Counter name="Start cut-off" initial={input.changes().cut_start}
+                                    // TODO: add syntax to Yew's `html!` macro for the following to
+                                    // be valid:
+                                    // {let max = input.baked_duration().secs_to_beats(sequencer.bps())}
+                                    <Slider name="Start cut-off"
+                                    max={input.raw_duration().secs_to_beats(sequencer.bps())}
+                                    initial={input.changes().cut_start}
                                     setter={emitter.reform(AppEvent::SetStartCutOff)}/>
-                                    <Counter name="End cut-off" initial={input.changes().cut_end} 
+                                    <Slider name="End cut-off"
+                                    max={input.raw_duration().secs_to_beats(sequencer.bps())}
+                                    initial={input.changes().cut_end}
                                     setter={emitter.reform(AppEvent::SetEndCutOff)}/>
                                 </div>
                             } else {
@@ -430,7 +439,8 @@ pub struct AppContext {
     undid_actions: usize,
     rerender_needed: bool,
     /// pop-ups are stacked on each other if one is opened from within another one.
-    popups: Vec<Popup>
+    popups: Vec<Popup>,
+    special_action: SpecialAction
 }
 
 impl AppContext {
@@ -443,6 +453,7 @@ impl AppContext {
             actions: vec![AppAction::Start],
             rerender_needed: false,
             popups: vec![],
+            special_action: default(),
             event_emitter})
     }
 
@@ -453,6 +464,7 @@ impl AppContext {
     pub fn actions(&self) -> &[AppAction] {&self.actions}
     pub fn event_emitter(&self) -> &Callback<AppEvent> {&self.event_emitter}
     pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
+    pub fn special_action(&self) -> SpecialAction {self.special_action}
 
     pub fn register_action(&mut self, action: AppAction) {
         self.actions.drain(self.actions.len() - take(&mut self.undid_actions) ..);
@@ -507,8 +519,13 @@ impl Component for App {
                     self.ctx.selected_tab = to;
                 }
 
-                AppEvent::KeyPress(_, ref e) => match e.code().as_str() {
-                    "KeyZ" if e.meta_key() && !e.repeat() => if e.shift_key() {
+                AppEvent::SetSpecialAction(action) => {
+                    self.ctx.special_action = action;
+                    self.ctx.rerender_needed = true;
+                }
+
+                AppEvent::KeyPress(_, ref e) if !e.repeat() => match e.code().as_str() {
+                    "KeyZ" if e.meta_key() => if e.shift_key() {
                         if self.ctx.undid_actions > 0 {
                             self.ctx.rerender_needed = true;
                             let a = unsafe{self.ctx.actions.get_unchecked(
@@ -523,6 +540,15 @@ impl Component for App {
                             self.ctx.actions.len() - self.ctx.undid_actions)};
                         self.ctx.emit_event(AppEvent::Undo(from_ref(a).to_box()));
                     }
+
+                    "KeyA" =>
+                        self.ctx.emit_event(AppEvent::SetSpecialAction(SpecialAction::Add)),
+
+                    "KeyS" =>
+                        self.ctx.emit_event(AppEvent::SetSpecialAction(SpecialAction::Select)),
+
+                    "KeyR" =>
+                        self.ctx.emit_event(AppEvent::SetSpecialAction(SpecialAction::Remove)),
 
                     "Escape" if let Some(closed) = self.ctx.popups.pop() => {
                         e.prevent_default();
@@ -765,7 +791,27 @@ impl Component for App {
                         }
                     )}
                 </div>
-                <div id="plane-settings" data-main-hint="Editor plane settings">
+                <div id="special-actions">
+                    <Button name="Special Action: Select"
+                    class={(self.ctx.special_action == SpecialAction::Select).choose("small selected", "small")}
+                    help="Click to select points when pressing Meta in an editor space"
+                    setter={setter.reform(|_| AppEvent::SetSpecialAction(SpecialAction::Select))}>
+                        <img::Selection/>
+                    </Button>
+                    <Button name="Special Action: Add"
+                    class={(self.ctx.special_action == SpecialAction::Add).choose("small selected", "small")}
+                    help="Click to add points when pressing Meta in an editor space"
+                    setter={setter.reform(|_| AppEvent::SetSpecialAction(SpecialAction::Add))}>
+                        <img::Plus/>
+                    </Button>
+                    <Button name="Special Action: Remove"
+                    class={(self.ctx.special_action == SpecialAction::Remove).choose("small selected", "small")}
+                    help="Click to remove points when pressing Meta in an editor space"
+                    setter={setter.reform(|_| AppEvent::SetSpecialAction(SpecialAction::Remove))}>
+                        <img::Minus/>
+                    </Button>
+                </div>
+                <div id="editor-settings" data-main-hint="Editor settings">
                     <Switch key="snap" name="Interval for blocks to snap to"
                     setter={setter.reform(|x: usize|
                         AppEvent::SnapStep(*[r64![0], r64![1], r64![0.5], r64![0.25], r64![0.125]]

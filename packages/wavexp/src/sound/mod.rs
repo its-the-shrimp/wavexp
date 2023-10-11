@@ -195,6 +195,7 @@ pub struct AudioInput {
     name: Rc<str>,
     duration: Secs,
     raw: AudioBuffer,
+    raw_duration: Secs,
     pending_changes: AudioInputChanges,
     baked_changes: AudioInputChanges,
     baked: AudioBuffer
@@ -217,15 +218,21 @@ impl AudioInput {
         }
         let name = format!("File {:?}", file.name()).into();
         let duration = R64::try_from(raw.duration())?;
-        Ok(Self{name, baked: raw.clone(), raw, duration, pending_changes: default(), baked_changes: default()})
+        Ok(Self{name,
+            baked: raw.clone(),
+            raw,
+            duration,
+            raw_duration: duration,
+            pending_changes: default(),
+            baked_changes: default()})
     }
 
     /// Name of the input, exists solely for the user's convenience.
     pub fn name(&self) -> &Rc<str> {&self.name}
     /// Sets the name of the input, returning the old one.
     pub fn set_name(&mut self, name: Rc<str>) -> Rc<str> {replace(&mut self.name, name)}
-    // /// Duration of the raw buffer, unchanged since the moment the input was created.
-    // pub fn raw_duration(&self) -> Secs {self.duration}
+    /// Duration of the raw buffer, unchanged since the moment the input was created.
+    pub fn raw_duration(&self) -> Secs {self.raw_duration}
     /// Duration of the buffer with all the requested changes baked in.
     pub fn baked_duration(&self) -> Secs {self.duration}
 
@@ -241,25 +248,23 @@ impl AudioInput {
     /// If an error occurs, the input will appear unbaked.
     pub fn bake(&mut self, bps: Beats) -> AppResult<()> {
         if self.pending_changes == self.baked_changes {return Ok(())};
-        self.baked = AudioBuffer::new(
-            AudioBufferOptions::new(self.raw.length(), Sequencer::SAMPLE_RATE as f32)
-                .number_of_channels(Sequencer::CHANNEL_COUNT))?;
-
         let cut_start = (*self.pending_changes.cut_start.to_secs(bps)
             * Sequencer::SAMPLE_RATE as f64) as usize;
-        let cut_end = (self.raw.length() as f64
-            - *self.pending_changes.cut_end.to_secs(bps)
+        let cut_end = (*self.pending_changes.cut_end.to_secs(bps)
             * Sequencer::SAMPLE_RATE as f64) as usize;
+        let length = self.raw.length() - cut_start as u32 - cut_end as u32;
+        self.baked = AudioBuffer::new(
+            AudioBufferOptions::new(length, Sequencer::SAMPLE_RATE as f32)
+                .number_of_channels(Sequencer::CHANNEL_COUNT))?;
+
         // TODO: this doesn't affect anything for some reason.
-        self.duration = R64::from(cut_end - cut_start) / Sequencer::SAMPLE_RATE;
+        self.duration = R64::from(length) / Sequencer::SAMPLE_RATE;
         for i in 0 .. Sequencer::CHANNEL_COUNT {
             let mut data = self.raw.get_channel_data(i)?;
             if self.pending_changes.reversed {
                 data.reverse();
             }
-            data.truncate(cut_end);
-            data.drain(.. cut_start);
-            self.baked.copy_to_channel(&data, i as i32)?;
+            self.baked.copy_to_channel(&data[cut_start..], i as i32)?;
         }
 
         Ok(self.baked_changes = self.pending_changes)
