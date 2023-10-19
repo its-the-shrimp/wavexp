@@ -7,7 +7,6 @@ use wavexp_utils::{
     ArrayExt,
     ArrayFrom,
     OptionExt,
-    default,
     R32, r32,
     R64, r64,
     js_function,
@@ -159,7 +158,7 @@ pub struct CustomSound {
 
 impl Default for CustomSound {
     fn default() -> Self {
-        Self{pattern: default(),
+        Self{pattern: GraphEditor::new(vec![CustomBlock{offset: r64![0], pitch: Note::MID}]).into(),
             src: None,
             volume: r32![1], attack: r64![0], decay: r64![0], sustain: r32![1], release: r64![0],
             rep_count: NonZeroUsize::MIN, speed: r32![1]}

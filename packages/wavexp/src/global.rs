@@ -14,7 +14,8 @@ use web_sys::{
     MouseEvent,
     UiEvent,
     KeyboardEvent,
-    Event};
+    Event,
+    AudioBuffer};
 use yew::{
     Component,
     Context,
@@ -38,7 +39,8 @@ use wavexp_utils::{
     now,
     ArrayExt,
     js_function,
-    cell::Shared, BoolExt};
+    cell::Shared,
+    BoolExt};
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, AudioInput, FromBeats},
     visual::{HintHandler, SoundVisualiser, AnyGraphEditor, SpecialAction},
@@ -150,6 +152,10 @@ pub enum AppEvent {
     SetEndCutOff(Beats),
     /// set the special action for editor spaces.
     SetSpecialAction(SpecialAction),
+    /// prepare audio export.
+    PrepareExport,
+    /// export audio.
+    Export(AudioBuffer)
 }
 
 /// For `AppAction::RemovePoint`

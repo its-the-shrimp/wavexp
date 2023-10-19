@@ -2,7 +2,12 @@ use std::{
     ops::{Deref, DerefMut, Range, Not, RangeInclusive},
     cmp::Ordering,
     fmt::{Display, Formatter, self},
-    rc::Rc, mem::replace};
+    rc::Rc,
+    mem::replace,
+    io::Cursor,
+    iter::zip};
+use hound::{WavWriter, WavSpec, SampleFormat};
+use js_sys::{Uint8Array, Array};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use wavexp_utils::{
@@ -20,7 +25,8 @@ use wavexp_utils::{
     js_function,
     BoolExt,
     cell::{Shared, SharedAwareRefMut},
-    RangeExt};
+    RangeExt,
+    const_assert};
 use web_sys::{
     Path2d,
     HtmlCanvasElement,
@@ -29,7 +35,11 @@ use web_sys::{
     GainNode,
     OfflineAudioContext,
     AudioContext,
-    HtmlInputElement};
+    HtmlInputElement,
+    OfflineAudioCompletionEvent,
+    HtmlAnchorElement,
+    Blob,
+    Url};
 use yew::{
     Html,
     html,
@@ -290,6 +300,11 @@ impl Sequencer {
                     <Slider key="gain" name="Master volume"
                     setter={emitter.reform(|x| AppEvent::MasterVolume(R32::from(x)))}
                     initial={self.volume()}/>
+                    <Button name="Export audio" class="wide"
+                    help="The whole sequence will be saved in the .wav format"
+                    setter={emitter.reform(|_| AppEvent::PrepareExport)}>
+                        <span>{"Export as .wav"}</span>
+                    </Button>
                 </div>
             },
 
@@ -375,6 +390,62 @@ impl Sequencer {
                 let emitter = ctx.event_emitter().clone();
                 temp.set_onchange(Some(&js_function!(|e| emitter.emit(AppEvent::AudioUploaded(e)))));
                 temp.click();
+            }
+
+            AppEvent::PrepareExport => {
+                let mut pat = self.pattern.get_mut()?;
+                let renderer = OfflineAudioContext::new_with_number_of_channels_and_length_and_sample_rate(
+                    Self::CHANNEL_COUNT,
+                    'len: {
+                        let Some(last) = pat.last() else {break 'len 0};
+                        ((last.len(self.bps)? + last.offset) * Self::SAMPLE_RATE).into()
+                    },
+                    Self::SAMPLE_RATE as f32)?;
+                let gain = renderer.create_gain()?;
+                gain.gain().set_value(*self.volume());
+                gain.connect_with_audio_node(&renderer.destination())?;
+                for mut block in pat.iter_mut() {
+                    block.inner().prepare(self.bps)?;
+                }
+                for mut block in pat.iter_mut() {
+                    let offset = block.offset.to_secs(self.bps);
+                    block.inner().play(&gain, r64![0], offset, self.bps)?;
+                }
+                let emitter = ctx.event_emitter().clone();
+                renderer.set_oncomplete(Some(&js_function!(|e: OfflineAudioCompletionEvent|
+                    emitter.emit(AppEvent::Export(e.rendered_buffer())))));
+                _ = renderer.start_rendering()?;
+            }
+
+            AppEvent::Export(ref data) => {
+                let mut wav = Cursor::new(Vec::<u8>::new());
+                let mut wav_writer = WavWriter::new(&mut wav, WavSpec{
+                    channels: Self::CHANNEL_COUNT as u16,
+                    sample_rate: Self::SAMPLE_RATE,
+                    bits_per_sample: 32,
+                    sample_format: SampleFormat::Float})?;
+
+                const_assert!(Sequencer::CHANNEL_COUNT == 2);
+                let ch1 = data.get_channel_data(0)?;
+                let ch2 = data.get_channel_data(1)?;
+                for (s1, s2) in zip(ch1, ch2) {
+                    wav_writer.write_sample(s1)?;
+                    wav_writer.write_sample(s2)?;
+                }
+                wav_writer.finalize()?;
+                let wav = wav.into_inner();
+
+                let wav_js_inner = Uint8Array::new_with_length(wav.len() as u32);
+                wav_js_inner.copy_from(&wav);
+                let wav_js = Array::new();
+                wav_js.push(&wav_js_inner.buffer());
+                let wav_js = Blob::new_with_blob_sequence(&wav_js)?;
+                let temp = document().create_element("a")?
+                    .unchecked_into::<HtmlAnchorElement>();
+                temp.set_href(&Url::create_object_url_with_blob(&wav_js)?);
+                temp.set_download("project.wav");
+                temp.click();
+                temp.remove();
             }
 
             AppEvent::SetInputName(ref e) => {

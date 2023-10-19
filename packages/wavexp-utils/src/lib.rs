@@ -7,7 +7,6 @@
 
 pub mod cell;
 pub mod iter;
-pub mod collections;
 use std::{
     ptr,
     mem::{take, transmute_copy, MaybeUninit, forget},
@@ -20,8 +19,7 @@ use std::{
     array::from_fn,
     num::{TryFromIntError,
         NonZeroU8, NonZeroU16, NonZeroU32, NonZeroUsize, NonZeroU64,
-        NonZeroI8, NonZeroI16, NonZeroI32, NonZeroIsize, NonZeroI64},
-    cell::{BorrowError, BorrowMutError}};
+        NonZeroI8, NonZeroI16, NonZeroI32, NonZeroIsize, NonZeroI64}};
 pub use js_sys;
 pub use wasm_bindgen;
 use wasm_bindgen::{JsValue, JsCast};
@@ -438,7 +436,7 @@ macro_rules! impl_into_app_error {
     };
 }
 
-impl_into_app_error!(BorrowError BorrowMutError);
+impl_into_app_error!(hound::Error);
 
 impl From<AppError> for js_sys::Error {
     fn from(value: AppError) -> Self {value.0}
@@ -1625,4 +1623,12 @@ macro_rules! r64 {
         #[allow(unused_unsafe)]
         unsafe{$crate::R64::new_unchecked(($x + 0) as f64)}
     }}
+}
+
+#[macro_export]
+macro_rules! const_assert {
+    ($x:expr $(,)?) => {
+        #[allow(unknown_lints, eq_op)]
+        const _: [(); 0 - !{ const ASSERT: bool = $x; ASSERT } as usize] = [];
+    };
 }
