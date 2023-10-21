@@ -295,7 +295,7 @@ pub struct ButtonProps {
     pub children: Children,
     pub help: Option<AttrValue>,
     #[prop_or_default]
-    pub setter: Callback<PointerEvent>,
+    pub onclick: Callback<PointerEvent>,
     #[prop_or(false)]
     pub svg: bool,
     #[prop_or(false)]
@@ -313,14 +313,14 @@ impl Component for Button {
     fn update(&mut self, _: &Context<Self>, _: Self::Message) -> bool {false}
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let ButtonProps{name, children, svg, class, setter, help, submit} = ctx.props();
+        let ButtonProps{name, children, svg, class, onclick, help, submit} = ctx.props();
         let mut class = class.clone();
         class.push("input button");
         if *svg {
             html!{
                 <g {class}
                 data-main-hint={name} data-aux-hint={help}
-                onpointerup={setter}>
+                onpointerup={onclick}>
                     {children.clone()}
                 </g>
             }
@@ -328,7 +328,7 @@ impl Component for Button {
             html!{
                 <button {class} type={submit.choose("submit", "button")}
                 data-main-hint={name} data-aux-hint={help}
-                onpointerup={setter}>
+                onpointerup={onclick}>
                     {children.clone()}
                 </button>
             }
@@ -498,11 +498,11 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
     match input.as_ref().map(|x| x.get_aware().report()) {
         Some(Some(input)) => html!{
             <Button {name} {help} class={classes!(class.clone(), "wide")}
-            setter={onclick}>
+            onclick={onclick}>
                 <div class="inner-button-panel">
                     if *playing {
                         <Button name="Stop playing" help="Click to stop the playback"
-                        setter={emitter.reform(move |e: PointerEvent| {
+                        onclick={emitter.reform(move |e: PointerEvent| {
                             e.stop_propagation();
                             AppEvent::StopPlay
                         })}>
@@ -510,7 +510,7 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                         </Button>
                     } else {
                         <Button name="Play audio input" help="Click to hear how the input sounds"
-                        setter={{
+                        onclick={{
                             let s = input.outer();
                             emitter.reform(move |e: PointerEvent| {
                                 e.stop_propagation();
@@ -522,7 +522,7 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                     }
                     <p>{input.desc(*bps)}</p>
                     <Button name="Edit audio input" help="Click to edit the audio input"
-                    setter={{
+                    onclick={{
                         let s = input.outer();
                         emitter.reform(move |e: PointerEvent| {
                             e.stop_propagation();
@@ -543,18 +543,18 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
 
         None => html!{
             <Button {name} {help} class={classes!(class.clone(), "wide")}
-            setter={onclick}>
+            onclick={onclick}>
                 <div class="inner-button-panel">
                     <Button class="unavailable" name="Play audio input (not chosen)"
                     help="Choose the audio input for the sound block to play it here"
-                    setter={|e: PointerEvent| e.stop_propagation()}>
+                    onclick={|e: PointerEvent| e.stop_propagation()}>
                         <img::Play/>
                     </Button>
                     <p>{"Not chosen"}</p>
                     <Button class="unavailable" name="Edit audio input (not chosen)"
                     help="Choose the audio input for the sound block to edit it \
                           by clicking here"
-                    setter={|e: PointerEvent| e.stop_propagation()}>
+                    onclick={|e: PointerEvent| e.stop_propagation()}>
                         <img::Settings/>
                     </Button>
                 </div>

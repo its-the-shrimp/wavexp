@@ -1,28 +1,30 @@
 use std::{
     borrow::Cow,
     slice::from_ref,
-    mem::take,
+    mem::{take, replace},
     cmp::Ordering,
     iter::once,
     num::NonZeroUsize,
     rc::Rc,
     any::Any};
 use js_sys::Function;
-use wasm_bindgen::{closure::Closure, JsCast};
+use wasm_bindgen::JsCast;
 use web_sys::{
     PointerEvent,
     MouseEvent,
     UiEvent,
     KeyboardEvent,
     Event,
-    AudioBuffer};
+    AudioBuffer,
+    HtmlInputElement};
 use yew::{
     Component,
     Context,
     Html,
     html,
     AttrValue,
-    Callback};
+    Callback,
+    TargetCast};
 use wavexp_utils::{
     R64,
     R32,
@@ -43,7 +45,7 @@ use wavexp_utils::{
     BoolExt};
 use crate::{
     sound::{MSecs, Secs, Beats, SoundType, AudioInput, FromBeats},
-    visual::{HintHandler, SoundVisualiser, AnyGraphEditor, SpecialAction},
+    visual::{HintHandler, SoundVisualiser, SpecialAction},
     input::{Button, Switch, GraphEditorCanvas, AudioInputButton, Slider},
     sequencer::{SoundBlock, Sequencer},
     img};
@@ -152,10 +154,14 @@ pub enum AppEvent {
     SetEndCutOff(Beats),
     /// set the special action for editor spaces.
     SetSpecialAction(SpecialAction),
-    /// prepare audio export.
-    PrepareExport,
-    /// export audio.
-    Export(AudioBuffer)
+    /// prepare export of the project under the provided file name.
+    PrepareExport(Rc<str>),
+    /// export audio under the provided file name.
+    Export(Rc<str>, AudioBuffer),
+    /// set the filename under which the project will be saved
+    SetOutputFileName(Event),
+    /// display an explanation for why the export file name is invalid.
+    ExplainInvalidExportFileName(Event)
 }
 
 /// For `AppAction::RemovePoint`
@@ -228,7 +234,9 @@ pub enum AppAction {
     /// set the currently edited audio input's starting cut off.
     SetStartCutOff{from: Beats, to: Beats},
     /// set the currently edited audio input's ending cut off.
-    SetEndCutOff{from: Beats, to: Beats}
+    SetEndCutOff{from: Beats, to: Beats},
+    /// change the filename under which to save the project.
+    SetOutputFileName{from: Rc<str>, to: Rc<str>}
 }
 
 impl AppAction {
@@ -297,7 +305,9 @@ impl AppAction {
             Self::SetStartCutOff{..} =>
                 Some("Set Starting Cut-Off"),
             Self::SetEndCutOff{..} =>
-                Some("Set Ending Cut-Off")
+                Some("Set Ending Cut-Off"),
+            Self::SetOutputFileName{..} =>
+                None
         }
     }
 
@@ -340,19 +350,126 @@ impl AppAction {
 pub enum Popup {
     /// Choose the audio input for the selected sound block.
     ChooseInput,
-    /// Edit the contined audio input.
-    EditInput(Shared<AudioInput>)
+    /// Edit the contained audio input.
+    EditInput(Shared<AudioInput>),
+    /// Save the sequence as a file.
+    Export{filename: Rc<str>, err_msg: AttrValue}
 }
 
 impl Popup {
+    pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> AppResult<()> {
+        Ok(match *event {
+            AppEvent::SetOutputFileName(ref e) => if let Self::Export{filename, err_msg} = self {
+                let to: Rc<str> = e.target_dyn_into::<HtmlInputElement>().to_app_result()?
+                    .value().into();
+                let from = replace(filename, to.clone());
+                *err_msg = "".into();
+                ctx.register_action(AppAction::SetOutputFileName{from, to});
+            }
+
+            AppEvent::ExplainInvalidExportFileName(ref e) => if let Self::Export{err_msg, ..} = self {
+                let value: Rc<str> = e.target_dyn_into::<HtmlInputElement>().to_app_result()?
+                    .value().into();
+                let mut parts = value.split('.');
+                let [base, ext] = [parts.next(), parts.next()];
+                // empty name case isn't matched as browser's indications should suffice then
+                if base == Some("") {
+                    *err_msg = "Base name isn't provided".into();
+                } else if ext.is_none() {
+                    *err_msg = "File extension not provided".into();
+                } else if ext != Some("wav") {
+                    *err_msg = format!("Invalid/unsupported format: {:?}", ext.unwrap_or("")).into();
+                }
+                ctx.force_rerender();
+            }
+
+            AppEvent::SetInputName(ref e) => if let Self::EditInput(input) = self {
+                let to: Rc<str> = e.target_dyn_into::<HtmlInputElement>().to_app_result()?
+                    .value().into();
+                if !to.is_empty() {
+                    let from = input.get_mut()?.set_name(to.clone());
+                    ctx.register_action(AppAction::SetInputName{from, to});
+                }
+            }
+
+            AppEvent::ReverseInput => if let Self::EditInput(input) = self {
+                input.get_mut()?.changes_mut().reversed.flip();
+                ctx.register_action(AppAction::ReverseInput);
+            }
+
+            AppEvent::SetStartCutOff(to) => if let Self::EditInput(input) = self {
+                let from = replace(&mut input.get_mut()?.changes_mut().cut_start, to);
+                ctx.register_action(AppAction::SetStartCutOff{from, to});
+            }
+
+            AppEvent::SetEndCutOff(to) => if let Self::EditInput(input) = self {
+                let from = replace(&mut input.get_mut()?.changes_mut().cut_end, to);
+                ctx.register_action(AppAction::SetEndCutOff{from, to});
+            }
+
+            AppEvent::Undo(ref actions) => for action in actions.iter() {
+                match action {
+                    AppAction::SetOutputFileName{from, ..} => if let Self::Export{filename, ..} = self {
+                        *filename = from.clone();
+                    }
+
+                    AppAction::SetInputName{from, ..} => if let Self::EditInput(input) = self {
+                        input.get_mut()?.set_name(from.clone());
+                    }
+
+                    AppAction::ReverseInput => if let Self::EditInput(input) = self {
+                        input.get_mut()?.changes_mut().reversed.flip();
+                    }
+
+                    AppAction::SetStartCutOff{from, ..} => if let Self::EditInput(input) = self {
+                        input.get_mut()?.changes_mut().cut_start = *from;
+                    }
+
+                    AppAction::SetEndCutOff{from, ..} => if let Self::EditInput(input) = self {
+                        input.get_mut()?.changes_mut().cut_end = *from;
+                    }
+                    
+                    _ => ()
+                }
+            }
+
+            AppEvent::Redo(ref actions) => for action in actions.iter() {
+                match action {
+                    AppAction::SetOutputFileName{to, ..} => if let Self::Export{filename, ..} = self {
+                        *filename = to.clone();
+                    }
+
+                    AppAction::SetInputName{to, ..} => if let Self::EditInput(input) = self {
+                        input.get_mut()?.set_name(to.clone());
+                    }
+
+                    AppAction::ReverseInput => if let Self::EditInput(input) = self {
+                        input.get_mut()?.changes_mut().reversed.flip();
+                    }
+
+                    AppAction::SetStartCutOff{to, ..} => if let Self::EditInput(input) = self {
+                        input.get_mut()?.changes_mut().cut_start = *to;
+                    }
+
+                    AppAction::SetEndCutOff{to, ..} => if let Self::EditInput(input) = self {
+                        input.get_mut()?.changes_mut().cut_end = *to;
+                    }
+                    
+                    _ => ()
+                }
+            }
+
+            _ => ()
+        })
+    }
+
     pub fn render(&self, ctx: &AppContext, sequencer: &Sequencer) -> Html {
         let emitter = ctx.event_emitter();
         match self {
             Self::ChooseInput => html!{
-                <div id="popup-bg">
+                <form id="popup-bg" method="dialog" onsubmit={emitter.reform(|_| AppEvent::ClosePopup)}>
                     <p>{"Choose audio input"}</p>
-                    <Button name="Close the pop-up" class="small red-on-hover"
-                    setter={emitter.reform(|_| AppEvent::ClosePopup)}>
+                    <Button name="Close the pop-up" class="small red-on-hover" submit=true>
                         <img::Cross/>
                     </Button>
                     <div class="blue-border" data-main-hint="Choose audio input">
@@ -370,13 +487,13 @@ impl Popup {
                                     name={input.get().map_or_else(|_| "".into(), |x| x.name().clone())}/>
                                 })}
                                 <Button name="Add audio input"
-                                setter={emitter.reform(|_| AppEvent::StartInputAdd)}>
+                                onclick={emitter.reform(|_| AppEvent::StartInputAdd)}>
                                     <img::Plus/>
                                 </Button>
                             </div>
                         </div>
                     </div>
-                </div>
+                </form>
             },
 
             Self::EditInput(input_outer) => html!{
@@ -386,19 +503,19 @@ impl Popup {
                         <img::Cross/>
                     </Button>
                     <div class="dark-bg blue-border" data-main-hint="Edit audio input">
-                        <div id="input-settings-panel">
+                        <div id="popup-core">
                             if let Some(input) = input_outer.get().report() {
                                 <div style="display: grid; grid-template-columns: repeat(3, 1fr)">
                                     if input.changes().reversed {
                                         <Button name="Playback direction: reverse" class="small"
                                         help="Click to reverse the audio input"
-                                        setter={emitter.reform(|_| AppEvent::ReverseInput)}>
+                                        onclick={emitter.reform(|_| AppEvent::ReverseInput)}>
                                             <img::LeftArrow/>
                                         </Button>
                                     } else {
                                         <Button name="Playback direction: normal" class="small"
                                         help="Click to reverse the audio input"
-                                        setter={emitter.reform(|_| AppEvent::ReverseInput)}>
+                                        onclick={emitter.reform(|_| AppEvent::ReverseInput)}>
                                             <img::RightArrow/>
                                         </Button>
                                     }
@@ -426,12 +543,36 @@ impl Popup {
                         </div>
                     </div>
                 </form>
+            },
+
+            Self::Export{filename, err_msg} => html!{
+                <form id="popup-bg" method="dialog" onsubmit={{
+                    let filename = filename.clone();
+                    emitter.reform(move |_| AppEvent::PrepareExport(filename.clone()))
+                }}>
+                    <p>{"Export the project"}</p>
+                    <Button name="Close the pop-up" class="small red-on-hover"
+                    onclick={emitter.reform(|_| AppEvent::ClosePopup)}>
+                        <img::Cross/>
+                    </Button>
+                    <div class="dark-bg blue-border" data-main-hint="Export the project">
+                        <div id="popup-core">
+                            <input type="text" value={filename.clone()} pattern=".*\\.wav"
+                            placeholder="Enter file name..." required=true
+                            class="dark-bg blue-border" data-main-hint="Output file name"
+                            oninvalid={emitter.reform(AppEvent::ExplainInvalidExportFileName)}
+                            onchange={emitter.reform(AppEvent::SetOutputFileName)}/>
+                            <Button name="Save" class="wide" submit=true>
+                                <p>{"Save"}</p>
+                            </Button>
+                        </div>
+                    </div>
+                    if !err_msg.is_empty() {
+                        <p class="error">{"Error: "}{err_msg}</p>
+                    }
+                </form>
             }
         }
-    }
-
-    pub fn edited_input(&self) -> Option<&Shared<AudioInput>> {
-        if let Self::EditInput(v) = self {Some(v)} else {None}
     }
 }
 
@@ -444,8 +585,6 @@ pub struct AppContext {
     actions: Vec<AppAction>,
     undid_actions: usize,
     rerender_needed: bool,
-    /// pop-ups are stacked on each other if one is opened from within another one.
-    popups: Vec<Popup>,
     special_action: SpecialAction
 }
 
@@ -458,12 +597,10 @@ impl AppContext {
             undid_actions: 0,
             actions: vec![AppAction::Start],
             rerender_needed: false,
-            popups: vec![],
             special_action: default(),
             event_emitter})
     }
 
-    pub fn popup(&self) -> Option<&Popup> {self.popups.last()}
     pub fn frame(&self) -> Secs {self.frame}
     pub fn snap_step(&self) -> R64 {self.snap_step}
     pub fn selected_tab(&self) -> usize {self.selected_tab}
@@ -472,6 +609,7 @@ impl AppContext {
     pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
     pub fn special_action(&self) -> SpecialAction {self.special_action}
 
+    pub fn force_rerender(&mut self) {self.rerender_needed = true}
     pub fn register_action(&mut self, action: AppAction) {
         self.actions.drain(self.actions.len() - take(&mut self.undid_actions) ..);
         self.rerender_needed = true;
@@ -490,7 +628,9 @@ pub struct App {
     ctx: AppContext,
     hint_handler: HintHandler,
     frame_emitter: Function,
-    selected_block: Option<usize>
+    selected_block: Option<usize>,
+    /// pop-ups are stacked on each other if one is opened from within another one.
+    popups: Vec<Popup>,
 }
 
 impl Component for App {
@@ -503,6 +643,7 @@ impl Component for App {
         let sound_visualiser = SoundVisualiser::new();
 
         let res = Self{
+            popups: vec![],
             selected_block: None,
             hint_handler: default(),
             sequencer: Sequencer::new().unwrap().into(),
@@ -556,7 +697,7 @@ impl Component for App {
                     "KeyR" =>
                         self.ctx.emit_event(AppEvent::SetSpecialAction(SpecialAction::Remove)),
 
-                    "Escape" if let Some(closed) = self.ctx.popups.pop() => {
+                    "Escape" if let Some(closed) = self.popups.pop() => {
                         e.prevent_default();
                         self.ctx.register_action(AppAction::ClosePopup(closed));
                     }
@@ -611,34 +752,24 @@ impl Component for App {
                 AppEvent::Enter(id, _) => {
                     let window = window();
                     let cb = ctx.link().callback(move |e| AppEvent::KeyPress(id, e));
-                    let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
-                        .into_js_value().unchecked_into();
-                    window.set_onkeydown(Some(&cb));
+                    window.set_onkeydown(Some(&js_function!(cb.emit)));
                     let cb = ctx.link().callback(move |e| AppEvent::KeyRelease(id, e));
-                    let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
-                        .into_js_value().unchecked_into();
-                    window.set_onkeyup(Some(&cb))
+                    window.set_onkeyup(Some(&js_function!(cb.emit)));
                 }
 
                 AppEvent::Leave(_) => {
                     let window = window();
-                    let cb = ctx.link().callback(|e| AppEvent::KeyPress(AnyGraphEditor::INVALID_ID, e));
-                    let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
-                        .into_js_value().unchecked_into();
-                    window.set_onkeydown(Some(&cb));
-                    let cb = ctx.link().callback(|e| AppEvent::KeyRelease(AnyGraphEditor::INVALID_ID, e));
-                    let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
-                        .into_js_value().unchecked_into();
-                    window.set_onkeyup(Some(&cb))
+                    window.set_onkeydown(None);
+                    window.set_onkeyup(None);
                 }
 
                 AppEvent::OpenPopup(ref opened) => {
                     self.ctx.register_action(AppAction::OpenPopup(opened.clone()));
-                    self.ctx.popups.push(opened.clone());
+                    self.popups.push(opened.clone());
                 }
 
                 AppEvent::ClosePopup => {
-                    let closed = self.ctx.popups.pop().to_app_result()?;
+                    let closed = self.popups.pop().to_app_result()?;
                     self.ctx.register_action(AppAction::ClosePopup(closed));
                 }
 
@@ -659,10 +790,10 @@ impl Component for App {
                             self.ctx.snap_step = from,
 
                         AppAction::OpenPopup(_) =>
-                            _ = self.ctx.popups.pop(),
+                            _ = self.popups.pop(),
 
                         AppAction::ClosePopup(ref popup) =>
-                            self.ctx.popups.push(popup.clone()),
+                            self.popups.push(popup.clone()),
 
                         _ => (),
                     }
@@ -682,10 +813,10 @@ impl Component for App {
                             self.ctx.snap_step = to,
 
                         AppAction::OpenPopup(ref popup) =>
-                            self.ctx.popups.push(popup.clone()),
+                            self.popups.push(popup.clone()),
 
                         AppAction::ClosePopup(_) =>
-                            _ = self.ctx.popups.pop(),
+                            _ = self.popups.pop(),
 
                         _ => (),
                     }
@@ -728,11 +859,11 @@ impl Component for App {
                         {block.sound.params(&self.ctx, &sequencer)}
                         <div id="general-ctrl" class="dark-bg">
                             <Button name="Back to project-wide settings"
-                            setter={setter.reform(|_| AppEvent::Select(None))}>
+                            onclick={setter.reform(|_| AppEvent::Select(None))}>
                                 <img::House/>
                             </Button>
                             <Button name="Remove sound block" class="red-on-hover"
-                            setter={setter.reform(|_| AppEvent::Remove)}>
+                            onclick={setter.reform(|_| AppEvent::Remove)}>
                                 <img::Cross/>
                             </Button>
                         </div>
@@ -742,7 +873,7 @@ impl Component for App {
                         </div>
                         {sequencer.params(&self.ctx)}
                     }
-                    if let Some(popup) = self.ctx.popup() {
+                    if let Some(popup) = self.popups.last() {
                         {popup.render(&self.ctx, &sequencer)}
                     }
                 </div>
@@ -763,7 +894,7 @@ impl Component for App {
                                         2 => AttrValue::Static("Click to redo this and the previous action"),
                                         _ => format!("Click to redo this and {i} previous actions").into()
                                     }}
-                                    setter={setter.reform(move |_| AppEvent::Rewind(i))}>
+                                    onclick={setter.reform(move |_| AppEvent::Rewind(i))}>
                                         <s>{name}</s>
                                     </Button>
                                 }
@@ -771,9 +902,7 @@ impl Component for App {
 
                             Ordering::Equal => html!{<>
                                 if let Some(name) = a.name() {
-                                    <Button {name} class="selected"
-                                    help={"Last action"}
-                                    setter={Callback::noop()}>
+                                    <Button {name} class="selected" help="Last action">
                                         <p>{name}</p>
                                     </Button>
                                 }
@@ -787,7 +916,7 @@ impl Component for App {
                                         1 => AttrValue::Static("Click to undo the next action"),
                                         _ => format!("Click to undo {i} subsequent actions").into()
                                     }}
-                                    setter={setter.reform(move |_| AppEvent::Unwind(i))}>
+                                    onclick={setter.reform(move |_| AppEvent::Unwind(i))}>
                                         <p>{name}</p>
                                     </Button>
                                 }
@@ -801,19 +930,19 @@ impl Component for App {
                     <Button name="Special Action: Select"
                     class={(self.ctx.special_action == SpecialAction::Select).choose("small selected", "small")}
                     help="Click to select points when pressing Meta in an editor space"
-                    setter={setter.reform(|_| AppEvent::SetSpecialAction(SpecialAction::Select))}>
+                    onclick={setter.reform(|_| AppEvent::SetSpecialAction(SpecialAction::Select))}>
                         <img::Selection/>
                     </Button>
                     <Button name="Special Action: Add"
                     class={(self.ctx.special_action == SpecialAction::Add).choose("small selected", "small")}
                     help="Click to add points when pressing Meta in an editor space"
-                    setter={setter.reform(|_| AppEvent::SetSpecialAction(SpecialAction::Add))}>
+                    onclick={setter.reform(|_| AppEvent::SetSpecialAction(SpecialAction::Add))}>
                         <img::Plus/>
                     </Button>
                     <Button name="Special Action: Remove"
                     class={(self.ctx.special_action == SpecialAction::Remove).choose("small selected", "small")}
                     help="Click to remove points when pressing Meta in an editor space"
-                    setter={setter.reform(|_| AppEvent::SetSpecialAction(SpecialAction::Remove))}>
+                    onclick={setter.reform(|_| AppEvent::SetSpecialAction(SpecialAction::Remove))}>
                         <img::Minus/>
                     </Button>
                 </div>
@@ -833,12 +962,12 @@ impl Component for App {
                 </div>
                 if sequencer.playback_ctx().all_playing() {
                     <Button name="Stop"
-                    setter={setter.reform(|_| AppEvent::StopPlay)}>
+                    onclick={setter.reform(|_| AppEvent::StopPlay)}>
                         <img::Stop/>
                     </Button>
                 } else {
                     <Button name="Play"
-                    setter={setter.reform(|_| AppEvent::PreparePlay(None))}>
+                    onclick={setter.reform(|_| AppEvent::PreparePlay(None))}>
                         <img::Play/>
                     </Button>
                 }
@@ -858,24 +987,10 @@ impl Component for App {
         let window = window();
 
         let cb = ctx.link().callback(|_| AppEvent::Resize);
-        let cb = Closure::<dyn Fn()>::new(move || cb.emit(()))
-            .into_js_value().unchecked_into();
-        window.set_onresize(Some(&cb));
+        window.set_onresize(Some(&js_function!(|| cb.emit(()))));
 
         let cb = ctx.link().callback(AppEvent::FetchHint);
-        let cb = Closure::<dyn Fn(UiEvent)>::new(move |e| cb.emit(e))
-            .into_js_value().unchecked_into();
-        window.set_onpointerover(Some(&cb));
-
-        let cb = ctx.link().callback(|e| AppEvent::KeyPress(AnyGraphEditor::INVALID_ID, e));
-        let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
-            .into_js_value().unchecked_into();
-        window.set_onkeydown(Some(&cb));
-
-        let cb = ctx.link().callback(|e| AppEvent::KeyRelease(AnyGraphEditor::INVALID_ID, e));
-        let cb = Closure::<dyn Fn(KeyboardEvent)>::new(move |e| cb.emit(e))
-            .into_js_value().unchecked_into();
-        window.set_onkeyup(Some(&cb));
+        window.set_onpointerover(Some(&js_function!(cb.emit)));
 
         ctx.link().send_message(AppEvent::Resize);
     }
@@ -883,6 +998,9 @@ impl Component for App {
 
 impl App {
     fn forward_event(&mut self, event: AppEvent) -> AppResult<()> {
+        if let Some(popup) = self.popups.last_mut() {
+            popup.handle_event(&event, &mut self.ctx)?;
+        }
         self.hint_handler.handle_event(&event)?;
         let mut sequencer = self.sequencer.get_aware_mut()?;
         self.sound_visualiser.handle_event(&event, &sequencer)?;

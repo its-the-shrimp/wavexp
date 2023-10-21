@@ -33,8 +33,6 @@ web-sys = { version = "0.3.64", features = [
 	"AudioContextOptions",
 	"Performance",
 	"AudioBufferOptions",
-	"AudioWorklet",
-	"AudioWorkletNode",
 	"AudioParamMap",
 	"HtmlAnchorElement",
 	"OfflineAudioCompletionEvent"

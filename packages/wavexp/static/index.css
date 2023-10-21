@@ -14,10 +14,11 @@ body {
 input {
 	color: #0069E1;
 	font-family: consolas;
-	transition: border-width.1s, padding.1s
+	transition: border-width.1s, padding.1s;
 }
-input:blank {
+input:invalid {
 	border-color: #E10000;
+	color: #E10000;
 }
 input:not(:focus-visible) {
 	border-left-width: 0;
@@ -76,6 +77,10 @@ input:focus-visible {
 }
 #inputs > .wide {
 	grid-column: 1 / span 2;
+}
+#popup-core > .wide {
+	width: 10em;
+	height: 3em;
 }
 #io-panel {
 	height: 10em;
@@ -352,6 +357,9 @@ input:focus-visible {
 	grid-row: 2;
 	min-width: 20%;
 	min-height: 20%;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
 }
 #popup-bg > p {
 	grid-column: 2;
@@ -363,6 +371,12 @@ input:focus-visible {
 	grid-row: 1;
 	align-self: end;
 	background-color: transparent;
+}
+#popup-bg > .error {
+	grid-column: 2;
+	grid-row: 3;
+	align-self: start;
+	color: #E10000;
 }
 #popup-bg > button > svg:not(:hover) {
 	fill: transparent;
@@ -387,7 +401,7 @@ input:focus-visible {
 .unavailable {
 	border-style: dashed;
 }
-#input-settings-panel {
+#popup-core {
 	width: 80%;
 	height: 80%;
 	margin: auto;

@@ -373,7 +373,7 @@ impl Sound {
                 html!{<div class="horizontal-menu">
                     {for Sound::TYPES.iter().map(|x| html!{
                         <Button name={x.name()}
-                            setter={emitter.reform(|_| AppEvent::SetBlockType(*x))}>
+                            onclick={emitter.reform(|_| AppEvent::SetBlockType(*x))}>
                             <p>{x.name()}</p>
                         </Button>
                     })}

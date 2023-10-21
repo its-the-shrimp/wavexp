@@ -1,9 +1,7 @@
 use std::{
-    ops::{Deref, DerefMut, Range, Not, RangeInclusive},
+    ops::{Deref, DerefMut, Range, Not, RangeInclusive, Add, Mul},
     cmp::Ordering,
     fmt::{Display, Formatter, self},
-    rc::Rc,
-    mem::replace,
     io::Cursor,
     iter::zip};
 use hound::{WavWriter, WavSpec, SampleFormat};
@@ -23,7 +21,6 @@ use wavexp_utils::{
     AppResultUtils,
     now,
     js_function,
-    BoolExt,
     cell::{Shared, SharedAwareRefMut},
     RangeExt,
     const_assert};
@@ -36,10 +33,10 @@ use web_sys::{
     OfflineAudioContext,
     AudioContext,
     HtmlInputElement,
-    OfflineAudioCompletionEvent,
     HtmlAnchorElement,
     Blob,
-    Url};
+    Url,
+    OfflineAudioCompletionEvent};
 use yew::{
     Html,
     html,
@@ -300,10 +297,12 @@ impl Sequencer {
                     <Slider key="gain" name="Master volume"
                     setter={emitter.reform(|x| AppEvent::MasterVolume(R32::from(x)))}
                     initial={self.volume()}/>
-                    <Button name="Export audio" class="wide"
-                    help="The whole sequence will be saved in the .wav format"
-                    setter={emitter.reform(|_| AppEvent::PrepareExport)}>
-                        <span>{"Export as .wav"}</span>
+                    <Button name="Export the project" class="wide"
+                    help="Save the whole project as an audio file"
+                    onclick={emitter.reform(|_|
+                        AppEvent::OpenPopup(Popup::Export{filename: "project.wav".into(), err_msg: default()})
+                    )}>
+                        <span>{"Export the project"}</span>
                     </Button>
                 </div>
             },
@@ -316,7 +315,7 @@ impl Sequencer {
                         name={input.get().map_or_else(|_| "".into(), |x| x.name().clone())}
                         {input} {emitter} bps={self.bps} class="extend-inner-button-panel"/>
                     })}
-                    <Button name="Add audio input" setter={emitter.reform(|_| AppEvent::StartInputAdd)}>
+                    <Button name="Add audio input" onclick={emitter.reform(|_| AppEvent::StartInputAdd)}>
                         <img::Plus/>
                     </Button>
                 </div>
@@ -392,13 +391,14 @@ impl Sequencer {
                 temp.click();
             }
 
-            AppEvent::PrepareExport => {
+            AppEvent::PrepareExport(ref filename) => {
                 let mut pat = self.pattern.get_mut()?;
                 let renderer = OfflineAudioContext::new_with_number_of_channels_and_length_and_sample_rate(
                     Self::CHANNEL_COUNT,
                     'len: {
-                        let Some(last) = pat.last() else {break 'len 0};
-                        ((last.len(self.bps)? + last.offset) * Self::SAMPLE_RATE).into()
+                        let Some(last) = pat.last() else {break 'len 1};
+                        last.len(self.bps)?.add(last.offset).mul(Self::SAMPLE_RATE)
+                            .max(r64![1]).into()
                     },
                     Self::SAMPLE_RATE as f32)?;
                 let gain = renderer.create_gain()?;
@@ -412,12 +412,14 @@ impl Sequencer {
                     block.inner().play(&gain, r64![0], offset, self.bps)?;
                 }
                 let emitter = ctx.event_emitter().clone();
+                let filename = filename.clone();
                 renderer.set_oncomplete(Some(&js_function!(|e: OfflineAudioCompletionEvent|
-                    emitter.emit(AppEvent::Export(e.rendered_buffer())))));
+                    emitter.emit(AppEvent::Export(filename.clone(), e.rendered_buffer()))
+                )));
                 _ = renderer.start_rendering()?;
             }
 
-            AppEvent::Export(ref data) => {
+            AppEvent::Export(ref filename, ref data) => {
                 let mut wav = Cursor::new(Vec::<u8>::new());
                 let mut wav_writer = WavWriter::new(&mut wav, WavSpec{
                     channels: Self::CHANNEL_COUNT as u16,
@@ -443,37 +445,9 @@ impl Sequencer {
                 let temp = document().create_element("a")?
                     .unchecked_into::<HtmlAnchorElement>();
                 temp.set_href(&Url::create_object_url_with_blob(&wav_js)?);
-                temp.set_download("project.wav");
+                temp.set_download(filename);
                 temp.click();
                 temp.remove();
-            }
-
-            AppEvent::SetInputName(ref e) => {
-                let target: HtmlInputElement = e.target_dyn_into().to_app_result()?;
-                let to: Rc<str> = target.value().into();
-                if !to.is_empty() {
-                    let from = ctx.popup().and_then(|x| x.edited_input()).to_app_result()?
-                        .get_mut()?.set_name(to.clone());
-                    ctx.register_action(AppAction::SetInputName{from, to});
-                }
-            }
-
-            AppEvent::ReverseInput => {
-                ctx.register_action(AppAction::ReverseInput);
-                ctx.popup().and_then(Popup::edited_input).to_app_result()?.get_mut()?
-                    .changes_mut().reversed.flip();
-            }
-
-            AppEvent::SetStartCutOff(to) => {
-                let input = ctx.popup().and_then(Popup::edited_input).to_app_result()?;
-                let from = replace(&mut input.get_mut()?.changes_mut().cut_start, to);
-                ctx.register_action(AppAction::SetStartCutOff{from, to});
-            }
-
-            AppEvent::SetEndCutOff(to) => {
-                let input = ctx.popup().and_then(Popup::edited_input).to_app_result()?;
-                let from = replace(&mut input.get_mut()?.changes_mut().cut_end, to);
-                ctx.register_action(AppAction::SetEndCutOff{from, to});
             }
 
             AppEvent::AudioUploaded(ref e) => {
@@ -524,16 +498,6 @@ impl Sequencer {
                         AppAction::AddInput(_) =>
                             _ = self.inputs.pop(),
 
-                        AppAction::SetInputName{ref from, ..} =>
-                            _ = ctx.popup().and_then(|x| x.edited_input())
-                                .to_app_result()?.get_mut()?
-                                .set_name(from.clone()),
-
-                        AppAction::ReverseInput =>
-                            ctx.popup().and_then(|x| x.edited_input())
-                                .to_app_result()?.get_mut()?
-                                .changes_mut().reversed.flip(),
-
                         _ => ()
                     }
                 }
@@ -552,14 +516,6 @@ impl Sequencer {
 
                         AppAction::AddInput(ref input) =>
                             self.inputs.push(input.clone()),
-
-                        AppAction::SetInputName{ref to, ..} =>
-                            _ = ctx.popup().and_then(|x| x.edited_input()).to_app_result()?
-                                .get_mut()?.set_name(to.clone()),
-
-                        AppAction::ReverseInput =>
-                            ctx.popup().and_then(|x| x.edited_input()).to_app_result()?
-                                .get_mut()?.changes_mut().reversed.flip(),
 
                         _ => ()
                     }

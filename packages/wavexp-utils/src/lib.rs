@@ -348,6 +348,11 @@ macro_rules! js_function {
             .into_js_value()
             .unchecked_into::<$crate::js_sys::Function>()
     };
+    ($obj:ident . $method:ident) => {
+        $crate::wasm_bindgen::closure::Closure::<dyn FnMut(_)>::new(move |x| $obj.$method(x))
+            .into_js_value()
+            .unchecked_into::<$crate::js_sys::Function>()
+    }
 }
 
 pub use web_sys::console::log_1;
