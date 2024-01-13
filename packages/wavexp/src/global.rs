@@ -1,54 +1,23 @@
-use std::{
-    borrow::Cow,
-    slice::from_ref,
-    mem::{take, replace},
-    cmp::Ordering,
-    iter::once,
-    num::NonZeroUsize,
-    rc::Rc,
-    any::Any};
-use js_sys::Function;
-use wasm_bindgen::JsCast;
-use web_sys::{
-    PointerEvent,
-    MouseEvent,
-    UiEvent,
-    KeyboardEvent,
-    Event,
-    AudioBuffer,
-    HtmlInputElement};
-use yew::{
-    Component,
-    Context,
-    Html,
-    html,
-    AttrValue,
-    Callback,
-    TargetCast};
-use wavexp_utils::{
-    R64,
-    R32,
-    window,
-    SliceExt,
-    OptionExt,
-    Point,
-    Take,
-    default,
-    AppResult,
-    r64,
-    AppResultUtils,
-    ToAttrValue,
-    now,
-    ArrayExt,
-    js_function,
-    cell::Shared,
-    BoolExt};
 use crate::{
-    sound::{MSecs, Secs, Beats, SoundType, AudioInput, FromBeats},
+    img,
+    input::{Button, GraphEditorCanvas, Switch},
+    popup::Popup,
+    sequencer::{Sequencer, SoundBlock},
+    sound::{AudioInput, Beats, MSecs, Secs, SoundType},
     visual::{HintHandler, SoundVisualiser, SpecialAction},
-    input::{Button, Switch, GraphEditorCanvas, AudioInputButton, Slider},
-    sequencer::{SoundBlock, Sequencer},
-    img};
+};
+use js_sys::Function;
+use std::{
+    any::Any, borrow::Cow, cmp::Ordering, iter::once, mem::take, num::NonZeroUsize, rc::Rc,
+    slice::from_ref,
+};
+use wasm_bindgen::JsCast;
+use wavexp_utils::{
+    cell::Shared, default, js_function, now, r64, window, AppResult, AppResultUtils, ArrayExt,
+    BoolExt, OptionExt, Point, SliceExt, Take, ToAttrValue, R32, R64,
+};
+use web_sys::{AudioBuffer, Event, KeyboardEvent, MouseEvent, PointerEvent, UiEvent};
+use yew::{html, AttrValue, Callback, Component, Context, Html};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, Clone)]
@@ -161,7 +130,7 @@ pub enum AppEvent {
     /// set the filename under which the project will be saved
     SetOutputFileName(Event),
     /// display an explanation for why the export file name is invalid.
-    ExplainInvalidExportFileName(Event)
+    ExplainInvalidExportFileName(Event),
 }
 
 /// For `AppAction::RemovePoint`
@@ -169,7 +138,7 @@ pub enum AppEvent {
 pub struct RemovedPoint {
     pub point: Rc<dyn Any>,
     pub index: usize,
-    pub was_selected: bool
+    pub was_selected: bool,
 }
 
 /// a globally registered cancelable action
@@ -178,43 +147,62 @@ pub enum AppAction {
     /// start the session; added to the action stack by default and is always the first one
     Start,
     /// drag the plane of a graph editor
-    DragPlane{editor_id: usize,
-        offset_delta: Point, scale_delta: [R64; 2]},
+    DragPlane {
+        editor_id: usize,
+        offset_delta: Point,
+        scale_delta: [R64; 2],
+    },
     /// drag a point of a graph editor
-    DragPoint{editor_id: usize, point_id: usize, delta: [R64; 2]},
+    DragPoint {
+        editor_id: usize,
+        point_id: usize,
+        delta: [R64; 2],
+    },
     /// drag selection in a graph editor
-    DragSelection{editor_id: usize, delta: [R64; 2]},
+    DragSelection { editor_id: usize, delta: [R64; 2] },
     /// change selection in a graph editor
-    SetSelection{editor_id: usize,
-        prev_ids: Box<[usize]>, prev_src: [R64; 2], prev_size: [R64; 2],
-        cur_ids: Box<[usize]>,  cur_src: [R64; 2],  cur_size: [R64; 2]},
+    SetSelection {
+        editor_id: usize,
+        prev_ids: Box<[usize]>,
+        prev_src: [R64; 2],
+        prev_size: [R64; 2],
+        cur_ids: Box<[usize]>,
+        cur_src: [R64; 2],
+        cur_size: [R64; 2],
+    },
     /// select a sound block
-    Select{from: Option<usize>, to: Option<usize>,
-        prev_selected_tab: usize},
+    Select {
+        from: Option<usize>,
+        to: Option<usize>,
+        prev_selected_tab: usize,
+    },
     /// set sound block type from the default undefined one
     SetBlockType(SoundType),
     /// switch tabs in the side editor
-    SwitchTab{from: usize, to: usize},
+    SwitchTab { from: usize, to: usize },
     /// change sound's volume
-    SetVolume{from: R32, to: R32},
+    SetVolume { from: R32, to: R32 },
     /// change sound's attack time
-    SetAttack{from: R64, to: R64},
+    SetAttack { from: R64, to: R64 },
     /// change sound'ss decay time
-    SetDecay{from: R64, to: R64},
+    SetDecay { from: R64, to: R64 },
     /// change sound's sustain level
-    SetSustain{from: R32, to: R32},
+    SetSustain { from: R32, to: R32 },
     /// change sound's release time
-    SetRelease{from: R64, to: R64},
+    SetRelease { from: R64, to: R64 },
     /// change global tempo
-    SetTempo{from: R64, to: R64},
+    SetTempo { from: R64, to: R64 },
     /// set global snap step for all graph editors
-    SetSnapStep{from: R64, to: R64},
+    SetSnapStep { from: R64, to: R64 },
     /// set master gain level for the composition
-    SetMasterVolume{from: R32, to: R32},
+    SetMasterVolume { from: R32, to: R32 },
     /// set repetition count of a sound block
-    SetRepCount{from: NonZeroUsize, to: NonZeroUsize},
+    SetRepCount {
+        from: NonZeroUsize,
+        to: NonZeroUsize,
+    },
     /// set playback speed of the audio source of a Custom Audio sound block
-    SetSpeed{from: R32, to: R32},
+    SetSpeed { from: R32, to: R32 },
     /// register a new audio input
     AddInput(Shared<AudioInput>),
     /// Open a pop-up window.
@@ -222,21 +210,28 @@ pub enum AppAction {
     /// Close a pop-up window.
     ClosePopup(Popup),
     /// change the selected audio input of the sound block.
-    SelectInput{from: Option<Shared<AudioInput>>, to: Option<Shared<AudioInput>>},
+    SelectInput {
+        from: Option<Shared<AudioInput>>,
+        to: Option<Shared<AudioInput>>,
+    },
     /// change the name of the currently edited audio input.
-    SetInputName{from: Rc<str>, to: Rc<str>},
+    SetInputName { from: Rc<str>, to: Rc<str> },
     /// add a point onto a graph editor.
-    AddPoint{editor_id: usize, point_id: usize, point_loc: [R64; 2]},
+    AddPoint {
+        editor_id: usize,
+        point_id: usize,
+        point_loc: [R64; 2],
+    },
     /// remove a point from a graph editor.
     RemovePoint(usize, Box<[RemovedPoint]>),
     /// reverse the currently edited audio input.
     ReverseInput,
     /// set the currently edited audio input's starting cut off.
-    SetStartCutOff{from: Beats, to: Beats},
+    SetStartCutOff { from: Beats, to: Beats },
     /// set the currently edited audio input's ending cut off.
-    SetEndCutOff{from: Beats, to: Beats},
+    SetEndCutOff { from: Beats, to: Beats },
     /// change the filename under which to save the project.
-    SetOutputFileName{from: Rc<str>, to: Rc<str>}
+    SetOutputFileName { from: Rc<str>, to: Rc<str> },
 }
 
 impl AppAction {
@@ -247,67 +242,39 @@ impl AppAction {
     /// Such actions are dragging an editor plane, switching between tabs, etc.
     pub fn name(&self) -> Option<&'static str> {
         match self {
-            Self::Start =>
-                Some("Start"),
-            Self::DragPlane{..} =>
-                None, // "Drag Plane"
-            Self::DragPoint{..} =>
-                Some("Drag Block"),
-            Self::DragSelection{..} =>
-                Some("Drag Selection"),
-            Self::SetSelection{..} =>
-                None, // "Set Selection"
-            Self::Select{..} =>
-                None, // "Open Sound Block Editor" | "Close Sound Block Editor"
-            Self::SetBlockType(..) =>
-                Some("Set Sound Block Type"),
-            Self::SwitchTab{..} =>
-                None, // "Switch Tabs",
-            Self::SetVolume{..} =>
-                Some("Set Volume"),
-            Self::SetAttack{..} =>
-                Some("Set Attack Time"),
-            Self::SetDecay{..} =>
-                Some("Set Decay Time"),
-            Self::SetSustain{..} =>
-                Some("Set Sustain Level"),
-            Self::SetRelease{..} =>
-                Some("Set Release Time"),
-            Self::SetTempo{..} =>
-                Some("Set Tempo"),
-            Self::SetSnapStep{..} =>
-                Some("Set Snap Step"),
-            Self::SetMasterVolume{..} =>
-                Some("Set Master Volume"),
-            Self::SetRepCount{..} =>
-                Some("Set Sound Block Repetition Count"),
-            Self::SetSpeed{..} =>
-                Some("Set Custom Audio's Playback Speed"),
-            Self::AddInput(..) =>
-                Some("Add Audio Input"),
-            Self::OpenPopup(_) =>
-                None,
-            Self::ClosePopup(_) =>
-                None,
-            Self::SelectInput{..} =>
-                Some("Select Audio Input"),
-            Self::SetInputName{..} =>
-                Some("Rename Audio Input"),
-            Self::AddPoint{..} =>
-                Some("Add a point to an editor plane"),
+            Self::Start => Some("Start"),
+            Self::DragPlane { .. } => None, // "Drag Plane"
+            Self::DragPoint { .. } => Some("Drag Block"),
+            Self::DragSelection { .. } => Some("Drag Selection"),
+            Self::SetSelection { .. } => None, // "Set Selection"
+            Self::Select { .. } => None, // "Open Sound Block Editor" | "Close Sound Block Editor"
+            Self::SetBlockType(..) => Some("Set Sound Block Type"),
+            Self::SwitchTab { .. } => None, // "Switch Tabs",
+            Self::SetVolume { .. } => Some("Set Volume"),
+            Self::SetAttack { .. } => Some("Set Attack Time"),
+            Self::SetDecay { .. } => Some("Set Decay Time"),
+            Self::SetSustain { .. } => Some("Set Sustain Level"),
+            Self::SetRelease { .. } => Some("Set Release Time"),
+            Self::SetTempo { .. } => Some("Set Tempo"),
+            Self::SetSnapStep { .. } => Some("Set Snap Step"),
+            Self::SetMasterVolume { .. } => Some("Set Master Volume"),
+            Self::SetRepCount { .. } => Some("Set Sound Block Repetition Count"),
+            Self::SetSpeed { .. } => Some("Set Custom Audio's Playback Speed"),
+            Self::AddInput(..) => Some("Add Audio Input"),
+            Self::OpenPopup(_) => None,
+            Self::ClosePopup(_) => None,
+            Self::SelectInput { .. } => Some("Select Audio Input"),
+            Self::SetInputName { .. } => Some("Rename Audio Input"),
+            Self::AddPoint { .. } => Some("Add a point to an editor plane"),
             Self::RemovePoint(_, points) => Some(if points.len() == 1 {
                 "Remove a point from an editor plane"
             } else {
                 "Remove points from an editor plane"
             }),
-            Self::ReverseInput =>
-                Some("Reverse Audio Input"),
-            Self::SetStartCutOff{..} =>
-                Some("Set Starting Cut-Off"),
-            Self::SetEndCutOff{..} =>
-                Some("Set Ending Cut-Off"),
-            Self::SetOutputFileName{..} =>
-                None
+            Self::ReverseInput => Some("Reverse Audio Input"),
+            Self::SetStartCutOff { .. } => Some("Set Starting Cut-Off"),
+            Self::SetEndCutOff { .. } => Some("Set Ending Cut-Off"),
+            Self::SetOutputFileName { .. } => None,
         }
     }
 
@@ -315,263 +282,85 @@ impl AppAction {
     /// only `self` optionally modified, or none.
     pub fn merge(self, other: Self) -> Option<(Self, Option<Self>)> {
         match (self, other) {
-            (Self::OpenPopup(_), Self::ClosePopup(_)) =>
+            (Self::OpenPopup(_), Self::ClosePopup(_)) => None,
+            (Self::SwitchTab { from, .. }, Self::SwitchTab { to, .. }) if from == to => None,
+            (Self::SwitchTab { from, .. }, Self::SwitchTab { to, .. }) => {
+                Some((Self::SwitchTab { from, to }, None))
+            }
+            (
+                Self::Select {
+                    from,
+                    prev_selected_tab: 0,
+                    ..
+                },
+                Self::Select { to, .. },
+            ) if from == to => None,
+            (
+                Self::Select {
+                    from,
+                    prev_selected_tab,
+                    ..
+                },
+                Self::Select { to, .. },
+            ) if from == to => Some((
+                Self::SwitchTab {
+                    from: prev_selected_tab,
+                    to: 0,
+                },
                 None,
-            (Self::SwitchTab{from, ..}, Self::SwitchTab{to, ..}) if from == to =>
+            )),
+            (
+                Self::Select {
+                    from,
+                    prev_selected_tab,
+                    ..
+                },
+                Self::Select { to, .. },
+            ) => Some((
+                Self::Select {
+                    from,
+                    to,
+                    prev_selected_tab,
+                },
                 None,
-            (Self::SwitchTab{from, ..}, Self::SwitchTab{to, ..}) =>
-                Some((Self::SwitchTab{from, to}, None)),
-            (Self::Select{from, prev_selected_tab: 0, ..}, Self::Select{to, ..}) if from == to =>
-                None,
-            (Self::Select{from, prev_selected_tab, ..}, Self::Select{to, ..}) if from == to =>
-                Some((Self::SwitchTab{from: prev_selected_tab, to: 0}, None)),
-            (Self::Select{from, prev_selected_tab, ..}, Self::Select{to, ..}) =>
-                Some((Self::Select{from, to, prev_selected_tab}, None)),
-            (Self::DragPlane{editor_id: eid_1, offset_delta: off_1, scale_delta: s_1},
-             Self::DragPlane{editor_id: eid_2, offset_delta: off_2, scale_delta: s_2})
-            if eid_1 == eid_2
-            && Some(off_1) == off_2.checked_neg()
-            && s_1 == s_2.map(R64::recip) => 
-                None,
-            (Self::DragPlane{editor_id: eid_1, offset_delta: off_1, scale_delta: s_1},
-             Self::DragPlane{editor_id: eid_2, offset_delta: off_2, scale_delta: s_2})
-            if eid_1 == eid_2 =>
-                Some((Self::DragPlane{
+            )),
+            (
+                Self::DragPlane {
+                    editor_id: eid_1,
+                    offset_delta: off_1,
+                    scale_delta: s_1,
+                },
+                Self::DragPlane {
+                    editor_id: eid_2,
+                    offset_delta: off_2,
+                    scale_delta: s_2,
+                },
+            ) if eid_1 == eid_2
+                && Some(off_1) == off_2.checked_neg()
+                && s_1 == s_2.map(R64::recip) =>
+            {
+                None
+            }
+            (
+                Self::DragPlane {
+                    editor_id: eid_1,
+                    offset_delta: off_1,
+                    scale_delta: s_1,
+                },
+                Self::DragPlane {
+                    editor_id: eid_2,
+                    offset_delta: off_2,
+                    scale_delta: s_2,
+                },
+            ) if eid_1 == eid_2 => Some((
+                Self::DragPlane {
                     editor_id: eid_1,
                     offset_delta: off_1 + off_2,
-                    scale_delta: s_1.zip(s_2, |d1, d2| d1 * d2)}, None)),
-            (a, b) => Some((a, Some(b)))
-        }
-    }
-}
-
-/// Handles rendering of a pop-up window in the center of the screen.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Popup {
-    /// Choose the audio input for the selected sound block.
-    ChooseInput,
-    /// Edit the contained audio input.
-    EditInput(Shared<AudioInput>),
-    /// Save the sequence as a file.
-    Export{filename: Rc<str>, err_msg: AttrValue}
-}
-
-impl Popup {
-    pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> AppResult<()> {
-        Ok(match *event {
-            AppEvent::SetOutputFileName(ref e) => if let Self::Export{filename, err_msg} = self {
-                let to: Rc<str> = e.target_dyn_into::<HtmlInputElement>().to_app_result()?
-                    .value().into();
-                let from = replace(filename, to.clone());
-                *err_msg = "".into();
-                ctx.register_action(AppAction::SetOutputFileName{from, to});
-            }
-
-            AppEvent::ExplainInvalidExportFileName(ref e) => if let Self::Export{err_msg, ..} = self {
-                let value: Rc<str> = e.target_dyn_into::<HtmlInputElement>().to_app_result()?
-                    .value().into();
-                let mut parts = value.split('.');
-                let [base, ext] = [parts.next(), parts.next()];
-                // empty name case isn't matched as browser's indications should suffice then
-                if base == Some("") {
-                    *err_msg = "Base name isn't provided".into();
-                } else if ext.is_none() {
-                    *err_msg = "File extension not provided".into();
-                } else if ext != Some("wav") {
-                    *err_msg = format!("Invalid/unsupported format: {:?}", ext.unwrap_or("")).into();
-                }
-                ctx.force_rerender();
-            }
-
-            AppEvent::SetInputName(ref e) => if let Self::EditInput(input) = self {
-                let to: Rc<str> = e.target_dyn_into::<HtmlInputElement>().to_app_result()?
-                    .value().into();
-                if !to.is_empty() {
-                    let from = input.get_mut()?.set_name(to.clone());
-                    ctx.register_action(AppAction::SetInputName{from, to});
-                }
-            }
-
-            AppEvent::ReverseInput => if let Self::EditInput(input) = self {
-                input.get_mut()?.changes_mut().reversed.flip();
-                ctx.register_action(AppAction::ReverseInput);
-            }
-
-            AppEvent::SetStartCutOff(to) => if let Self::EditInput(input) = self {
-                let from = replace(&mut input.get_mut()?.changes_mut().cut_start, to);
-                ctx.register_action(AppAction::SetStartCutOff{from, to});
-            }
-
-            AppEvent::SetEndCutOff(to) => if let Self::EditInput(input) = self {
-                let from = replace(&mut input.get_mut()?.changes_mut().cut_end, to);
-                ctx.register_action(AppAction::SetEndCutOff{from, to});
-            }
-
-            AppEvent::Undo(ref actions) => for action in actions.iter() {
-                match action {
-                    AppAction::SetOutputFileName{from, ..} => if let Self::Export{filename, ..} = self {
-                        *filename = from.clone();
-                    }
-
-                    AppAction::SetInputName{from, ..} => if let Self::EditInput(input) = self {
-                        input.get_mut()?.set_name(from.clone());
-                    }
-
-                    AppAction::ReverseInput => if let Self::EditInput(input) = self {
-                        input.get_mut()?.changes_mut().reversed.flip();
-                    }
-
-                    AppAction::SetStartCutOff{from, ..} => if let Self::EditInput(input) = self {
-                        input.get_mut()?.changes_mut().cut_start = *from;
-                    }
-
-                    AppAction::SetEndCutOff{from, ..} => if let Self::EditInput(input) = self {
-                        input.get_mut()?.changes_mut().cut_end = *from;
-                    }
-                    
-                    _ => ()
-                }
-            }
-
-            AppEvent::Redo(ref actions) => for action in actions.iter() {
-                match action {
-                    AppAction::SetOutputFileName{to, ..} => if let Self::Export{filename, ..} = self {
-                        *filename = to.clone();
-                    }
-
-                    AppAction::SetInputName{to, ..} => if let Self::EditInput(input) = self {
-                        input.get_mut()?.set_name(to.clone());
-                    }
-
-                    AppAction::ReverseInput => if let Self::EditInput(input) = self {
-                        input.get_mut()?.changes_mut().reversed.flip();
-                    }
-
-                    AppAction::SetStartCutOff{to, ..} => if let Self::EditInput(input) = self {
-                        input.get_mut()?.changes_mut().cut_start = *to;
-                    }
-
-                    AppAction::SetEndCutOff{to, ..} => if let Self::EditInput(input) = self {
-                        input.get_mut()?.changes_mut().cut_end = *to;
-                    }
-                    
-                    _ => ()
-                }
-            }
-
-            _ => ()
-        })
-    }
-
-    pub fn render(&self, ctx: &AppContext, sequencer: &Sequencer) -> Html {
-        let emitter = ctx.event_emitter();
-        match self {
-            Self::ChooseInput => html!{
-                <form id="popup-bg" method="dialog" onsubmit={emitter.reform(|_| AppEvent::ClosePopup)}>
-                    <p>{"Choose audio input"}</p>
-                    <Button name="Close the pop-up" class="small red-on-hover" submit=true>
-                        <img::Cross/>
-                    </Button>
-                    <div class="blue-border" data-main-hint="Choose audio input">
-                        <div class="dark-bg horizontal-menu-wrapper full">
-                            <div class="horizontal-menu dark-bg">
-                                {for sequencer.inputs().iter().map(|input| html!{
-                                    <AudioInputButton class="extend-inner-button-panel"
-                                    bps={sequencer.bps()} {input} {emitter}
-                                    onclick={{
-                                        let i = input.clone();
-                                        emitter.reform(move |_| AppEvent::SelectInput(i.clone()))
-                                    }}
-                                    playing={sequencer.playback_ctx().played_input()
-                                        .is_some_and(|cur| cur.eq(input))}
-                                    name={input.get().map_or_else(|_| "".into(), |x| x.name().clone())}/>
-                                })}
-                                <Button name="Add audio input"
-                                onclick={emitter.reform(|_| AppEvent::StartInputAdd)}>
-                                    <img::Plus/>
-                                </Button>
-                            </div>
-                        </div>
-                    </div>
-                </form>
-            },
-
-            Self::EditInput(input_outer) => html!{
-                <form id="popup-bg" method="dialog" onsubmit={emitter.reform(|_| AppEvent::ClosePopup)}>
-                    <p>{"Edit audio input"}</p>
-                    <Button name="Close the pop-up" class="small red-on-hover" submit=true>
-                        <img::Cross/>
-                    </Button>
-                    <div class="dark-bg blue-border" data-main-hint="Edit audio input">
-                        <div id="popup-core">
-                            if let Some(input) = input_outer.get().report() {
-                                <div style="display: grid; grid-template-columns: repeat(3, 1fr)">
-                                    if input.changes().reversed {
-                                        <Button name="Playback direction: reverse" class="small"
-                                        help="Click to reverse the audio input"
-                                        onclick={emitter.reform(|_| AppEvent::ReverseInput)}>
-                                            <img::LeftArrow/>
-                                        </Button>
-                                    } else {
-                                        <Button name="Playback direction: normal" class="small"
-                                        help="Click to reverse the audio input"
-                                        onclick={emitter.reform(|_| AppEvent::ReverseInput)}>
-                                            <img::RightArrow/>
-                                        </Button>
-                                    }
-                                    <input type="text" value={input.name().clone()}
-                                    placeholder="Enter name..." required=true
-                                    class="dark-bg blue-border" data-main-hint="Audio input name"
-                                    onchange={emitter.reform(AppEvent::SetInputName)}/>
-                                </div>
-                                <div style="display: grid; grid-template-columns: repeat(2, 1fr)">
-                                    // TODO: add syntax to Yew's `html!` macro for the following to
-                                    // be valid:
-                                    // {let max = input.baked_duration().secs_to_beats(sequencer.bps())}
-                                    <Slider name="Start cut-off"
-                                    max={input.raw_duration().secs_to_beats(sequencer.bps())}
-                                    initial={input.changes().cut_start}
-                                    setter={emitter.reform(AppEvent::SetStartCutOff)}/>
-                                    <Slider name="End cut-off"
-                                    max={input.raw_duration().secs_to_beats(sequencer.bps())}
-                                    initial={input.changes().cut_end}
-                                    setter={emitter.reform(AppEvent::SetEndCutOff)}/>
-                                </div>
-                            } else {
-                                <p style="color:red">{"Failed to access the audio input"}</p>
-                            }
-                        </div>
-                    </div>
-                </form>
-            },
-
-            Self::Export{filename, err_msg} => html!{
-                <form id="popup-bg" method="dialog" onsubmit={{
-                    let filename = filename.clone();
-                    emitter.reform(move |_| AppEvent::PrepareExport(filename.clone()))
-                }}>
-                    <p>{"Export the project"}</p>
-                    <Button name="Close the pop-up" class="small red-on-hover"
-                    onclick={emitter.reform(|_| AppEvent::ClosePopup)}>
-                        <img::Cross/>
-                    </Button>
-                    <div class="dark-bg blue-border" data-main-hint="Export the project">
-                        <div id="popup-core">
-                            <input type="text" value={filename.clone()} pattern=".*\\.wav"
-                            placeholder="Enter file name..." required=true
-                            class="dark-bg blue-border" data-main-hint="Output file name"
-                            oninvalid={emitter.reform(AppEvent::ExplainInvalidExportFileName)}
-                            onchange={emitter.reform(AppEvent::SetOutputFileName)}/>
-                            <Button name="Save" class="wide" submit=true>
-                                <p>{"Save"}</p>
-                            </Button>
-                        </div>
-                    </div>
-                    if !err_msg.is_empty() {
-                        <p class="error">{"Error: "}{err_msg}</p>
-                    }
-                </form>
-            }
+                    scale_delta: s_1.zip(s_2, |d1, d2| d1 * d2),
+                },
+                None,
+            )),
+            (a, b) => Some((a, Some(b))),
         }
     }
 }
@@ -585,12 +374,12 @@ pub struct AppContext {
     actions: Vec<AppAction>,
     undid_actions: usize,
     rerender_needed: bool,
-    special_action: SpecialAction
+    special_action: SpecialAction,
 }
 
 impl AppContext {
     pub fn new(event_emitter: Callback<AppEvent>) -> AppResult<Self> {
-        Ok(Self{
+        Ok(Self {
             frame: now().to_app_result()? / 1000,
             snap_step: r64![1],
             selected_tab: default(),
@@ -598,25 +387,45 @@ impl AppContext {
             actions: vec![AppAction::Start],
             rerender_needed: false,
             special_action: default(),
-            event_emitter})
+            event_emitter,
+        })
     }
 
-    pub fn frame(&self) -> Secs {self.frame}
-    pub fn snap_step(&self) -> R64 {self.snap_step}
-    pub fn selected_tab(&self) -> usize {self.selected_tab}
-    pub fn actions(&self) -> &[AppAction] {&self.actions}
-    pub fn event_emitter(&self) -> &Callback<AppEvent> {&self.event_emitter}
-    pub fn emit_event(&self, event: AppEvent) {self.event_emitter.emit(event)}
-    pub fn special_action(&self) -> SpecialAction {self.special_action}
+    pub fn frame(&self) -> Secs {
+        self.frame
+    }
+    pub fn snap_step(&self) -> R64 {
+        self.snap_step
+    }
+    pub fn selected_tab(&self) -> usize {
+        self.selected_tab
+    }
+    pub fn actions(&self) -> &[AppAction] {
+        &self.actions
+    }
+    pub fn event_emitter(&self) -> &Callback<AppEvent> {
+        &self.event_emitter
+    }
+    pub fn emit_event(&self, event: AppEvent) {
+        self.event_emitter.emit(event)
+    }
+    pub fn special_action(&self) -> SpecialAction {
+        self.special_action
+    }
 
-    pub fn force_rerender(&mut self) {self.rerender_needed = true}
+    pub fn force_rerender(&mut self) {
+        self.rerender_needed = true
+    }
     pub fn register_action(&mut self, action: AppAction) {
-        self.actions.drain(self.actions.len() - take(&mut self.undid_actions) ..);
+        self.actions
+            .drain(self.actions.len() - take(&mut self.undid_actions)..);
         self.rerender_needed = true;
         if let Some(last) = self.actions.pop() {
-            let Some((first, second)) = last.merge(action) else {return};
+            let Some((first, second)) = last.merge(action) else {
+                return;
+            };
             self.actions.push(first);
-            let Some(second) = second else {return};
+            let Some(second) = second else { return };
             self.actions.push(second);
         }
     }
@@ -642,19 +451,23 @@ impl Component for App {
         let ctx = AppContext::new(ctx.link().callback(|x| x)).unwrap();
         let sound_visualiser = SoundVisualiser::new();
 
-        let res = Self{
+        let res = Self {
             popups: vec![],
             selected_block: None,
             hint_handler: default(),
             sequencer: Sequencer::new().unwrap().into(),
             frame_emitter: js_function!(|x| cb.emit(R64::new_or(r64![0], x))),
-            sound_visualiser, ctx};
-        window().request_animation_frame(&res.frame_emitter).unwrap();
+            sound_visualiser,
+            ctx,
+        };
+        window()
+            .request_animation_frame(&res.frame_emitter)
+            .unwrap();
         res
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        let res: AppResult<!> = try {
+        let res: AppResult<_> = try {
             match msg {
                 AppEvent::SnapStep(to) => {
                     self.ctx.register_action(AppAction::SetSnapStep{from: self.ctx.snap_step, to});
@@ -805,7 +618,7 @@ impl Component for App {
                             self.selected_block = to;
                             self.ctx.selected_tab = 0;
                         }
-                        
+
                         AppAction::SwitchTab{to, ..} =>
                             self.ctx.selected_tab = to,
 
@@ -826,22 +639,22 @@ impl Component for App {
             }
 
             self.forward_event(msg)?;
-            return self.ctx.rerender_needed.take()
+            self.ctx.rerender_needed.take()
         };
-        res.report();
-        false
+        res.report().unwrap_or(false)
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
         // TODO: add switching between selected blocks
         let sequencer = self.sequencer.get().unwrap();
         let pattern = sequencer.pattern().get().unwrap();
-        let block = self.selected_block
+        let block = self
+            .selected_block
             .and_then(|i| pattern.selection().get(i))
             .and_then(|i| pattern.get_aware(*i));
         let setter = ctx.link().callback(|x| x);
 
-        html!{<>
+        html! {<>
             <div id="main-panel">
                 <div id="ctrl-panel" class="dark-bg"
                 data-main-hint="Settings"
@@ -983,7 +796,9 @@ impl Component for App {
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
-        if !first_render {return}
+        if !first_render {
+            return;
+        }
         let window = window();
 
         let cb = ctx.link().callback(|_| AppEvent::Resize);
@@ -1008,9 +823,11 @@ impl App {
 
         let mut pattern = sequencer.pattern().get_mut()?;
         Ok(if let Some(&id) = pattern.selection().first() {
-            let mut block = unsafe{pattern.get_unchecked_mut(id)};
+            let mut block = unsafe { pattern.get_unchecked_mut(id) };
             let offset = block.offset;
-            block.inner().handle_event(&event, &mut self.ctx, &sequencer, offset)?;
+            block
+                .inner()
+                .handle_event(&event, &mut self.ctx, &sequencer, offset)?;
         })
     }
 }

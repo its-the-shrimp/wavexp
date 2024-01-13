@@ -1,36 +1,30 @@
-use std::{
-    num::NonZeroUsize,
-    cmp::Ordering,
-    ops::{Range, RangeInclusive},
-    mem::replace};
-use wavexp_utils::{
-    r64, R64,
-    R32, r32,
-    AppResult,
-    ArrayExt,
-    default,
-    OptionExt,
-    ArrayFrom,
-    js_function,
-    AppError,
-    AppResultUtils,
-    cell::{Shared, SharedAwareRefMut},
-    RangeExt};
-use wasm_bindgen::JsCast;
-use web_sys::{Path2d, AudioNode};
-use yew::{html, Html};
 use crate::{
-    visual::{GraphEditor, GraphPoint},
-    sound::{Beats, Note, FromBeats, Secs},
+    global::{AppAction, AppContext, AppEvent},
+    input::{Counter, Cursor, GraphEditorCanvas, Slider},
     sequencer::{PlaybackContext, Sequencer},
-    global::{AppContext, AppAction, AppEvent},
-    input::{Cursor, Slider, Counter, GraphEditorCanvas}};
+    sound::{Beats, FromBeats, Note, Secs},
+    visual::{GraphEditor, GraphPoint},
+};
+use std::{
+    cmp::Ordering,
+    mem::replace,
+    num::NonZeroUsize,
+    ops::{Range, RangeInclusive},
+};
+use wasm_bindgen::JsCast;
+use wavexp_utils::{
+    cell::{Shared, SharedAwareRefMut},
+    default, js_function, r32, r64, AppError, AppResult, AppResultUtils, ArrayExt, ArrayFrom,
+    OptionExt, RangeExt, R32, R64,
+};
+use web_sys::{AudioNode, Path2d};
+use yew::{html, Html};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoteBlock {
     pub offset: Beats,
     pub value: Note,
-    pub len: Beats
+    pub len: Beats,
 }
 
 impl PartialOrd for NoteBlock {
@@ -47,15 +41,14 @@ impl Ord for NoteBlock {
 
 impl GraphPoint for NoteBlock {
     const EDITOR_NAME: &'static str = "Note Editor";
-    const Y_BOUND: Range<R64> =
-        r64![0] .. r64![Note::N_NOTES];
+    const Y_BOUND: Range<R64> = r64![0]..r64![Note::N_NOTES];
     const SCALE_Y_BOUND: Range<R64> = {
         let x = r64![10 - (Note::N_NOTES - 1) % 10 + Note::N_NOTES - 1];
-        x .. x
+        x..x
     };
     const OFFSET_Y_BOUND: Range<R64> = {
         let x = r64![(10 - Note::N_NOTES as i8 % 10) / -2];
-        x .. x
+        x..x
     };
     const Y_SNAP: R64 = r64![1];
 
@@ -65,14 +58,26 @@ impl GraphPoint for NoteBlock {
     type VisualContext = (Beats, NonZeroUsize);
 
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
-        Self{offset, value: Note::from_index(y.into()).recip(), len: r64![1]}
+        Self {
+            offset,
+            value: Note::from_index(y.into()).recip(),
+            len: r64![1],
+        }
     }
 
-    fn inner(&self) -> &Self::Inner {&self.len}
-    fn inner_mut(&mut self) -> &mut Self::Inner {&mut self.len}
+    fn inner(&self) -> &Self::Inner {
+        &self.len
+    }
+    fn inner_mut(&mut self) -> &mut Self::Inner {
+        &mut self.len
+    }
 
-    fn y(&self) -> &Self::Y {&self.value}
-    fn y_mut(&mut self) -> &mut Self::Y {&mut self.value}
+    fn y(&self) -> &Self::Y {
+        &self.value
+    }
+    fn y_mut(&mut self) -> &mut Self::Y {
+        &mut self.value
+    }
 
     fn loc(&self) -> [R64; 2] {
         [self.offset, self.value.recip().index().into()]
@@ -80,7 +85,7 @@ impl GraphPoint for NoteBlock {
 
     fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], meta: bool) {
         match point {
-            Ok(NoteBlock{offset, value, len}) => {
+            Ok(NoteBlock { offset, value, len }) => {
                 if meta {
                     *len += delta[0];
                 } else {
@@ -100,13 +105,16 @@ impl GraphPoint for NoteBlock {
 
     fn in_hitbox(
         &self,
-        area:  &[RangeInclusive<R64>; 2],
-        _:     &AppContext,
-        _:     &Sequencer,
-        _:     Self::VisualContext
+        area: &[RangeInclusive<R64>; 2],
+        _: &AppContext,
+        _: &Sequencer,
+        _: Self::VisualContext,
     ) -> AppResult<bool> {
-        Ok(area[1].clone().map_bounds(usize::from).contains(&self.value.recip().index())
-            && (self.offset ..= self.offset + self.len).overlap(&area[0]))
+        Ok(area[1]
+            .clone()
+            .map_bounds(usize::from)
+            .contains(&self.value.recip().index())
+            && (self.offset..=self.offset + self.len).overlap(&area[0]))
     }
 
     fn fmt_loc(loc: [R64; 2]) -> String {
@@ -115,25 +123,29 @@ impl GraphPoint for NoteBlock {
 
     fn on_move(
         editor: &mut GraphEditor<Self>,
-        ctx:    &mut AppContext,
-        _:      Cursor,
-        _:      [R64; 2],
-        point:  Option<usize>
+        ctx: &mut AppContext,
+        _: Cursor,
+        _: [R64; 2],
+        point: Option<usize>,
     ) -> AppResult<()> {
-        let Some(last) = editor.len().checked_sub(1) else {return Ok(())};
-        Ok(if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
-            ctx.emit_event(AppEvent::RedrawEditorPlane)
-        })
+        let Some(last) = editor.len().checked_sub(1) else {
+            return Ok(());
+        };
+        Ok(
+            if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
+                ctx.emit_event(AppEvent::RedrawEditorPlane)
+            },
+        )
     }
 
     fn on_redraw(
-        editor:              &mut GraphEditor<Self>,
-        ctx:                 &AppContext,
-        sequencer:           &Sequencer, 
-        canvas_size:         &[R64; 2],
-        solid:               &Path2d,
-        _:                   &Path2d,
-        (sb_offset, n_reps): Self::VisualContext
+        editor: &mut GraphEditor<Self>,
+        ctx: &AppContext,
+        sequencer: &Sequencer,
+        canvas_size: &[R64; 2],
+        solid: &Path2d,
+        _: &Path2d,
+        (sb_offset, n_reps): Self::VisualContext,
     ) -> AppResult<()> {
         let step = &canvas_size.div(&editor.scale());
         let offset = &R64::array_from(editor.offset());
@@ -163,30 +175,46 @@ pub struct NoteSound {
     decay: Beats,
     sustain: R32,
     release: Beats,
-    rep_count: NonZeroUsize
+    rep_count: NonZeroUsize,
 }
 
 impl Default for NoteSound {
     fn default() -> Self {
-        Self{pattern: default(),
-            volume: r32![1], attack: r64![0], decay: r64![0], sustain: r32![1], release: r64![0],
-            rep_count: NonZeroUsize::MIN}
+        Self {
+            pattern: default(),
+            volume: r32![1],
+            attack: r64![0],
+            decay: r64![0],
+            sustain: r32![1],
+            release: r64![0],
+            rep_count: NonZeroUsize::MIN,
+        }
     }
 }
 
 impl NoteSound {
     pub const NAME: &'static str = "Simple Wave";
 
-    pub fn prepare(&self) -> AppResult<()> {Ok(())}
+    pub fn prepare(&self) -> AppResult<()> {
+        Ok(())
+    }
 
-    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> AppResult<()> {
+    pub fn play(
+        &self,
+        plug: &AudioNode,
+        now: Secs,
+        self_offset: Secs,
+        bps: Beats,
+    ) -> AppResult<()> {
         let pat = self.pattern.get()?;
-        let Some(last) = pat.last() else {return Ok(())};
+        let Some(last) = pat.last() else {
+            return Ok(());
+        };
         let pat_len = (last.offset + last.len).to_secs(bps);
         let ctx = plug.context();
 
-        Ok(for rep in 0 .. self.rep_count.get() {
-            for NoteBlock{offset, value, len} in pat.iter() {
+        Ok(for rep in 0..self.rep_count.get() {
+            for NoteBlock { offset, value, len } in pat.iter() {
                 let block = ctx.create_gain()?;
                 let gain = block.gain();
                 let start = now + self_offset + pat_len * rep + offset.to_secs(bps);
@@ -203,7 +231,8 @@ impl NoteSound {
 
                 let block_core = ctx.create_oscillator()?;
                 block_core.frequency().set_value(*value.freq());
-                block_core.connect_with_audio_node(&block)?
+                block_core
+                    .connect_with_audio_node(&block)?
                     .connect_with_audio_node(plug)?;
                 block_core.start_with_when(*start)?;
                 block_core.stop_with_when(*at)?;
@@ -216,11 +245,16 @@ impl NoteSound {
     }
 
     pub fn len(&self, _: Beats) -> AppResult<Beats> {
-        Ok(self.pattern.get()?
-            .last().map_or_default(|x| x.offset + x.len))
+        Ok(self
+            .pattern
+            .get()?
+            .last()
+            .map_or_default(|x| x.offset + x.len))
     }
 
-    pub fn rep_count(&self) -> NonZeroUsize {self.rep_count}
+    pub fn rep_count(&self) -> NonZeroUsize {
+        self.rep_count
+    }
 
     pub fn params(&self, ctx: &AppContext, _: &Sequencer) -> Html {
         let emitter = ctx.event_emitter();
@@ -273,26 +307,39 @@ impl NoteSound {
         ctx: &mut AppContext,
         sequencer: &SharedAwareRefMut<'_, Sequencer>,
         reset_sound: &mut bool,
-        offset: Beats
+        offset: Beats,
     ) -> AppResult<()> {
         Ok(match *event {
-            AppEvent::Volume(to) =>
-                ctx.register_action(AppAction::SetVolume{from: replace(&mut self.volume, to), to}),
+            AppEvent::Volume(to) => ctx.register_action(AppAction::SetVolume {
+                from: replace(&mut self.volume, to),
+                to,
+            }),
 
-            AppEvent::Attack(to) =>
-                ctx.register_action(AppAction::SetAttack{from: replace(&mut self.attack, to), to}),
+            AppEvent::Attack(to) => ctx.register_action(AppAction::SetAttack {
+                from: replace(&mut self.attack, to),
+                to,
+            }),
 
-            AppEvent::Decay(to) =>
-                ctx.register_action(AppAction::SetDecay{from: replace(&mut self.decay, to), to}),
+            AppEvent::Decay(to) => ctx.register_action(AppAction::SetDecay {
+                from: replace(&mut self.decay, to),
+                to,
+            }),
 
-            AppEvent::Sustain(to) =>
-                ctx.register_action(AppAction::SetSustain{from: replace(&mut self.sustain, to), to}),
+            AppEvent::Sustain(to) => ctx.register_action(AppAction::SetSustain {
+                from: replace(&mut self.sustain, to),
+                to,
+            }),
 
-            AppEvent::Release(to) =>
-                ctx.register_action(AppAction::SetRelease{from: replace(&mut self.release, to), to}),
+            AppEvent::Release(to) => ctx.register_action(AppAction::SetRelease {
+                from: replace(&mut self.release, to),
+                to,
+            }),
 
             AppEvent::RepCount(to) => {
-                ctx.register_action(AppAction::SetRepCount{from: replace(&mut self.rep_count, to), to});
+                ctx.register_action(AppAction::SetRepCount {
+                    from: replace(&mut self.rep_count, to),
+                    to,
+                });
                 ctx.emit_event(AppEvent::RedrawEditorPlane);
             }
 
@@ -302,25 +349,20 @@ impl NoteSound {
                     match *action {
                         AppAction::SetBlockType(_) => {
                             *reset_sound = true;
-                            break
+                            break;
                         }
 
-                        AppAction::SetVolume{from, ..} =>
-                            self.volume = from,
+                        AppAction::SetVolume { from, .. } => self.volume = from,
 
-                        AppAction::SetAttack{from, ..} =>
-                            self.attack = from,
+                        AppAction::SetAttack { from, .. } => self.attack = from,
 
-                        AppAction::SetDecay{from, ..} =>
-                            self.decay = from,
+                        AppAction::SetDecay { from, .. } => self.decay = from,
 
-                        AppAction::SetSustain{from, ..} =>
-                            self.sustain = from,
+                        AppAction::SetSustain { from, .. } => self.sustain = from,
 
-                        AppAction::SetRelease{from, ..} =>
-                            self.release = from,
+                        AppAction::SetRelease { from, .. } => self.release = from,
 
-                        AppAction::SetRepCount{from, ..} => {
+                        AppAction::SetRepCount { from, .. } => {
                             self.rep_count = from;
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }
@@ -338,22 +380,17 @@ impl NoteSound {
                 let mut pat = self.pattern.get_mut()?;
                 for action in actions.iter() {
                     match *action {
-                        AppAction::SetVolume{to, ..} =>
-                            self.volume = to,
+                        AppAction::SetVolume { to, .. } => self.volume = to,
 
-                        AppAction::SetAttack{to, ..} =>
-                            self.attack = to,
+                        AppAction::SetAttack { to, .. } => self.attack = to,
 
-                        AppAction::SetDecay{to, ..} =>
-                            self.decay = to,
+                        AppAction::SetDecay { to, .. } => self.decay = to,
 
-                        AppAction::SetSustain{to, ..} =>
-                            self.sustain = to,
+                        AppAction::SetSustain { to, .. } => self.sustain = to,
 
-                        AppAction::SetRelease{to, ..} =>
-                            self.release = to,
+                        AppAction::SetRelease { to, .. } => self.release = to,
 
-                        AppAction::SetRepCount{to, ..} => {
+                        AppAction::SetRepCount { to, .. } => {
                             self.rep_count = to;
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }
@@ -367,9 +404,12 @@ impl NoteSound {
                 }
             }
 
-            _ => if ctx.selected_tab() == 2 {
-                self.pattern.get_mut()?
-                    .handle_event(event, ctx, sequencer, || (offset, self.rep_count))?;
+            _ => {
+                if ctx.selected_tab() == 2 {
+                    self.pattern
+                        .get_mut()?
+                        .handle_event(event, ctx, sequencer, || (offset, self.rep_count))?;
+                }
             }
         })
     }

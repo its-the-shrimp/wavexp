@@ -12,24 +12,24 @@
 #![feature(let_chains)]
 #![feature(if_let_guard)]
 #![feature(try_find)]
-
 #![allow(clippy::unit_arg)]
 #![allow(clippy::option_map_unit_fn)]
 #![allow(clippy::comparison_chain)]
 
-mod sound;
-mod img;
-mod visual;
-mod input;
 mod global;
+mod img;
+mod input;
+mod popup;
 mod sequencer;
+mod sound;
+mod visual;
 
-pub use wavexp_utils;
 pub use js_sys;
 pub use wasm_bindgen;
-pub use yew;
-pub use web_sys;
 pub use wasm_bindgen_futures;
+pub use wavexp_utils;
+pub use web_sys;
+pub use yew;
 
 fn main() {
     yew::Renderer::<global::App>::new().render();

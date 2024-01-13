@@ -1,65 +1,48 @@
-use std::{
-    ops::{Div, Mul, Add, Deref, DerefMut},
-    marker::PhantomData};
-use web_sys::{
-    Element,
-    HtmlCanvasElement,
-    PointerEvent,
-    MouseEvent,
-    KeyboardEvent};
-use yew::{
-    html, 
-    Component,
-    Context,
-    Html,
-    TargetCast,
-    html::Children,
-    Classes,
-    AttrValue,
-    Callback,
-    Properties,
-    NodeRef,
-    function_component,
-    classes};
-use wavexp_utils::{
-    R64,
-    Point,
-    BoolExt,
-    default,
-    AppError,
-    OptionExt,
-    HtmlCanvasExt,
-    HtmlElementExt,
-    AppResult,
-    AppResultUtils,
-    Pipe,
-    r64, cell::Shared};
 use crate::{
-    visual::{GraphPoint, GraphEditor},
-    global::{AppEvent, Popup},
-    sound::{Beats, AudioInput},
-    img};
+    global::AppEvent,
+    img,
+    popup::Popup,
+    sound::{AudioInput, Beats},
+    visual::{GraphEditor, GraphPoint},
+};
+use std::{
+    marker::PhantomData,
+    ops::{Add, Deref, DerefMut, Div, Mul},
+};
+use wavexp_utils::{
+    cell::Shared, default, r64, AppError, AppResult, AppResultUtils, BoolExt, HtmlCanvasExt,
+    HtmlElementExt, OptionExt, Pipe, Point, R64,
+};
+use web_sys::{Element, HtmlCanvasElement, KeyboardEvent, MouseEvent, PointerEvent};
+use yew::{
+    classes, function_component, html, html::Children, AttrValue, Callback, Classes, Component,
+    Context, Html, NodeRef, Properties, TargetCast,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Buttons {
     pub left: bool,
     pub shift: bool,
-    pub meta: bool
+    pub meta: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cursor {
     pub point: Point,
-    buttons: Buttons
+    buttons: Buttons,
 }
 
 impl Deref for Cursor {
     type Target = Buttons;
-    fn deref(&self) -> &Self::Target {&self.buttons}
+    fn deref(&self) -> &Self::Target {
+        &self.buttons
+    }
 }
 
 impl DerefMut for Cursor {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.buttons}
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.buttons
+    }
 }
 
 impl Add<&KeyboardEvent> for Cursor {
@@ -75,12 +58,19 @@ impl TryFrom<&MouseEvent> for Cursor {
     type Error = AppError;
     fn try_from(value: &MouseEvent) -> Result<Self, Self::Error> {
         let canvas: HtmlCanvasElement = value.target_dyn_into().to_app_result()?;
-        let point = Point{x: value.offset_x(), y: value.offset_y()}
-            .normalise(canvas.client_rect(), canvas.rect());
-        Ok(Self{point, buttons: Buttons{
-            left: value.buttons() & 1 == 1,
-            shift: value.shift_key(),
-            meta: value.meta_key()}})
+        let point = Point {
+            x: value.offset_x(),
+            y: value.offset_y(),
+        }
+        .normalise(canvas.client_rect(), canvas.rect());
+        Ok(Self {
+            point,
+            buttons: Buttons {
+                left: value.buttons() & 1 == 1,
+                shift: value.shift_key(),
+                meta: value.meta_key(),
+            },
+        })
     }
 }
 
@@ -88,12 +78,19 @@ impl TryFrom<&PointerEvent> for Cursor {
     type Error = AppError;
     fn try_from(value: &PointerEvent) -> Result<Self, Self::Error> {
         let canvas: HtmlCanvasElement = value.target_dyn_into().to_app_result()?;
-        let point = Point{x: value.offset_x(), y: value.offset_y()}
-            .normalise(canvas.client_rect(), canvas.rect());
-        Ok(Self{point, buttons: Buttons{
-            left: value.buttons() & 1 == 1,
-            shift: value.shift_key(),
-            meta: value.meta_key()}})
+        let point = Point {
+            x: value.offset_x(),
+            y: value.offset_y(),
+        }
+        .normalise(canvas.client_rect(), canvas.rect());
+        Ok(Self {
+            point,
+            buttons: Buttons {
+                left: value.buttons() & 1 == 1,
+                shift: value.shift_key(),
+                meta: value.meta_key(),
+            },
+        })
     }
 }
 
@@ -101,13 +98,13 @@ impl TryFrom<&PointerEvent> for Cursor {
 pub enum Cmd {
     Drag(PointerEvent),
     Focus(PointerEvent),
-    Unfocus(PointerEvent)
+    Unfocus(PointerEvent),
 }
 
 pub struct Slider {
     old_value: f64,
     value: R64,
-    target: NodeRef
+    target: NodeRef,
 }
 
 #[derive(PartialEq, yew::Properties)]
@@ -124,7 +121,7 @@ pub struct SliderProps {
     #[prop_or("")]
     pub postfix: &'static str,
     pub setter: Callback<R64>,
-    pub initial: R64
+    pub initial: R64,
 }
 
 impl Component for Slider {
@@ -132,37 +129,60 @@ impl Component for Slider {
     type Properties = SliderProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        Self{value: ctx.props().initial, old_value: f64::NAN, target: default()}
+        Self {
+            value: ctx.props().initial,
+            old_value: f64::NAN,
+            target: default(),
+        }
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        let res: AppResult<!> = try {
-            let SliderProps{setter, min, max, signed, ..} = ctx.props();
+        let res: AppResult<_> = try {
+            let SliderProps {
+                setter,
+                min,
+                max,
+                signed,
+                ..
+            } = ctx.props();
             match &msg {
-                Cmd::Drag(e) => self.value = R64::from(e.movement_y())
-                    .div(-self.target.cast::<Element>().to_app_result()?.client_height())
-                    .div(e.shift_key().choose(400u16, 2))
-                    .mul(max - min)
-                    .add(self.value)
-                    .clamp(signed.choose(-*max, *min), *max),
+                Cmd::Drag(e) => {
+                    self.value = R64::from(e.movement_y())
+                        .div(
+                            -self
+                                .target
+                                .cast::<Element>()
+                                .to_app_result()?
+                                .client_height(),
+                        )
+                        .div(e.shift_key().choose(400u16, 2))
+                        .mul(max - min)
+                        .add(self.value)
+                        .clamp(signed.choose(-*max, *min), *max)
+                }
 
                 Cmd::Focus(e) => {
-                    self.target.cast::<Element>().to_app_result()?
+                    self.target
+                        .cast::<Element>()
+                        .to_app_result()?
                         .set_pointer_capture(e.pointer_id())?;
                     self.old_value = *self.value;
                 }
 
                 Cmd::Unfocus(e) => {
-                    self.target.cast::<Element>().to_app_result()?
+                    self.target
+                        .cast::<Element>()
+                        .to_app_result()?
                         .release_pointer_capture(e.pointer_id())?;
-                    if self.old_value != *self.value {setter.emit(self.value)}
+                    if self.old_value != *self.value {
+                        setter.emit(self.value)
+                    }
                     self.old_value = f64::NAN;
                 }
             }
-            return true
+            true
         };
-        res.report();
-        false
+        res.report().unwrap_or(false)
     }
 
     fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
@@ -170,13 +190,22 @@ impl Component for Slider {
         if old_props.initial != new_initial {
             self.value = new_initial;
             true
-        } else {false}
+        } else {
+            false
+        }
     }
 
-	fn view(&self, ctx: &Context<Self>) -> Html {
-        let SliderProps{name, postfix, max, min, fmt, ..} = ctx.props();
+    fn view(&self, ctx: &Context<Self>) -> Html {
+        let SliderProps {
+            name,
+            postfix,
+            max,
+            min,
+            fmt,
+            ..
+        } = ctx.props();
         let scope = ctx.link();
-        html!{
+        html! {
             <svg ref={self.target.clone()} viewBox="0 0 100 100" class="input slider" data-main-hint={name}
             onpointerdown={scope.callback(Cmd::Focus)}
             onpointerup={scope.callback(Cmd::Unfocus)}
@@ -201,7 +230,7 @@ pub struct Switch {
     value: R64,
     old_value: usize,
     focused: bool,
-    target: NodeRef
+    target: NodeRef,
 }
 
 #[derive(PartialEq, yew::Properties)]
@@ -209,7 +238,7 @@ pub struct SwitchProps {
     pub name: AttrValue,
     pub options: Vec<&'static str>,
     pub setter: Callback<usize>,
-    pub initial: usize
+    pub initial: usize,
 }
 
 impl Component for Switch {
@@ -217,29 +246,48 @@ impl Component for Switch {
     type Properties = SwitchProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        Self{value: ctx.props().initial.into(), old_value: 0, focused: false, target: default()}
+        Self {
+            value: ctx.props().initial.into(),
+            old_value: 0,
+            focused: false,
+            target: default(),
+        }
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        let res: AppResult<!> = try {
-            let SwitchProps{options, setter, ..} = ctx.props();
+        let res: AppResult<_> = try {
+            let SwitchProps {
+                options, setter, ..
+            } = ctx.props();
             match msg {
-                Cmd::Drag(e) => self.value = R64::from(e.movement_y())
-                    .div(self.target.cast::<Element>().to_app_result()?.client_height())
-                    .mul(-4i8)
-                    .div(options.len())
-                    .add(self.value)
-                    .rem_euclid(options.len().into()).to_app_result()?,
+                Cmd::Drag(e) => {
+                    self.value = R64::from(e.movement_y())
+                        .div(
+                            self.target
+                                .cast::<Element>()
+                                .to_app_result()?
+                                .client_height(),
+                        )
+                        .mul(-4i8)
+                        .div(options.len())
+                        .add(self.value)
+                        .rem_euclid(options.len().into())
+                        .to_app_result()?
+                }
 
                 Cmd::Focus(e) => {
-                    self.target.cast::<Element>().to_app_result()?
+                    self.target
+                        .cast::<Element>()
+                        .to_app_result()?
                         .set_pointer_capture(e.pointer_id())?;
                     self.focused = true;
                     self.old_value = self.value.into();
                 }
 
                 Cmd::Unfocus(e) => {
-                    self.target.cast::<Element>().to_app_result()?
+                    self.target
+                        .cast::<Element>()
+                        .to_app_result()?
                         .release_pointer_capture(e.pointer_id())?;
                     let value = self.value.into();
                     if self.old_value != value {
@@ -248,10 +296,9 @@ impl Component for Switch {
                     self.focused = false;
                 }
             }
-            return true
+            true
         };
-        res.report();
-        false
+        res.report().unwrap_or(false)
     }
 
     fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
@@ -259,13 +306,15 @@ impl Component for Switch {
         if old_props.initial != new_initial {
             self.value = new_initial.into();
             true
-        } else {false}
+        } else {
+            false
+        }
     }
 
-	fn view(&self, ctx: &Context<Self>) -> Html {
-        let SwitchProps{name, options, ..} = ctx.props();
+    fn view(&self, ctx: &Context<Self>) -> Html {
+        let SwitchProps { name, options, .. } = ctx.props();
         let scope = ctx.link();
-        html!{
+        html! {
             <svg ref={self.target.clone()} viewBox="0 0 100 100" class="input switch" data-main-hint={name}
             onpointerdown={scope.callback(Cmd::Focus)}
             onpointerup={scope.callback(Cmd::Unfocus)}
@@ -301,23 +350,35 @@ pub struct ButtonProps {
     #[prop_or(false)]
     pub submit: bool,
     #[prop_or_default]
-    pub class: Classes
+    pub class: Classes,
 }
 
 impl Component for Button {
     type Message = ();
     type Properties = ButtonProps;
 
-    fn create(_: &Context<Self>) -> Self {Self}
+    fn create(_: &Context<Self>) -> Self {
+        Self
+    }
 
-    fn update(&mut self, _: &Context<Self>, _: Self::Message) -> bool {false}
+    fn update(&mut self, _: &Context<Self>, _: Self::Message) -> bool {
+        false
+    }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let ButtonProps{name, children, svg, class, onclick, help, submit} = ctx.props();
+        let ButtonProps {
+            name,
+            children,
+            svg,
+            class,
+            onclick,
+            help,
+            submit,
+        } = ctx.props();
         let mut class = class.clone();
         class.push("input button");
         if *svg {
-            html!{
+            html! {
                 <g {class}
                 data-main-hint={name} data-aux-hint={help}
                 onpointerup={onclick}>
@@ -325,7 +386,7 @@ impl Component for Button {
                 </g>
             }
         } else {
-            html!{
+            html! {
                 <button {class} type={submit.choose("submit", "button")}
                 data-main-hint={name} data-aux-hint={help}
                 onpointerup={onclick}>
@@ -342,33 +403,41 @@ pub struct GraphEditorCanvas<T>(PhantomData<T>);
 pub struct GraphEditorCanvasProps<T: GraphPoint> {
     pub emitter: Callback<AppEvent>,
     pub editor: Shared<GraphEditor<T>>,
-    pub id: Option<&'static str>
+    pub id: Option<&'static str>,
 }
 
 impl<T: GraphPoint> Component for GraphEditorCanvas<T> {
     type Message = ();
     type Properties = GraphEditorCanvasProps<T>;
 
-    fn create(_: &Context<Self>) -> Self {Self(default())}
+    fn create(_: &Context<Self>) -> Self {
+        Self(default())
+    }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let GraphEditorCanvasProps{emitter, editor, id} = ctx.props();
+        let GraphEditorCanvasProps {
+            emitter,
+            editor,
+            id,
+        } = ctx.props();
         match editor.get().report() {
             Some(editor) => {
                 let (canvas_id, id) = (*id, editor.id());
-                html!{<canvas ref={editor.canvas().clone()} id={canvas_id}
-                    onpointerdown={emitter.reform(move  |e| AppEvent::Focus(id, e))}
-                    onpointerup={emitter.reform(move    |e| AppEvent::Hover(id, MouseEvent::from(e)))}
-                    onpointermove={emitter.reform(move  |e| AppEvent::Hover(id, MouseEvent::from(e)))}
-                    onpointerenter={emitter.reform(move |e| AppEvent::Enter(id, MouseEvent::from(e)))}
-                    onpointerout={emitter.reform(move   |_| AppEvent::Leave(id))}/>}
+                html! {<canvas ref={editor.canvas().clone()} id={canvas_id}
+                onpointerdown={emitter.reform(move  |e| AppEvent::Focus(id, e))}
+                onpointerup={emitter.reform(move    |e| AppEvent::Hover(id, MouseEvent::from(e)))}
+                onpointermove={emitter.reform(move  |e| AppEvent::Hover(id, MouseEvent::from(e)))}
+                onpointerenter={emitter.reform(move |e| AppEvent::Enter(id, MouseEvent::from(e)))}
+                onpointerout={emitter.reform(move   |_| AppEvent::Leave(id))}/>}
             }
-            None => html!{"Error"}
+            None => html! {"Error"},
         }
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
-        if !first_render {return}
+        if !first_render {
+            return;
+        }
         if let Some(mut x) = ctx.props().editor.get_mut().report() {
             x.init().report();
         }
@@ -378,7 +447,7 @@ impl<T: GraphPoint> Component for GraphEditorCanvas<T> {
 pub struct Counter {
     value: R64,
     old_value: f64,
-    target: NodeRef
+    target: NodeRef,
 }
 
 #[derive(PartialEq, yew::Properties)]
@@ -393,7 +462,7 @@ pub struct CounterProps {
     #[prop_or("")]
     pub postfix: &'static str,
     pub setter: Callback<R64>,
-    pub initial: R64
+    pub initial: R64,
 }
 
 impl Component for Counter {
@@ -401,43 +470,68 @@ impl Component for Counter {
     type Properties = CounterProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        Self{value: ctx.props().initial, old_value: f64::NAN, target: default()}
+        Self {
+            value: ctx.props().initial,
+            old_value: f64::NAN,
+            target: default(),
+        }
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        let res: AppResult<!> = try {
-            let CounterProps{setter, coef, min, ..} = ctx.props();
+        let res: AppResult<_> = try {
+            let CounterProps {
+                setter, coef, min, ..
+            } = ctx.props();
             match msg {
-                Cmd::Drag(e) => self.value = R64::from(e.movement_y())
-                    .div(-self.target.cast::<Element>().to_app_result()?.client_height())
-                    .mul(coef)
-                    .pipe_if(e.shift_key(), |x| x / 200)
-                    .add(self.value)
-                    .max(*min),
+                Cmd::Drag(e) => {
+                    self.value = R64::from(e.movement_y())
+                        .div(
+                            -self
+                                .target
+                                .cast::<Element>()
+                                .to_app_result()?
+                                .client_height(),
+                        )
+                        .mul(coef)
+                        .pipe_if(e.shift_key(), |x| x / 200)
+                        .add(self.value)
+                        .max(*min)
+                }
 
                 Cmd::Focus(e) => {
-                    self.target.cast::<Element>().to_app_result()?
+                    self.target
+                        .cast::<Element>()
+                        .to_app_result()?
                         .set_pointer_capture(e.pointer_id())?;
                     self.old_value = *self.value;
                 }
 
                 Cmd::Unfocus(e) => {
-                    self.target.cast::<Element>().to_app_result()?
+                    self.target
+                        .cast::<Element>()
+                        .to_app_result()?
                         .release_pointer_capture(e.pointer_id())?;
-                    if self.old_value != *self.value {setter.emit(self.value)}
+                    if self.old_value != *self.value {
+                        setter.emit(self.value)
+                    }
                     self.old_value = f64::NAN;
                 }
             }
-            return true
+            true
         };
-        res.report();
-        false
+        res.report().unwrap_or(false)
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let CounterProps{name, fmt, postfix, min, ..} = ctx.props();
+        let CounterProps {
+            name,
+            fmt,
+            postfix,
+            min,
+            ..
+        } = ctx.props();
         let scope = ctx.link();
-        html!{
+        html! {
             <svg ref={self.target.clone()} viewBox="0 0 100 100" class="input counter" data-main-hint={name}
             onpointerdown={scope.callback(Cmd::Focus)}
             onpointerup={scope.callback(Cmd::Unfocus)}
@@ -461,13 +555,18 @@ pub struct TabProps {
     pub desc: AttrValue,
     pub selected: bool,
     #[prop_or_default]
-    pub setter: Callback<()>
+    pub setter: Callback<()>,
 }
 
 #[function_component]
 pub fn Tab(props: &TabProps) -> Html {
-    let TabProps{name, desc, setter, selected} = props;
-    html!{
+    let TabProps {
+        name,
+        desc,
+        setter,
+        selected,
+    } = props;
+    html! {
         <div class={selected.then_some("selected")}
         onpointerup={setter.reform(|_| ())}
         data-main-hint={name} data-aux-hint={desc}>
@@ -489,14 +588,23 @@ pub struct AudioInputButtonProps {
     #[prop_or_default]
     pub emitter: Callback<AppEvent>,
     #[prop_or_default]
-    pub class: Classes
+    pub class: Classes,
 }
 
 #[function_component]
 pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
-    let AudioInputButtonProps{name, bps, input, help, onclick, playing, emitter, class} = props;
+    let AudioInputButtonProps {
+        name,
+        bps,
+        input,
+        help,
+        onclick,
+        playing,
+        emitter,
+        class,
+    } = props;
     match input.as_ref().map(|x| x.get_aware().report()) {
-        Some(Some(input)) => html!{
+        Some(Some(input)) => html! {
             <Button {name} {help} class={classes!(class.clone(), "wide")}
             onclick={onclick}>
                 <div class="inner-button-panel">
@@ -535,13 +643,13 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
             </Button>
         },
 
-        Some(None) => html!{
+        Some(None) => html! {
             <Button {name} {help} class={classes!(class.clone(), "wide")}>
                 <p style="color:red">{"Failed to access the audio input"}</p>
             </Button>
         },
 
-        None => html!{
+        None => html! {
             <Button {name} {help} class={classes!(class.clone(), "wide")}
             onclick={onclick}>
                 <div class="inner-button-panel">
@@ -559,6 +667,6 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                     </Button>
                 </div>
             </Button>
-        }
+        },
     }
 }
