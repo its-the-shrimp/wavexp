@@ -1,5 +1,5 @@
 use crate::{
-    global::AppEvent,
+    ctx::AppEvent,
     img,
     popup::Popup,
     sound::{AudioInput, Beats},
@@ -206,21 +206,28 @@ impl Component for Slider {
         } = ctx.props();
         let scope = ctx.link();
         html! {
-            <svg ref={self.target.clone()} viewBox="0 0 100 100" class="input slider" data-main-hint={name}
-            onpointerdown={scope.callback(Cmd::Focus)}
-            onpointerup={scope.callback(Cmd::Unfocus)}
-            onpointermove={(!self.old_value.is_nan()).then(|| scope.callback(Cmd::Drag))}>
-                <circle class="outer" cx="50" cy="50" r="40"/>
-                <path d={if self.value.abs() == *max {
+            <svg
+                ref={self.target.clone()}
+                viewBox="0 0 100 100"
+                class="input slider"
+                data-main-hint={name}
+                onpointerdown={scope.callback(Cmd::Focus)}
+                onpointerup={scope.callback(Cmd::Unfocus)}
+                onpointermove={(!self.old_value.is_nan()).then(|| scope.callback(Cmd::Drag))}
+            >
+                <circle class="outer" cx="50" cy="50" r="40" />
+                <path
+                    d={if self.value.abs() == *max {
                     AttrValue::from("M 50 12 A 38 38 0 0 0 50 88 A 38 38 0 1 0 50 12")
                 } else {
                     let p = ((self.value - min) / (max - min) - 0.5f32) * R64::TAU;
                     format!("M 50 12 A 38 38 0 {} 0 {} {}",
                         (p > 0) as u8, p.sin_or(r64![0]) * 38 + 50, p.cos_or(r64![0]) * 38 + 50).into()
-                }}/>
-                <circle class="inner" cx="50" cy="50" r="38"/>
-                <text x="50" y="50">{fmt.emit(self.value)}</text>
-                <text x="50" y="65">{postfix}</text>
+                }}
+                />
+                <circle class="inner" cx="50" cy="50" r="38" />
+                <text x="50" y="50">{ fmt.emit(self.value) }</text>
+                <text x="50" y="65">{ postfix }</text>
             </svg>
         }
     }
@@ -315,12 +322,18 @@ impl Component for Switch {
         let SwitchProps { name, options, .. } = ctx.props();
         let scope = ctx.link();
         html! {
-            <svg ref={self.target.clone()} viewBox="0 0 100 100" class="input switch" data-main-hint={name}
-            onpointerdown={scope.callback(Cmd::Focus)}
-            onpointerup={scope.callback(Cmd::Unfocus)}
-            onpointermove={self.focused.then(|| scope.callback(Cmd::Drag))}>
-                <circle class="outer" cx="50" cy="50" r="40"/>
-                <path d={{
+            <svg
+                ref={self.target.clone()}
+                viewBox="0 0 100 100"
+                class="input switch"
+                data-main-hint={name}
+                onpointerdown={scope.callback(Cmd::Focus)}
+                onpointerup={scope.callback(Cmd::Unfocus)}
+                onpointermove={self.focused.then(|| scope.callback(Cmd::Drag))}
+            >
+                <circle class="outer" cx="50" cy="50" r="40" />
+                <path
+                    d={{
                     let v = self.value.floor();
                     let n_opts = options.len();
                     let src = (v / n_opts - 0.5f32) * R64::TAU;
@@ -328,9 +341,10 @@ impl Component for Switch {
                     format!("M {} {} A 38 38 0 0 0 {} {}",
                         src.sin_or(r64![0]) * 38 + 50, src.cos_or(r64![0]) * 38 + 50,
                         dst.sin_or(r64![0]) * 38 + 50, dst.cos_or(r64![0]) * 38 + 50)
-                }}/>
-                <circle class="inner" cx="50" cy="50" r="38"/>
-                <text x="50" y="50">{unsafe{options.get_unchecked(usize::from(self.value))}}</text>
+                }}
+                />
+                <circle class="inner" cx="50" cy="50" r="38" />
+                <text x="50" y="50">{ unsafe{options.get_unchecked(usize::from(self.value))} }</text>
             </svg>
         }
     }
@@ -411,7 +425,7 @@ impl<T: GraphPoint> Component for GraphEditorCanvas<T> {
     type Properties = GraphEditorCanvasProps<T>;
 
     fn create(_: &Context<Self>) -> Self {
-        Self(default())
+        Self(PhantomData)
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
@@ -532,17 +546,20 @@ impl Component for Counter {
         } = ctx.props();
         let scope = ctx.link();
         html! {
-            <svg ref={self.target.clone()} viewBox="0 0 100 100" class="input counter" data-main-hint={name}
-            onpointerdown={scope.callback(Cmd::Focus)}
-            onpointerup={scope.callback(Cmd::Unfocus)}
-            onpointermove={(!self.old_value.is_nan()).then(|| scope.callback(Cmd::Drag))}>
-                <polygon class="upper" points="6,16 40,16 50,6 60,16 94,16"/>
-                <text x="50" y="50">{fmt.emit(self.value)}</text>
-                if !postfix.is_empty() {
-                    <text x="50" y="70">{postfix}</text>
-                }
+            <svg
+                ref={self.target.clone()}
+                viewBox="0 0 100 100"
+                class="input counter"
+                data-main-hint={name}
+                onpointerdown={scope.callback(Cmd::Focus)}
+                onpointerup={scope.callback(Cmd::Unfocus)}
+                onpointermove={(!self.old_value.is_nan()).then(|| scope.callback(Cmd::Drag))}
+            >
+                <polygon class="upper" points="6,16 40,16 50,6 60,16 94,16" />
+                <text x="50" y="50">{ fmt.emit(self.value) }</text>
+                if !postfix.is_empty() { <text x="50" y="70">{ postfix }</text> }
                 if self.value != *min {
-                    <polygon class="lower" points="6,84 40,84 50,94 60,84 94,84"/>
+                    <polygon class="lower" points="6,84 40,84 50,94 60,84 94,84" />
                 }
             </svg>
         }
@@ -567,11 +584,12 @@ pub fn Tab(props: &TabProps) -> Html {
         selected,
     } = props;
     html! {
-        <div class={selected.then_some("selected")}
-        onpointerup={setter.reform(|_| ())}
-        data-main-hint={name} data-aux-hint={desc}>
-            <p>{name}</p>
-        </div>
+        <div
+            class={selected.then_some("selected")}
+            onpointerup={setter.reform(|_| ())}
+            data-main-hint={name}
+            data-aux-hint={desc}
+        ><p>{ name }</p></div>
     }
 }
 

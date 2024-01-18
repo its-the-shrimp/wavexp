@@ -6,12 +6,13 @@ mod custom;
 use custom::*;
 
 use crate::{
-    global::{AppAction, AppContext, AppEvent},
+    ctx::{AppEvent, ContextMut, ContextRef, EditorAction},
     input::Button,
     sequencer::Sequencer,
 };
 use std::{
     fmt::{self, Display, Formatter},
+    future::Future,
     mem::{replace, variant_count},
     num::NonZeroUsize,
     ops::{Add, AddAssign, Div, Sub, SubAssign},
@@ -19,11 +20,8 @@ use std::{
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use wavexp_utils::{
-    cell::{Shared, SharedAwareRefMut},
-    default, r32, r64, AppResult, AppResultUtils, BoolExt, OptionExt, R32, R64,
-};
-use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, File};
+use wavexp_utils::{default, r32, r64, AppResult, AppResultUtils, BoolExt, OptionExt, R32, R64};
+use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, BaseAudioContext, File};
 use yew::{html, Html};
 
 pub type MSecs = R64;
@@ -232,10 +230,13 @@ pub struct AudioInput {
 }
 
 impl AudioInput {
-    pub async fn new_file(file: File, sequencer: Shared<Sequencer>) -> AppResult<Self> {
+    pub fn new_file(file: File, sequencer: &Sequencer) -> impl Future<Output = AppResult<Self>> {
+        Self::new_file_base(file, sequencer.audio_ctx().clone())
+    }
+
+    async fn new_file_base(file: File, audio_ctx: BaseAudioContext) -> AppResult<Self> {
         let raw = JsFuture::from(file.array_buffer()).await?.dyn_into()?;
-        let ctx = sequencer.get().map(|s| s.audio_ctx().clone())?;
-        let mut raw: AudioBuffer = JsFuture::from(ctx.decode_audio_data(&raw)?)
+        let mut raw: AudioBuffer = JsFuture::from(audio_ctx.decode_audio_data(&raw)?)
             .await?
             .dyn_into()?;
         if raw.number_of_channels() < Sequencer::CHANNEL_COUNT {
@@ -412,8 +413,8 @@ impl Sound {
     pub fn len(&self, bps: Beats) -> AppResult<Beats> {
         match self {
             Self::None => Ok(r64![1]),
-            Self::Note(inner) => inner.len(bps),
-            Self::Noise(inner) => inner.len(bps),
+            Self::Note(inner) => inner.len(),
+            Self::Noise(inner) => inner.len(),
             Self::Custom(inner) => inner.len(bps),
         }
     }
@@ -427,7 +428,7 @@ impl Sound {
         }
     }
 
-    pub fn params(&self, ctx: &AppContext, sequencer: &Sequencer) -> Html {
+    pub fn params(&self, ctx: ContextRef, sequencer: &Sequencer) -> Html {
         match self {
             Self::None => {
                 let emitter = ctx.event_emitter();
@@ -441,8 +442,8 @@ impl Sound {
                 </div>}
             }
 
-            Self::Note(inner) => inner.params(ctx, sequencer),
-            Self::Noise(inner) => inner.params(ctx, sequencer),
+            Self::Note(inner) => inner.params(ctx),
+            Self::Noise(inner) => inner.params(ctx),
             Self::Custom(inner) => inner.params(ctx, sequencer),
         }
     }
@@ -450,8 +451,8 @@ impl Sound {
     pub fn handle_event(
         &mut self,
         event: &AppEvent,
-        ctx: &mut AppContext,
-        sequencer: &SharedAwareRefMut<'_, Sequencer>,
+        mut ctx: ContextMut,
+        sequencer: &Sequencer,
         offset: Beats,
     ) -> AppResult<()> {
         let r = &mut false;
@@ -459,13 +460,13 @@ impl Sound {
             Sound::None => match event {
                 &AppEvent::SetBlockType(ty) => {
                     *self = Self::new(ty)?;
-                    ctx.register_action(AppAction::SetBlockType(ty));
+                    ctx.register_action(EditorAction::SetBlockType(ty));
                     ctx.emit_event(AppEvent::RedrawEditorPlane);
                 }
 
                 AppEvent::Redo(actions) => {
                     for action in actions.iter() {
-                        if let &AppAction::SetBlockType(ty) = action {
+                        if let &EditorAction::SetBlockType(ty) = action {
                             *self = Self::new(ty)?;
                             ctx.emit_event(AppEvent::RedrawEditorPlane);
                         }

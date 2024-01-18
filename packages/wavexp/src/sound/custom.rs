@@ -1,6 +1,6 @@
 use super::NoteBlock;
 use crate::{
-    global::{AppAction, AppContext, AppEvent},
+    ctx::{AppEvent, ContextMut, ContextRef, EditorAction},
     input::{AudioInputButton, Counter, Cursor, GraphEditorCanvas, Slider},
     popup::Popup,
     sequencer::{PlaybackContext, Sequencer},
@@ -15,9 +15,8 @@ use std::{
 };
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
-    cell::{Shared, SharedAwareRefMut},
-    js_function, r32, r64, AppError, AppResult, AppResultUtils, ArrayExt, ArrayFrom, OptionExt,
-    RangeExt, R32, R64,
+    cell::Shared, js_function, r32, r64, AppError, AppResult, AppResultUtils, ArrayExt, ArrayFrom,
+    OptionExt, RangeExt, R32, R64,
 };
 use web_sys::{AudioNode, Path2d};
 use yew::{html, Html};
@@ -93,7 +92,7 @@ impl GraphPoint for CustomBlock {
     fn in_hitbox(
         &self,
         area: &[RangeInclusive<R64>; 2],
-        _: &AppContext,
+        _: ContextRef,
         _: &Sequencer,
         (.., len): Self::VisualContext,
     ) -> AppResult<bool> {
@@ -110,12 +109,12 @@ impl GraphPoint for CustomBlock {
 
     fn on_move(
         editor: &mut GraphEditor<Self>,
-        ctx: &mut AppContext,
+        ctx: ContextMut,
         _: Cursor,
         _: [R64; 2],
         point: Option<usize>,
     ) -> AppResult<()> {
-        let Some(last) = editor.len().checked_sub(1) else {
+        let Some(last) = editor.data().len().checked_sub(1) else {
             return Ok(());
         };
         Ok(
@@ -127,7 +126,7 @@ impl GraphPoint for CustomBlock {
 
     fn on_redraw(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: ContextRef,
         sequencer: &Sequencer,
         canvas_size: &[R64; 2],
         solid: &Path2d,
@@ -144,7 +143,7 @@ impl GraphPoint for CustomBlock {
             *canvas_size[0] * 2.0,
             *step[1],
         );
-        for block in editor.iter() {
+        for block in editor.data().iter() {
             let [x, y] = block.loc().mul(step).sub(offset);
             solid.rect(
                 *x,
@@ -155,6 +154,7 @@ impl GraphPoint for CustomBlock {
         }
 
         let total_len = editor
+            .data()
             .last()
             .map_or_default(|x| x.offset + len / x.pitch.pitch_coef());
         Ok(if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
@@ -223,7 +223,7 @@ impl CustomSound {
         let Some(src) = &self.src else { return Ok(()) };
         let src = src.get()?;
         let pat = self.pattern.get()?;
-        let Some(last) = pat.last() else {
+        let Some(last) = pat.data().last() else {
             return Ok(());
         };
         let len = src.baked_duration() / self.speed;
@@ -231,7 +231,7 @@ impl CustomSound {
         let ctx = plug.context();
 
         Ok(for rep in 0..self.rep_count.get() {
-            for CustomBlock { offset, pitch } in pat.iter() {
+            for CustomBlock { offset, pitch } in pat.data().iter() {
                 let coef = pitch.pitch_coef();
                 let block = ctx.create_gain()?;
                 let gain = block.gain();
@@ -263,7 +263,7 @@ impl CustomSound {
     }
 
     pub fn len(&self, bps: Beats) -> AppResult<Beats> {
-        Ok(if let Some(block) = self.pattern.get()?.last() && let Some(src) = &self.src {
+        Ok(if let Some(block) = self.pattern.get()?.data().last() && let Some(src) = &self.src {
             src.get()?.baked_duration().secs_to_beats(bps)
                 / self.speed / block.pitch.pitch_coef()
                 + block.offset
@@ -274,7 +274,7 @@ impl CustomSound {
         self.rep_count
     }
 
-    pub fn params(&self, ctx: &AppContext, sequencer: &Sequencer) -> Html {
+    pub fn params(&self, ctx: ContextRef, sequencer: &Sequencer) -> Html {
         let emitter = ctx.event_emitter();
         match ctx.selected_tab() {
             0 /* General */ => html!{<div id="inputs">
@@ -331,39 +331,39 @@ impl CustomSound {
     pub fn handle_event(
         &mut self,
         event: &AppEvent,
-        ctx: &mut AppContext,
-        sequencer: &SharedAwareRefMut<'_, Sequencer>,
+        mut ctx: ContextMut,
+        sequencer: &Sequencer,
         reset_sound: &mut bool,
         offset: Beats,
     ) -> AppResult<()> {
         Ok(match *event {
-            AppEvent::Volume(to) => ctx.register_action(AppAction::SetVolume {
+            AppEvent::Volume(to) => ctx.register_action(EditorAction::SetVolume {
                 from: replace(&mut self.volume, to),
                 to,
             }),
 
-            AppEvent::Attack(to) => ctx.register_action(AppAction::SetAttack {
+            AppEvent::Attack(to) => ctx.register_action(EditorAction::SetAttack {
                 from: replace(&mut self.attack, to),
                 to,
             }),
 
-            AppEvent::Decay(to) => ctx.register_action(AppAction::SetDecay {
+            AppEvent::Decay(to) => ctx.register_action(EditorAction::SetDecay {
                 from: replace(&mut self.decay, to),
                 to,
             }),
 
-            AppEvent::Sustain(to) => ctx.register_action(AppAction::SetSustain {
+            AppEvent::Sustain(to) => ctx.register_action(EditorAction::SetSustain {
                 from: replace(&mut self.sustain, to),
                 to,
             }),
 
-            AppEvent::Release(to) => ctx.register_action(AppAction::SetRelease {
+            AppEvent::Release(to) => ctx.register_action(EditorAction::SetRelease {
                 from: replace(&mut self.release, to),
                 to,
             }),
 
             AppEvent::RepCount(to) => {
-                ctx.register_action(AppAction::SetRepCount {
+                ctx.register_action(EditorAction::SetRepCount {
                     from: replace(&mut self.rep_count, to),
                     to,
                 });
@@ -371,7 +371,7 @@ impl CustomSound {
             }
 
             AppEvent::Speed(to) => {
-                ctx.register_action(AppAction::SetSpeed {
+                ctx.register_action(EditorAction::SetSpeed {
                     from: replace(&mut self.speed, to),
                     to,
                 });
@@ -379,7 +379,7 @@ impl CustomSound {
             }
 
             AppEvent::AddInput(ref to) | AppEvent::SelectInput(ref to) => {
-                ctx.register_action(AppAction::SelectInput {
+                ctx.register_action(EditorAction::SelectInput {
                     from: self.src.clone(),
                     to: Some(to.clone()),
                 });
@@ -391,32 +391,32 @@ impl CustomSound {
                 let mut pat = self.pattern.get_mut()?;
                 for action in actions.iter() {
                     match *action {
-                        AppAction::SetBlockType(_) => {
+                        EditorAction::SetBlockType(_) => {
                             *reset_sound = true;
                             break;
                         }
 
-                        AppAction::SetVolume { from, .. } => self.volume = from,
+                        EditorAction::SetVolume { from, .. } => self.volume = from,
 
-                        AppAction::SetAttack { from, .. } => self.attack = from,
+                        EditorAction::SetAttack { from, .. } => self.attack = from,
 
-                        AppAction::SetDecay { from, .. } => self.decay = from,
+                        EditorAction::SetDecay { from, .. } => self.decay = from,
 
-                        AppAction::SetSustain { from, .. } => self.sustain = from,
+                        EditorAction::SetSustain { from, .. } => self.sustain = from,
 
-                        AppAction::SetRelease { from, .. } => self.release = from,
+                        EditorAction::SetRelease { from, .. } => self.release = from,
 
-                        AppAction::SetRepCount { from, .. } => {
+                        EditorAction::SetRepCount { from, .. } => {
                             self.rep_count = from;
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }
 
-                        AppAction::SetSpeed { from, .. } => {
+                        EditorAction::SetSpeed { from, .. } => {
                             self.speed = from;
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }
 
-                        AppAction::SelectInput { ref from, .. } => {
+                        EditorAction::SelectInput { ref from, .. } => {
                             self.src = from.clone();
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }
@@ -442,27 +442,27 @@ impl CustomSound {
                 let mut pat = self.pattern.get_mut()?;
                 for action in actions.iter() {
                     match *action {
-                        AppAction::SetVolume { to, .. } => self.volume = to,
+                        EditorAction::SetVolume { to, .. } => self.volume = to,
 
-                        AppAction::SetAttack { to, .. } => self.attack = to,
+                        EditorAction::SetAttack { to, .. } => self.attack = to,
 
-                        AppAction::SetDecay { to, .. } => self.decay = to,
+                        EditorAction::SetDecay { to, .. } => self.decay = to,
 
-                        AppAction::SetSustain { to, .. } => self.sustain = to,
+                        EditorAction::SetSustain { to, .. } => self.sustain = to,
 
-                        AppAction::SetRelease { to, .. } => self.release = to,
+                        EditorAction::SetRelease { to, .. } => self.release = to,
 
-                        AppAction::SetRepCount { to, .. } => {
+                        EditorAction::SetRepCount { to, .. } => {
                             self.rep_count = to;
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }
 
-                        AppAction::SetSpeed { to, .. } => {
+                        EditorAction::SetSpeed { to, .. } => {
                             self.speed = to;
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }
 
-                        AppAction::SelectInput { ref to, .. } => {
+                        EditorAction::SelectInput { ref to, .. } => {
                             self.src = to.clone();
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }

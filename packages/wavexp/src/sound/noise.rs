@@ -1,6 +1,6 @@
 use super::CustomBlock;
 use crate::{
-    global::{AppAction, AppContext, AppEvent},
+    ctx::{AppEvent, ContextMut, ContextRef, EditorAction},
     input::{Counter, GraphEditorCanvas, Slider},
     sequencer::{PlaybackContext, Sequencer},
     sound::{Beats, FromBeats, Note, Secs},
@@ -14,9 +14,8 @@ use std::{
 };
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
-    cell::{Shared, SharedAwareRefMut},
-    default, js_function, r32, r64, AppError, AppResult, AppResultUtils, ArrayExt, ArrayFrom,
-    OptionExt, Pipe, RangeExt, R32, R64,
+    cell::Shared, default, js_function, r32, r64, AppError, AppResult, AppResultUtils, ArrayExt,
+    ArrayFrom, OptionExt, Pipe, RangeExt, R32, R64,
 };
 use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, Path2d};
 use yew::{html, Html};
@@ -87,7 +86,7 @@ impl GraphPoint for NoiseBlock {
     fn in_hitbox(
         &self,
         area: &[RangeInclusive<R64>; 2],
-        _: &AppContext,
+        _: ContextRef,
         _: &Sequencer,
         _: Self::VisualContext,
     ) -> AppResult<bool> {
@@ -100,7 +99,7 @@ impl GraphPoint for NoiseBlock {
 
     fn on_redraw(
         editor: &mut GraphEditor<Self>,
-        ctx: &AppContext,
+        ctx: ContextRef,
         sequencer: &Sequencer,
         canvas_size: &[R64; 2],
         solid: &Path2d,
@@ -110,12 +109,12 @@ impl GraphPoint for NoiseBlock {
         let bps = sequencer.bps();
         let step = &canvas_size.div(&editor.scale());
         let offset = &R64::array_from(editor.offset());
-        for block in editor.iter() {
+        for block in editor.data().iter() {
             let [x, y] = block.loc().mul(step).sub(offset);
             solid.rect(*x, *y, *block.len * *step[0], *step[1]);
         }
 
-        let total_len = editor.last().map_or_default(|x| x.offset + x.len);
+        let total_len = editor.data().last().map_or_default(|x| x.offset + x.len);
         Ok(if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
             let progress = (ctx.frame() - start).secs_to_beats(bps) - sb_offset;
             if progress < total_len * n_reps {
@@ -180,14 +179,14 @@ impl NoiseSound {
         bps: Beats,
     ) -> AppResult<()> {
         let pat = self.pattern.get()?;
-        let Some(last) = pat.last() else {
+        let Some(last) = pat.data().last() else {
             return Ok(());
         };
         let pat_len = (last.offset + last.len).to_secs(bps);
         let ctx = plug.context();
 
         Ok(for rep in 0..self.rep_count.get() {
-            for NoiseBlock { offset, len, pitch } in pat.iter() {
+            for NoiseBlock { offset, len, pitch } in pat.data().iter() {
                 let block = ctx.create_gain()?;
                 let gain = block.gain();
                 let start = now + self_offset + pat_len * rep + offset.to_secs(bps);
@@ -221,10 +220,11 @@ impl NoiseSound {
         })
     }
 
-    pub fn len(&self, _: Beats) -> AppResult<Beats> {
+    pub fn len(&self) -> AppResult<Beats> {
         Ok(self
             .pattern
             .get()?
+            .data()
             .last()
             .map_or_default(|x| x.offset + x.len))
     }
@@ -233,7 +233,7 @@ impl NoiseSound {
         self.rep_count
     }
 
-    pub fn params(&self, ctx: &AppContext, _: &Sequencer) -> Html {
+    pub fn params(&self, ctx: ContextRef) -> Html {
         let emitter = ctx.event_emitter();
         match ctx.selected_tab() {
             0 /* General */ => html!{<div id="inputs">
@@ -281,39 +281,39 @@ impl NoiseSound {
     pub fn handle_event(
         &mut self,
         event: &AppEvent,
-        ctx: &mut AppContext,
-        sequencer: &SharedAwareRefMut<'_, Sequencer>,
+        mut ctx: ContextMut,
+        sequencer: &Sequencer,
         reset_sound: &mut bool,
         offset: Beats,
     ) -> AppResult<()> {
         Ok(match *event {
-            AppEvent::Volume(to) => ctx.register_action(AppAction::SetVolume {
+            AppEvent::Volume(to) => ctx.register_action(EditorAction::SetVolume {
                 from: replace(&mut self.volume, to),
                 to,
             }),
 
-            AppEvent::Attack(to) => ctx.register_action(AppAction::SetAttack {
+            AppEvent::Attack(to) => ctx.register_action(EditorAction::SetAttack {
                 from: replace(&mut self.attack, to),
                 to,
             }),
 
-            AppEvent::Decay(to) => ctx.register_action(AppAction::SetDecay {
+            AppEvent::Decay(to) => ctx.register_action(EditorAction::SetDecay {
                 from: replace(&mut self.decay, to),
                 to,
             }),
 
-            AppEvent::Sustain(to) => ctx.register_action(AppAction::SetSustain {
+            AppEvent::Sustain(to) => ctx.register_action(EditorAction::SetSustain {
                 from: replace(&mut self.sustain, to),
                 to,
             }),
 
-            AppEvent::Release(to) => ctx.register_action(AppAction::SetRelease {
+            AppEvent::Release(to) => ctx.register_action(EditorAction::SetRelease {
                 from: replace(&mut self.release, to),
                 to,
             }),
 
             AppEvent::RepCount(to) => {
-                ctx.register_action(AppAction::SetRepCount {
+                ctx.register_action(EditorAction::SetRepCount {
                     from: replace(&mut self.rep_count, to),
                     to,
                 });
@@ -324,22 +324,22 @@ impl NoiseSound {
                 let mut pat = self.pattern.get_mut()?;
                 for action in actions.iter() {
                     match *action {
-                        AppAction::SetBlockType(_) => {
+                        EditorAction::SetBlockType(_) => {
                             *reset_sound = true;
                             break;
                         }
 
-                        AppAction::SetVolume { from, .. } => self.volume = from,
+                        EditorAction::SetVolume { from, .. } => self.volume = from,
 
-                        AppAction::SetAttack { from, .. } => self.attack = from,
+                        EditorAction::SetAttack { from, .. } => self.attack = from,
 
-                        AppAction::SetDecay { from, .. } => self.decay = from,
+                        EditorAction::SetDecay { from, .. } => self.decay = from,
 
-                        AppAction::SetSustain { from, .. } => self.sustain = from,
+                        EditorAction::SetSustain { from, .. } => self.sustain = from,
 
-                        AppAction::SetRelease { from, .. } => self.release = from,
+                        EditorAction::SetRelease { from, .. } => self.release = from,
 
-                        AppAction::SetRepCount { from, .. } => {
+                        EditorAction::SetRepCount { from, .. } => {
                             self.rep_count = from;
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }
@@ -357,17 +357,17 @@ impl NoiseSound {
                 let mut pat = self.pattern.get_mut()?;
                 for action in actions.iter() {
                     match *action {
-                        AppAction::SetVolume { to, .. } => self.volume = to,
+                        EditorAction::SetVolume { to, .. } => self.volume = to,
 
-                        AppAction::SetAttack { to, .. } => self.attack = to,
+                        EditorAction::SetAttack { to, .. } => self.attack = to,
 
-                        AppAction::SetDecay { to, .. } => self.decay = to,
+                        EditorAction::SetDecay { to, .. } => self.decay = to,
 
-                        AppAction::SetSustain { to, .. } => self.sustain = to,
+                        EditorAction::SetSustain { to, .. } => self.sustain = to,
 
-                        AppAction::SetRelease { to, .. } => self.release = to,
+                        EditorAction::SetRelease { to, .. } => self.release = to,
 
-                        AppAction::SetRepCount { to, .. } => {
+                        EditorAction::SetRepCount { to, .. } => {
                             self.rep_count = to;
                             ctx.emit_event(AppEvent::RedrawEditorPlane)
                         }

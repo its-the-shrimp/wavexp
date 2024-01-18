@@ -2,10 +2,10 @@ use std::{mem::replace, rc::Rc};
 
 use wavexp_utils::{cell::Shared, AppResult, AppResultUtils, BoolExt, OptionExt};
 use web_sys::HtmlInputElement;
-use yew::{html, AttrValue, Html, TargetCast};
+use yew::{html, AttrValue, Callback, Html, TargetCast};
 
 use crate::{
-    global::{AppAction, AppContext, AppEvent},
+    ctx::{AppEvent, ContextMut, EditorAction},
     img,
     input::{AudioInputButton, Button, Slider},
     sequencer::Sequencer,
@@ -27,7 +27,7 @@ pub enum Popup {
 }
 
 impl Popup {
-    pub fn handle_event(&mut self, event: &AppEvent, ctx: &mut AppContext) -> AppResult<()> {
+    pub fn handle_event(&mut self, event: &AppEvent, mut ctx: ContextMut) -> AppResult<()> {
         Ok(match *event {
             AppEvent::SetOutputFileName(ref e) => {
                 if let Self::Export { filename, err_msg } = self {
@@ -38,7 +38,7 @@ impl Popup {
                         .into();
                     let from = replace(filename, to.clone());
                     *err_msg = "".into();
-                    ctx.register_action(AppAction::SetOutputFileName { from, to });
+                    ctx.register_action(EditorAction::SetOutputFileName { from, to });
                 }
             }
 
@@ -73,7 +73,7 @@ impl Popup {
                         .into();
                     if !to.is_empty() {
                         let from = input.get_mut()?.set_name(to.clone());
-                        ctx.register_action(AppAction::SetInputName { from, to });
+                        ctx.register_action(EditorAction::SetInputName { from, to });
                     }
                 }
             }
@@ -81,54 +81,59 @@ impl Popup {
             AppEvent::ReverseInput => {
                 if let Self::EditInput(input) = self {
                     input.get_mut()?.changes_mut().reversed.flip();
-                    ctx.register_action(AppAction::ReverseInput);
+                    ctx.register_action(EditorAction::ReverseInput);
                 }
             }
 
             AppEvent::SetStartCutOff(to) => {
                 if let Self::EditInput(input) = self {
                     let from = replace(&mut input.get_mut()?.changes_mut().cut_start, to);
-                    ctx.register_action(AppAction::SetStartCutOff { from, to });
+                    ctx.register_action(EditorAction::SetStartCutOff { from, to });
                 }
             }
 
             AppEvent::SetEndCutOff(to) => {
                 if let Self::EditInput(input) = self {
                     let from = replace(&mut input.get_mut()?.changes_mut().cut_end, to);
-                    ctx.register_action(AppAction::SetEndCutOff { from, to });
+                    ctx.register_action(EditorAction::SetEndCutOff { from, to });
                 }
             }
 
             AppEvent::Undo(ref actions) => {
                 for action in actions.iter() {
                     match action {
-                        AppAction::SetOutputFileName { from, .. } => {
+                        EditorAction::SetOutputFileName { from, .. } => {
                             if let Self::Export { filename, .. } = self {
                                 *filename = from.clone();
+                                ctx.force_rerender();
                             }
                         }
 
-                        AppAction::SetInputName { from, .. } => {
+                        EditorAction::SetInputName { from, .. } => {
                             if let Self::EditInput(input) = self {
                                 input.get_mut()?.set_name(from.clone());
+                                ctx.force_rerender();
                             }
                         }
 
-                        AppAction::ReverseInput => {
+                        EditorAction::ReverseInput => {
                             if let Self::EditInput(input) = self {
                                 input.get_mut()?.changes_mut().reversed.flip();
+                                ctx.force_rerender();
                             }
                         }
 
-                        AppAction::SetStartCutOff { from, .. } => {
+                        EditorAction::SetStartCutOff { from, .. } => {
                             if let Self::EditInput(input) = self {
                                 input.get_mut()?.changes_mut().cut_start = *from;
+                                ctx.force_rerender();
                             }
                         }
 
-                        AppAction::SetEndCutOff { from, .. } => {
+                        EditorAction::SetEndCutOff { from, .. } => {
                             if let Self::EditInput(input) = self {
                                 input.get_mut()?.changes_mut().cut_end = *from;
+                                ctx.force_rerender();
                             }
                         }
 
@@ -140,33 +145,38 @@ impl Popup {
             AppEvent::Redo(ref actions) => {
                 for action in actions.iter() {
                     match action {
-                        AppAction::SetOutputFileName { to, .. } => {
+                        EditorAction::SetOutputFileName { to, .. } => {
                             if let Self::Export { filename, .. } = self {
                                 *filename = to.clone();
+                                ctx.force_rerender();
                             }
                         }
 
-                        AppAction::SetInputName { to, .. } => {
+                        EditorAction::SetInputName { to, .. } => {
                             if let Self::EditInput(input) = self {
                                 input.get_mut()?.set_name(to.clone());
+                                ctx.force_rerender();
                             }
                         }
 
-                        AppAction::ReverseInput => {
+                        EditorAction::ReverseInput => {
                             if let Self::EditInput(input) = self {
                                 input.get_mut()?.changes_mut().reversed.flip();
+                                ctx.force_rerender();
                             }
                         }
 
-                        AppAction::SetStartCutOff { to, .. } => {
+                        EditorAction::SetStartCutOff { to, .. } => {
                             if let Self::EditInput(input) = self {
                                 input.get_mut()?.changes_mut().cut_start = *to;
+                                ctx.force_rerender();
                             }
                         }
 
-                        AppAction::SetEndCutOff { to, .. } => {
+                        EditorAction::SetEndCutOff { to, .. } => {
                             if let Self::EditInput(input) = self {
                                 input.get_mut()?.changes_mut().cut_end = *to;
+                                ctx.force_rerender();
                             }
                         }
 
@@ -179,8 +189,7 @@ impl Popup {
         })
     }
 
-    pub fn render(&self, ctx: &AppContext, sequencer: &Sequencer) -> Html {
-        let emitter = ctx.event_emitter();
+    pub fn render(&self, emitter: &Callback<AppEvent>, sequencer: &Sequencer) -> Html {
         match self {
             Self::ChooseInput => html! {
                 <form id="popup-bg" method="dialog" onsubmit={emitter.reform(|_| AppEvent::ClosePopup)}>

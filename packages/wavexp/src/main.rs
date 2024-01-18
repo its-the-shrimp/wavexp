@@ -15,8 +15,11 @@
 #![allow(clippy::unit_arg)]
 #![allow(clippy::option_map_unit_fn)]
 #![allow(clippy::comparison_chain)]
+#![deny(clippy::single_char_lifetime_names)]
 
-mod global;
+mod app;
+mod ctx;
+mod editor;
 mod img;
 mod input;
 mod popup;
@@ -32,5 +35,5 @@ pub use web_sys;
 pub use yew;
 
 fn main() {
-    yew::Renderer::<global::App>::new().render();
+    yew::Renderer::<app::App>::new().render();
 }
