@@ -10,8 +10,10 @@ use std::{
     ops::{Add, Deref, DerefMut, Div, Mul},
 };
 use wavexp_utils::{
-    cell::Shared, default, r64, AppError, AppResult, AppResultUtils, BoolExt, HtmlCanvasExt,
-    HtmlElementExt, OptionExt, Pipe, Point, R64,
+    cell::Shared,
+    default,
+    ext::{BoolExt, HtmlCanvasExt, HtmlElementExt, OptionExt},
+    r64, AppError, AppResult, AppResultUtils, Pipe, Point, R64,
 };
 use web_sys::{Element, HtmlCanvasElement, KeyboardEvent, MouseEvent, PointerEvent};
 use yew::{
@@ -436,6 +438,9 @@ impl<T: GraphPoint> Component for GraphEditorCanvas<T> {
         } = ctx.props();
         match editor.get().report() {
             Some(editor) => {
+                // TODO: remove the need to store `GraphEditor`s as shared by removing the need to
+                // pass them to this component's props by obsoleting `GraphEditor::id` thus only
+                // having to pass the underlying `NodeRef`
                 let (canvas_id, id) = (*id, editor.id());
                 html! {<canvas ref={editor.canvas().clone()} id={canvas_id}
                 onpointerdown={emitter.reform(move  |e| AppEvent::Focus(id, e))}

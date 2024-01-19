@@ -20,7 +20,11 @@ use std::{
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use wavexp_utils::{default, r32, r64, AppResult, AppResultUtils, BoolExt, OptionExt, R32, R64};
+use wavexp_utils::{
+    default,
+    ext::{BoolExt, OptionExt},
+    r32, r64, AppResult, AppResultUtils, R32, R64,
+};
 use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, BaseAudioContext, File};
 use yew::{html, Html};
 
@@ -47,6 +51,7 @@ impl FromBeats for Beats {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord)]
+// Safety invariant: `self.0 <= Self::MAX.0`
 pub struct Note(u8);
 
 impl Display for Note {
@@ -81,6 +86,7 @@ impl Sub<isize> for Note {
     }
 }
 
+// TODO: remove the side effects by introducing `Try{Add/Sub/Mul/Div}` traits
 impl Sub for Note {
     type Output = isize;
     fn sub(self, rhs: Self) -> Self::Output {
@@ -460,7 +466,7 @@ impl Sound {
             Sound::None => match event {
                 &AppEvent::SetBlockType(ty) => {
                     *self = Self::new(ty)?;
-                    ctx.register_action(EditorAction::SetBlockType(ty));
+                    ctx.register_action(EditorAction::SetBlockType(ty))?;
                     ctx.emit_event(AppEvent::RedrawEditorPlane);
                 }
 

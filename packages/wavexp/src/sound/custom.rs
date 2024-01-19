@@ -15,8 +15,9 @@ use std::{
 };
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
-    cell::Shared, js_function, r32, r64, AppError, AppResult, AppResultUtils, ArrayExt, ArrayFrom,
-    OptionExt, RangeExt, R32, R64,
+    cell::Shared,
+    ext::{ArrayExt, OptionExt, RangeExt},
+    js_function, r32, r64, AppError, AppResult, AppResultUtils, ArrayFrom, R32, R64,
 };
 use web_sys::{AudioNode, Path2d};
 use yew::{html, Html};
@@ -340,33 +341,33 @@ impl CustomSound {
             AppEvent::Volume(to) => ctx.register_action(EditorAction::SetVolume {
                 from: replace(&mut self.volume, to),
                 to,
-            }),
+            })?,
 
             AppEvent::Attack(to) => ctx.register_action(EditorAction::SetAttack {
                 from: replace(&mut self.attack, to),
                 to,
-            }),
+            })?,
 
             AppEvent::Decay(to) => ctx.register_action(EditorAction::SetDecay {
                 from: replace(&mut self.decay, to),
                 to,
-            }),
+            })?,
 
             AppEvent::Sustain(to) => ctx.register_action(EditorAction::SetSustain {
                 from: replace(&mut self.sustain, to),
                 to,
-            }),
+            })?,
 
             AppEvent::Release(to) => ctx.register_action(EditorAction::SetRelease {
                 from: replace(&mut self.release, to),
                 to,
-            }),
+            })?,
 
             AppEvent::RepCount(to) => {
                 ctx.register_action(EditorAction::SetRepCount {
                     from: replace(&mut self.rep_count, to),
                     to,
-                });
+                })?;
                 ctx.emit_event(AppEvent::RedrawEditorPlane);
             }
 
@@ -374,7 +375,7 @@ impl CustomSound {
                 ctx.register_action(EditorAction::SetSpeed {
                     from: replace(&mut self.speed, to),
                     to,
-                });
+                })?;
                 ctx.emit_event(AppEvent::RedrawEditorPlane);
             }
 
@@ -382,7 +383,7 @@ impl CustomSound {
                 ctx.register_action(EditorAction::SelectInput {
                     from: self.src.clone(),
                     to: Some(to.clone()),
-                });
+                })?;
                 self.src = Some(to.clone());
                 ctx.emit_event(AppEvent::RedrawEditorPlane)
             }

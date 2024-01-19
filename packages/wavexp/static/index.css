@@ -91,10 +91,6 @@ input:focus-visible {
 #io-panel > div {
 	align-self: center;
 }
-#piano {
-	flex-grow: 3;
-	margin: 1em;
-}
 #sound-visualiser {
 	margin: 1em;
 	flex: 1;

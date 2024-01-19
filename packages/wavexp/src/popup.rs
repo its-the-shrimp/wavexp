@@ -1,6 +1,10 @@
 use std::{mem::replace, rc::Rc};
 
-use wavexp_utils::{cell::Shared, AppResult, AppResultUtils, BoolExt, OptionExt};
+use wavexp_utils::{
+    cell::Shared,
+    ext::{BoolExt, OptionExt},
+    AppResult, AppResultUtils,
+};
 use web_sys::HtmlInputElement;
 use yew::{html, AttrValue, Callback, Html, TargetCast};
 
@@ -38,7 +42,7 @@ impl Popup {
                         .into();
                     let from = replace(filename, to.clone());
                     *err_msg = "".into();
-                    ctx.register_action(EditorAction::SetOutputFileName { from, to });
+                    ctx.register_action(EditorAction::SetOutputFileName { from, to })?;
                 }
             }
 
@@ -73,7 +77,7 @@ impl Popup {
                         .into();
                     if !to.is_empty() {
                         let from = input.get_mut()?.set_name(to.clone());
-                        ctx.register_action(EditorAction::SetInputName { from, to });
+                        ctx.register_action(EditorAction::SetInputName { from, to })?;
                     }
                 }
             }
@@ -81,21 +85,21 @@ impl Popup {
             AppEvent::ReverseInput => {
                 if let Self::EditInput(input) = self {
                     input.get_mut()?.changes_mut().reversed.flip();
-                    ctx.register_action(EditorAction::ReverseInput);
+                    ctx.register_action(EditorAction::ReverseInput)?;
                 }
             }
 
             AppEvent::SetStartCutOff(to) => {
                 if let Self::EditInput(input) = self {
                     let from = replace(&mut input.get_mut()?.changes_mut().cut_start, to);
-                    ctx.register_action(EditorAction::SetStartCutOff { from, to });
+                    ctx.register_action(EditorAction::SetStartCutOff { from, to })?;
                 }
             }
 
             AppEvent::SetEndCutOff(to) => {
                 if let Self::EditInput(input) = self {
                     let from = replace(&mut input.get_mut()?.changes_mut().cut_end, to);
-                    ctx.register_action(EditorAction::SetEndCutOff { from, to });
+                    ctx.register_action(EditorAction::SetEndCutOff { from, to })?;
                 }
             }
 

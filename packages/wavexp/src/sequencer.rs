@@ -15,11 +15,13 @@ use std::{
     iter::zip,
     ops::{Add, Deref, DerefMut, Mul, Not, Range, RangeInclusive},
 };
-use wasm_bindgen::{JsCast, UnwrapThrowExt};
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use wavexp_utils::{
-    cell::Shared, const_assert, default, document, js_function, now, r64, AppResult,
-    AppResultUtils, ArrayExt, ArrayFrom, OptionExt, RangeExt, R32, R64,
+    cell::Shared,
+    const_assert, default, document,
+    ext::{ArrayExt, OptionExt, RangeExt},
+    js_function, now, r64, AppResult, AppResultUtils, ArrayFrom, R32, R64,
 };
 use web_sys::{
     AnalyserNode, AudioContext, BaseAudioContext, Blob, GainNode, HtmlAnchorElement,
@@ -511,23 +513,22 @@ impl Sequencer {
             }
 
             AppEvent::AddInput(ref input) => {
-                ctx.register_action(EditorAction::AddInput(input.clone()));
+                ctx.register_action(EditorAction::AddInput(input.clone()))?;
                 self.inputs.push(input.clone());
             }
 
             AppEvent::MasterVolume(to) => {
                 let gain = self.gain.gain();
-                // TODO: make unwrap an alias to unwrap_throw
                 ctx.register_action(EditorAction::SetMasterVolume {
-                    from: R32::new(gain.value()).unwrap_throw(),
+                    from: R32::new(gain.value()).to_app_result()?,
                     to,
-                });
+                })?;
                 gain.set_value(*to);
             }
 
             AppEvent::Bpm(mut to) => {
                 to /= 60;
-                ctx.register_action(EditorAction::SetTempo { from: self.bps, to });
+                ctx.register_action(EditorAction::SetTempo { from: self.bps, to })?;
                 self.bps = to
             }
 

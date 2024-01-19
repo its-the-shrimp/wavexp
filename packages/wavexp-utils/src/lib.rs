@@ -6,36 +6,32 @@
 #![feature(result_option_inspect)]
 
 pub mod cell;
+pub mod ext;
 pub mod iter;
+
+use ext::HtmlDocumentExt;
 pub use js_sys;
 use std::{
-    array::from_fn,
     cmp::Ordering,
     fmt::{self, Debug, Display, Formatter},
-    iter::{successors, Sum},
-    mem::{forget, take, transmute_copy, MaybeUninit},
+    iter::Sum,
+    mem::{forget, transmute_copy, MaybeUninit},
     num::{
         NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroIsize, NonZeroU16, NonZeroU32,
         NonZeroU64, NonZeroU8, NonZeroUsize, TryFromIntError,
     },
     ops::{
-        Add, AddAssign, Deref, Div, DivAssign, Mul, MulAssign, Neg, Range, RangeBounds,
-        RangeInclusive, Rem, RemAssign, Sub, SubAssign,
+        Add, AddAssign, Deref, Div, DivAssign, Mul, MulAssign, Neg, RangeBounds, Rem, RemAssign,
+        Sub, SubAssign,
     },
-    ptr,
 };
 pub use wasm_bindgen;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
     console::{warn_1, warn_2},
-    CanvasRenderingContext2d, Document, Element, HtmlCanvasElement, HtmlElement, Window,
+    Document, HtmlElement, Window,
 };
 use yew::{html::IntoPropValue, AttrValue};
-
-pub fn modify<T>(src: &mut T, f: impl FnOnce(T) -> T) {
-    let src = src as *mut T;
-    unsafe { src.write(f(src.read())) }
-}
 
 pub fn default<T: Default>() -> T {
     T::default()
@@ -127,228 +123,6 @@ pub trait Pipe: Sized {
     }
 }
 impl<T> Pipe for T {}
-
-pub trait BoolExt {
-    fn choose<T>(self, on_true: T, on_false: T) -> T;
-    fn then_or<T>(self, default: T, f: impl FnOnce() -> T) -> T;
-    fn then_or_else<T>(self, default: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T;
-    fn then_negate<T: Neg<Output = T>>(self, val: T) -> T;
-    fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
-    fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T>;
-    fn flip(&mut self);
-    fn to_app_result(self) -> AppResult<()>;
-}
-
-impl BoolExt for bool {
-    fn choose<T>(self, on_true: T, on_false: T) -> T {
-        if self {
-            on_true
-        } else {
-            on_false
-        }
-    }
-
-    fn then_or<T>(self, default: T, f: impl FnOnce() -> T) -> T {
-        if self {
-            f()
-        } else {
-            default
-        }
-    }
-
-    fn then_or_else<T>(self, default: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T {
-        if self {
-            f()
-        } else {
-            default()
-        }
-    }
-
-    fn then_negate<T: Neg<Output = T>>(self, val: T) -> T {
-        if self {
-            -val
-        } else {
-            val
-        }
-    }
-
-    fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E> {
-        self.then(f).transpose()
-    }
-
-    fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T> {
-        if self {
-            f()
-        } else {
-            None
-        }
-    }
-
-    fn flip(&mut self) {
-        *self = !*self
-    }
-
-    fn to_app_result(self) -> AppResult<()> {
-        if self {
-            Ok(())
-        } else {
-            Err(app_error!("expected `true`, found `false`"))
-        }
-    }
-}
-
-pub trait ArrayExt<T, const N: usize>: Sized {
-    fn zip<O, R>(self, other: [O; N], f: impl FnMut(T, O) -> R) -> [R; N];
-    fn zip_fold<O, R>(self, init: R, other: [O; N], f: impl FnMut(R, T, O) -> R) -> R;
-    fn add<'a, O>(self, other: &'a [O; N]) -> Self
-    where
-        T: AddAssign<&'a O>;
-    fn sub<'a, O>(self, other: &'a [O; N]) -> Self
-    where
-        T: SubAssign<&'a O>;
-    fn mul<'a, O>(self, other: &'a [O; N]) -> Self
-    where
-        T: MulAssign<&'a O>;
-    fn div<'a, O>(self, other: &'a [O; N]) -> Self
-    where
-        T: DivAssign<&'a O>;
-    fn rem<'a, O>(self, other: &'a [O; N]) -> Self
-    where
-        T: RemAssign<&'a O>;
-    fn floor_to(self, other: Self) -> Self
-    where
-        T: RoundTo;
-    fn ceil_to(self, other: Self) -> Self
-    where
-        T: RoundTo;
-    fn sum<R>(self) -> R
-    where
-        R: Sum<T>;
-    fn array_check_in<R, O>(self, ranges: &[R; N]) -> Option<Self>
-    where
-        T: PartialOrd<O>,
-        O: PartialOrd<T>,
-        R: RangeBounds<O>;
-    fn fit<R, O>(&self, values: [R; N]) -> [R; N]
-    where
-        T: RangeExt<O>,
-        O: Clone + PartialOrd<R>,
-        R: Clone + From<O>;
-}
-
-impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
-    fn zip<O, R>(self, other: [O; N], mut f: impl FnMut(T, O) -> R) -> [R; N] {
-        let (mut d, mut s) = (self.into_iter(), other.into_iter());
-        from_fn(|_| unsafe { f(d.next().unwrap_unchecked(), s.next().unwrap_unchecked()) })
-    }
-
-    fn zip_fold<O, R>(self, init: R, other: [O; N], mut f: impl FnMut(R, T, O) -> R) -> R {
-        self.into_iter()
-            .zip(other)
-            .fold(init, |r, (x, y)| f(r, x, y))
-    }
-
-    fn add<'a, O>(mut self, other: &'a [O; N]) -> Self
-    where
-        T: AddAssign<&'a O>,
-    {
-        for (dst, src) in self.iter_mut().zip(other.iter()) {
-            *dst += src
-        }
-        self
-    }
-
-    fn sub<'a, O>(mut self, other: &'a [O; N]) -> Self
-    where
-        T: SubAssign<&'a O>,
-    {
-        for (dst, src) in self.iter_mut().zip(other.iter()) {
-            *dst -= src
-        }
-        self
-    }
-
-    fn mul<'a, O>(mut self, other: &'a [O; N]) -> Self
-    where
-        T: MulAssign<&'a O>,
-    {
-        for (dst, src) in self.iter_mut().zip(other.iter()) {
-            *dst *= src
-        }
-        self
-    }
-
-    fn div<'a, O>(mut self, other: &'a [O; N]) -> Self
-    where
-        T: DivAssign<&'a O>,
-    {
-        for (d, s) in self.iter_mut().zip(other.iter()) {
-            *d /= s
-        }
-        self
-    }
-
-    fn rem<'a, O>(mut self, other: &'a [O; N]) -> Self
-    where
-        T: RemAssign<&'a O>,
-    {
-        for (d, s) in self.iter_mut().zip(other.iter()) {
-            *d %= s
-        }
-        self
-    }
-
-    fn floor_to(mut self, other: Self) -> Self
-    where
-        T: RoundTo,
-    {
-        for (d, s) in self.iter_mut().zip(other) {
-            modify(d, |d| d.floor_to(s))
-        }
-        self
-    }
-
-    fn ceil_to(mut self, other: Self) -> Self
-    where
-        T: RoundTo,
-    {
-        for (d, s) in self.iter_mut().zip(other) {
-            modify(d, |d| d.ceil_to(s))
-        }
-        self
-    }
-
-    fn sum<R>(self) -> R
-    where
-        R: Sum<T>,
-    {
-        self.into_iter().sum()
-    }
-
-    fn array_check_in<R, O>(self, ranges: &[R; N]) -> Option<Self>
-    where
-        T: PartialOrd<O>,
-        O: PartialOrd<T>,
-        R: RangeBounds<O>,
-    {
-        self.iter()
-            .zip(ranges)
-            .all(|(i, r)| r.contains(i))
-            .then_some(self)
-    }
-
-    fn fit<R, O>(&self, mut values: [R; N]) -> [R; N]
-    where
-        T: RangeExt<O>,
-        O: Clone + PartialOrd<R>,
-        R: Clone + From<O>,
-    {
-        for (i, r) in values.iter_mut().zip(self) {
-            *i = r.fit(i.clone());
-        }
-        values
-    }
-}
 
 pub trait ArrayFrom<T, const N: usize>: Sized {
     fn array_from(x: T) -> [Self; N];
@@ -619,746 +393,6 @@ impl<T> AppResultUtils<T> for AppResult<T> {
     }
 }
 
-pub trait ResultExt<T, E> {
-    fn to_app_result(self) -> AppResult<T>
-    where
-        E: Display;
-    fn explain_err(self, msg: &str) -> AppResult<T>;
-    fn explain_err_with(self, f: impl FnOnce() -> String) -> AppResult<T>;
-    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
-}
-
-impl<T, E> ResultExt<T, E> for Result<T, E> {
-    fn to_app_result(self) -> AppResult<T>
-    where
-        E: Display,
-    {
-        self.map_err(|e| AppError::new(&e.to_string()))
-    }
-
-    fn explain_err(self, msg: &str) -> AppResult<T> {
-        self.map_err(|_| AppError::new(msg))
-    }
-
-    fn explain_err_with(self, f: impl FnOnce() -> String) -> AppResult<T> {
-        self.map_err(|_| AppError::new(&f()))
-    }
-
-    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
-        match self {
-            Ok(x) => f(x),
-            Err(_) => U::default(),
-        }
-    }
-}
-
-pub trait OptionExt<T> {
-    fn to_app_result(self) -> AppResult<T>;
-    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
-    fn choose<U>(&self, on_some: U, on_none: U) -> U;
-    fn drop(self) -> Option<()>;
-    fn get_or_try_insert<E>(&mut self, f: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E>;
-}
-
-impl<T> OptionExt<T> for Option<T> {
-    fn to_app_result(self) -> AppResult<T> {
-        self.ok_or_else(|| app_error!("`Option` contained the `None` value"))
-    }
-
-    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
-        match self {
-            Some(x) => f(x),
-            None => U::default(),
-        }
-    }
-
-    fn choose<U>(&self, on_some: U, on_none: U) -> U {
-        if self.is_some() {
-            on_some
-        } else {
-            on_none
-        }
-    }
-
-    #[allow(clippy::manual_map)]
-    fn drop(self) -> Option<()> {
-        match self {
-            Some(_) => Some(()),
-            None => None,
-        }
-    }
-
-    fn get_or_try_insert<E>(&mut self, f: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E> {
-        if self.is_none() {
-            *self = Some(f()?);
-        }
-        Ok(unsafe { self.as_mut().unwrap_unchecked() })
-    }
-}
-
-pub trait HtmlCanvasExt {
-    fn get_2d_context(&self) -> AppResult<CanvasRenderingContext2d>;
-    fn rect(&self) -> Rect;
-    fn size(&self) -> [u32; 2];
-    fn sync(&self);
-}
-
-impl HtmlCanvasExt for HtmlCanvasElement {
-    fn get_2d_context(&self) -> AppResult<CanvasRenderingContext2d> {
-        Ok(self.get_context("2d")?.to_app_result()?.unchecked_into())
-    }
-
-    fn rect(&self) -> Rect {
-        Rect(
-            Point::ZERO,
-            Point {
-                x: self.width() as i32,
-                y: self.height() as i32,
-            },
-        )
-    }
-
-    fn size(&self) -> [u32; 2] {
-        [self.width(), self.height()]
-    }
-
-    fn sync(&self) {
-        self.set_height(
-            (self.client_height() as f64 / self.client_width() as f64 * self.width() as f64) as u32,
-        );
-    }
-}
-
-pub trait HtmlDocumentExt {
-    fn element_dyn_into<T: JsCast>(&self, id: &str) -> Option<T>;
-}
-
-impl HtmlDocumentExt for Document {
-    fn element_dyn_into<T: JsCast>(&self, id: &str) -> Option<T> {
-        self.get_element_by_id(id)?.dyn_into::<T>().ok()
-    }
-}
-
-pub trait HtmlElementExt {
-    fn client_rect(&self) -> Rect;
-    fn client_size(&self) -> [i32; 2];
-}
-
-impl HtmlElementExt for Element {
-    fn client_rect(&self) -> Rect {
-        Rect(
-            Point::ZERO,
-            Point {
-                x: self.client_width(),
-                y: self.client_height(),
-            },
-        )
-    }
-
-    fn client_size(&self) -> [i32; 2] {
-        [self.client_width(), self.client_height()]
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SliceMove {
-    pub from: usize,
-    pub to: usize,
-}
-
-impl SliceMove {
-    pub fn apply(&self, ids: &mut [usize]) {
-        let (coef, range) = match self.to.cmp(&self.from) {
-            Ordering::Less => (1, self.to..self.from),
-            Ordering::Equal => return,
-            Ordering::Greater => (-1, self.from..self.to),
-        };
-
-        for id in ids {
-            if *id == self.from {
-                *id = self.to;
-            } else if range.contains(id) {
-                // not going to wrap anyway
-                *id = id.wrapping_add_signed(coef);
-            }
-        }
-    }
-}
-
-pub struct IterMutWithCtx<'a, T: 'a + Copy> {
-    slice: &'a mut [T],
-    state: usize,
-}
-
-impl<'a, T: 'a + Copy> Iterator for IterMutWithCtx<'a, T> {
-    type Item = (&'a mut [T], T);
-    fn next(&mut self) -> Option<Self::Item> {
-        self.slice.get(self.state).copied().map(|x| unsafe {
-            self.state += 1;
-            ((self.slice as *mut [T]).as_mut().unwrap_unchecked(), x)
-        })
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.slice.len().pipe(|x| (x, Some(x)))
-    }
-}
-
-impl<'a, T: 'a + Copy> ExactSizeIterator for IterMutWithCtx<'a, T> {
-    fn len(&self) -> usize {
-        self.slice.len()
-    }
-}
-
-impl<'a, T: 'a + Copy> IterMutWithCtx<'a, T> {
-    fn new(slice: &'a mut [T]) -> Self {
-        Self { slice, state: 0 }
-    }
-}
-
-pub trait SliceExt<T> {
-    fn any(&self, f: impl FnMut(&T) -> bool) -> bool;
-    fn all(&self, f: impl FnMut(&T) -> bool) -> bool;
-    fn to_box(&self) -> Box<Self>
-    where
-        T: Clone;
-    fn get_saturating(&self, id: usize) -> &T;
-    fn get_saturating_mut(&mut self, id: usize) -> &mut T;
-    fn get_wrapping(&self, id: usize) -> &T;
-    fn get_wrapping_mut(&mut self, id: usize) -> &mut T;
-    fn get_var<'a>(&'a self, ids: &[usize]) -> Option<Vec<&'a T>>;
-    fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Option<Vec<&'a mut T>>;
-    /// # Safety
-    /// `index` must be a valid index into `self`
-    unsafe fn reorder_unchecked(&mut self, index: usize) -> SliceMove
-    where
-        T: Ord;
-    // unsafe fn reorder_unchecked_by<F>(&mut self, index: usize, f: F) -> usize
-    //  where F: FnMut(&T, &T) -> Ordering
-    /// # Safety
-    /// `index` must be a valid index into `self`
-    unsafe fn reorder_unchecked_by_key<K, F>(&mut self, index: usize, f: F) -> SliceMove
-    where
-        F: FnMut(&T) -> K,
-        K: Ord;
-    fn reorder(&mut self, index: usize) -> AppResult<SliceMove>
-    where
-        T: Ord;
-    // fn reorder_by<F>(&mut self, index: usize, f: F) -> Result<usize, ReorderError>
-    //  where F: FnMut(&T, &T) -> Ordering
-    // fn reorder_by_key<K, F>(&mut self, index: usize, f: F) -> Result<usize, ReorderError>
-    //  where F: FnMut(&T) -> K, K: Ord
-    fn set_sorted(&mut self, index: usize, value: T) -> AppResult<SliceMove>
-    where
-        T: Ord;
-    // fn set_sorted_by<F>(&mut self, index: usize, value: T, f: F) -> Result<usize, SetSortedError>
-    //  where F: FnMut(&T, &T) -> Ordering
-    // fn set_sorted_by_key<K, F>(&mut self, index: usize, value: T, f: F) -> Result<usize, SetSortedError>
-    //  where F: FnMut(&T) -> K, K: Ord
-    fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>>;
-    /// # Safety
-    /// `index` must be a valid index into `self`
-    unsafe fn get_unchecked_aware(&self, index: usize) -> SliceRef<'_, T>;
-    fn iter_mut_with_ctx<'a>(&'a mut self) -> IterMutWithCtx<'a, T>
-    where
-        T: 'a + Copy;
-}
-
-impl<T> SliceExt<T> for [T] {
-    fn any(&self, mut f: impl FnMut(&T) -> bool) -> bool {
-        let mut res = false;
-        for i in self {
-            res |= f(i)
-        }
-        res
-    }
-
-    fn all(&self, mut f: impl FnMut(&T) -> bool) -> bool {
-        let mut res = true;
-        for i in self {
-            res &= f(i)
-        }
-        res
-    }
-
-    fn to_box(&self) -> Box<Self>
-    where
-        T: Clone,
-    {
-        self.into()
-    }
-
-    fn get_saturating(&self, id: usize) -> &T {
-        unsafe { self.get_unchecked(id.min(self.len() - 1)) }
-    }
-
-    fn get_saturating_mut(&mut self, id: usize) -> &mut T {
-        unsafe { self.get_unchecked_mut(id.min(self.len() - 1)) }
-    }
-
-    fn get_wrapping(&self, id: usize) -> &T {
-        unsafe { self.get_unchecked(id % self.len()) }
-    }
-
-    fn get_wrapping_mut(&mut self, id: usize) -> &mut T {
-        unsafe { self.get_unchecked_mut(id % self.len()) }
-    }
-
-    fn get_var<'a>(&'a self, ids: &[usize]) -> Option<Vec<&'a T>> {
-        let len = self.len();
-        for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
-            if *id >= len || rest.contains(id) {
-                return None;
-            }
-        }
-        // at this point, `ids` is guaranteed to contain unique valid indices into `self`
-        let base = self.as_ptr();
-        Some(ids.iter().map(|x| unsafe { &*base.add(*x) }).collect())
-    }
-
-    fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Option<Vec<&'a mut T>> {
-        let len = self.len();
-        for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
-            if *id >= len || rest.contains(id) {
-                return None;
-            }
-        }
-        // at this point, `ids` is guaranteed to contain unique valid indices into `self`
-        let base = self.as_mut_ptr();
-        Some(ids.iter().map(|x| unsafe { &mut *base.add(*x) }).collect())
-    }
-
-    unsafe fn reorder_unchecked(&mut self, index: usize) -> SliceMove
-    where
-        T: Ord,
-    {
-        let element = self.get_unchecked(index);
-        let (new, should_move) = self
-            .get_unchecked(..index)
-            .binary_search(element)
-            .map_or_else(|x| (x, x != index), |x| (x, x < index - 1));
-        if should_move {
-            self.get_unchecked_mut(new..=index).rotate_right(1);
-            return SliceMove {
-                from: index,
-                to: new,
-            };
-        }
-        let new = self
-            .get_unchecked(index + 1..)
-            .binary_search(element)
-            .unwrap_or_else(|x| x)
-            + index;
-        if new > index {
-            self.get_unchecked_mut(index..=new).rotate_left(1);
-        }
-        SliceMove {
-            from: index,
-            to: new,
-        }
-    }
-
-    unsafe fn reorder_unchecked_by_key<K, F>(&mut self, index: usize, mut f: F) -> SliceMove
-    where
-        F: FnMut(&T) -> K,
-        K: Ord,
-    {
-        let key = f(self.get_unchecked(index));
-        let (new, should_move) = self
-            .get_unchecked(..index)
-            .binary_search_by_key(&key, &mut f)
-            .map_or_else(|x| (x, x != index), |x| (x, x < index - 1));
-        if should_move {
-            self.get_unchecked_mut(new..=index).rotate_right(1);
-            return SliceMove {
-                from: index,
-                to: new,
-            };
-        }
-        let new = self
-            .get_unchecked(index + 1..)
-            .binary_search_by_key(&key, &mut f)
-            .unwrap_or_else(|x| x)
-            + index;
-        if new > index {
-            self.get_unchecked_mut(index..=new).rotate_left(1);
-        }
-        SliceMove {
-            from: index,
-            to: new,
-        }
-    }
-
-    fn reorder(&mut self, index: usize) -> AppResult<SliceMove>
-    where
-        T: Ord,
-    {
-        let len = self.len();
-        if index >= len {
-            return Err(AppError::new(&format!(
-                "reorder index (is {index}) should be < len (is {len})"
-            )));
-        }
-        Ok(unsafe { self.reorder_unchecked(index) })
-    }
-
-    fn set_sorted(&mut self, index: usize, value: T) -> AppResult<SliceMove>
-    where
-        T: Ord,
-    {
-        let len = self.len();
-        if index >= len {
-            return Err(AppError::new(&format!(
-                "reorder index (is {index}) should be < len (is {len})"
-            )));
-        }
-        Ok(unsafe {
-            let dst = self.get_unchecked_mut(index);
-            let should_reorder = &value != dst;
-            *dst = value;
-            if should_reorder {
-                self.reorder_unchecked(index)
-            } else {
-                SliceMove {
-                    from: index,
-                    to: index,
-                }
-            }
-        })
-    }
-
-    fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>> {
-        SliceRef::new(self, index)
-    }
-
-    unsafe fn get_unchecked_aware(&self, index: usize) -> SliceRef<'_, T> {
-        SliceRef::raw(self.get_unchecked(index), index)
-    }
-
-    fn iter_mut_with_ctx<'a>(&'a mut self) -> IterMutWithCtx<'a, T>
-    where
-        T: 'a + Copy,
-    {
-        IterMutWithCtx::new(self)
-    }
-}
-
-#[test]
-fn slice_get_var() {
-    let x = [1, 2, 4, 8, 16, 32, 64];
-    assert_eq!(x.get_var(&[1, 3, 6]), Some(vec![&2, &8, &64]));
-    assert_eq!(x.get_var(&[1, 25]), None);
-    assert_eq!(x.get_var(&[1, 4, 5, 1]), None);
-}
-
-#[test]
-fn slice_get_var_mut() {
-    let mut x = [1, 2, 4, 8, 16, 32, 64];
-    assert_eq!(
-        x.get_var_mut(&[1, 3, 6]),
-        Some(vec![&mut 2, &mut 8, &mut 64])
-    );
-    assert_eq!(x.get_var_mut(&[1, 25]), None);
-    assert_eq!(x.get_var_mut(&[1, 4, 5, 1]), None);
-}
-
-#[test]
-fn slice_reorder() {
-    let mut x = [1, 2, 4, 8, 16, 32, 64];
-    let old_x = x;
-    assert_eq!(x.reorder(3), Ok(SliceMove { from: 3, to: 3 }));
-    assert_eq!(x, old_x);
-    x[1] = 17;
-    assert_eq!(x.reorder(1), Ok(SliceMove { from: 1, to: 4 }));
-    // [1, 2, 4, 8, 16, 32, 64] > [1, 4, 8, 16, 17, 32, 64]
-    x[5] = 3;
-    assert_eq!(x.reorder(5), Ok(SliceMove { from: 5, to: 1 }));
-    // [1, 4, 8, 16, 17, 32, 64] > [1, 3, 4, 8, 16, 17, 64]
-    let old_x = x;
-    assert!(x.reorder(69).is_err());
-    assert_eq!(x, old_x);
-    x[2] = 3;
-    assert_eq!(x.reorder(2), Ok(SliceMove { from: 2, to: 2 }));
-}
-
-pub trait VecExt<T> {
-    fn try_remove(&mut self, index: usize) -> AppResult<T>;
-    /// # Safety
-    /// `index` must be a valid index into `self`
-    unsafe fn remove_unchecked(&mut self, index: usize) -> T;
-    fn try_swap_remove(&mut self, index: usize) -> AppResult<T>;
-    fn try_insert(&mut self, index: usize, element: T) -> AppResult<&mut T>;
-    fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool;
-    fn push_sorted(&mut self, value: T) -> usize
-    where
-        T: Ord;
-    fn push_sorted_by(&mut self, value: T, f: impl Fn(&T, &T) -> Ordering) -> usize;
-    fn push_sorted_by_key<K: Ord>(&mut self, value: T, f: impl FnMut(&T) -> K) -> usize;
-}
-
-impl<T> VecExt<T> for Vec<T> {
-    fn try_remove(&mut self, index: usize) -> AppResult<T> {
-        let len = self.len();
-        if index >= len {
-            return Err(AppError::new(&format!(
-                "removal index (is {index}) should be < len (is {len})"
-            )));
-        }
-        unsafe {
-            let ptr = self.as_mut_ptr().add(index);
-            let ret = ptr::read(ptr);
-            ptr::copy(ptr.add(1), ptr, len - index - 1);
-            self.set_len(len - 1);
-            Ok(ret)
-        }
-    }
-
-    unsafe fn remove_unchecked(&mut self, index: usize) -> T {
-        let len = self.len();
-        let ptr = self.as_mut_ptr().add(index);
-        let ret = ptr::read(ptr);
-        ptr::copy(ptr.add(1), ptr, len - index - 1);
-        self.set_len(len - 1);
-        ret
-    }
-
-    fn try_swap_remove(&mut self, index: usize) -> AppResult<T> {
-        let len = self.len();
-        if index >= len {
-            return Err(AppError::new(&format!(
-                "removal index (is {index}) should be < len (is {len})"
-            )));
-        }
-        unsafe {
-            let value = ptr::read(self.as_ptr().add(index));
-            let base_ptr = self.as_mut_ptr();
-            ptr::copy(base_ptr.add(len - 1), base_ptr.add(index), 1);
-            self.set_len(len - 1);
-            Ok(value)
-        }
-    }
-
-    fn try_insert(&mut self, index: usize, element: T) -> AppResult<&mut T> {
-        let len = self.len();
-        if index > len {
-            return Err(AppError::new(&format!(
-                "insertion index (is {index}) should be <= len (is {len})"
-            )));
-        }
-        if len == self.capacity() {
-            self.try_reserve(1).to_app_result()?;
-        }
-        unsafe {
-            let p = self.as_mut_ptr().add(index);
-            ptr::copy(p, p.add(1), len - index);
-            ptr::write(p, element);
-            self.set_len(len + 1);
-            Ok(&mut *p)
-        }
-    }
-
-    fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool {
-        if self.iter().any(|x| f(x, &value)) {
-            return false;
-        }
-        self.push(value);
-        true
-    }
-
-    fn push_sorted(&mut self, value: T) -> usize
-    where
-        T: Ord,
-    {
-        let id = self.binary_search(&value).unwrap_or_else(|x| x);
-        self.insert(id, value);
-        id
-    }
-
-    fn push_sorted_by(&mut self, value: T, f: impl Fn(&T, &T) -> Ordering) -> usize {
-        let id = self
-            .binary_search_by(|x| f(&value, x))
-            .unwrap_or_else(|x| x);
-        self.insert(id, value);
-        id
-    }
-
-    fn push_sorted_by_key<K: Ord>(&mut self, value: T, mut f: impl FnMut(&T) -> K) -> usize {
-        let id = self
-            .binary_search_by_key(&f(&value), f)
-            .unwrap_or_else(|x| x);
-        self.insert(id, value);
-        id
-    }
-}
-
-pub trait Take: Default {
-    /// replaces the value with a default one and returns the previous value
-    fn take(&mut self) -> Self {
-        take(self)
-    }
-}
-impl<T: Default> Take for T {}
-
-pub trait RangeExt<T> {
-    type RangeTy<R>;
-    fn ordered(self) -> Self
-    where
-        T: Ord;
-    fn overlap<O>(&self, other: &Self::RangeTy<O>) -> bool
-    where
-        O: PartialOrd<T>,
-        T: PartialOrd<O>;
-    fn loose_contain<O, I>(&self, item: I, offset: O) -> bool
-    where
-        O: Copy,
-        I: PartialOrd<T> + Add<O, Output = I> + Sub<O, Output = I> + Copy,
-        T: PartialOrd<I>;
-    fn fit<R>(&self, item: R) -> R
-    where
-        T: Clone + Into<R> + PartialOrd<R>;
-    /// if `value` is outside of `self`, extend `self` just enough for `value` to be inside it
-    fn extend<R>(self, value: R) -> Self
-    where
-        T: PartialOrd<R> + From<R>;
-    /// turns `x .. y` into `f(x) .. f(y)`
-    fn map_bounds<R>(self, f: impl FnMut(T) -> R) -> Self::RangeTy<R>;
-    fn to_pair(self) -> [T; 2];
-}
-
-impl<T> RangeExt<T> for Range<T> {
-    type RangeTy<R> = Range<R>;
-
-    fn ordered(self) -> Self
-    where
-        T: Ord,
-    {
-        if self.start > self.end {
-            self.end..self.start
-        } else {
-            self
-        }
-    }
-
-    fn overlap<O>(&self, other: &Self::RangeTy<O>) -> bool
-    where
-        O: PartialOrd<T>,
-        T: PartialOrd<O>,
-    {
-        self.contains(&other.start) || self.contains(&other.end) || other.contains(&self.start)
-    }
-
-    fn loose_contain<O, I>(&self, item: I, offset: O) -> bool
-    where
-        O: Copy,
-        I: PartialOrd<T> + Add<O, Output = I> + Sub<O, Output = I> + Copy,
-        T: PartialOrd<I>,
-    {
-        self.overlap(&(item - offset..item + offset))
-    }
-
-    fn fit<R>(&self, item: R) -> R
-    where
-        T: Clone + Into<R> + PartialOrd<R>,
-    {
-        if self.end < item {
-            self.end.clone().into()
-        } else if self.start > item {
-            self.start.clone().into()
-        } else {
-            item
-        }
-    }
-
-    fn extend<R>(self, value: R) -> Self
-    where
-        T: PartialOrd<R> + From<R>,
-    {
-        if self.start > value {
-            value.into()..self.end
-        } else if self.end <= value {
-            self.start..value.into()
-        } else {
-            self
-        }
-    }
-
-    fn map_bounds<R>(self, mut f: impl FnMut(T) -> R) -> Self::RangeTy<R> {
-        f(self.start)..f(self.end)
-    }
-
-    fn to_pair(self) -> [T; 2] {
-        [self.start, self.end]
-    }
-}
-
-impl<T> RangeExt<T> for RangeInclusive<T> {
-    type RangeTy<R> = RangeInclusive<R>;
-
-    fn ordered(self) -> Self
-    where
-        T: Ord,
-    {
-        if self.start() > self.end() {
-            let (start, end) = self.into_inner();
-            end..=start
-        } else {
-            self
-        }
-    }
-
-    fn overlap<O>(&self, other: &Self::RangeTy<O>) -> bool
-    where
-        O: PartialOrd<T>,
-        T: PartialOrd<O>,
-    {
-        self.contains(other.start()) || self.contains(other.end()) || other.contains(self.start())
-    }
-
-    fn loose_contain<O, I>(&self, item: I, offset: O) -> bool
-    where
-        O: Copy,
-        I: PartialOrd<T> + Add<O, Output = I> + Sub<O, Output = I> + Copy,
-        T: PartialOrd<I>,
-    {
-        self.overlap(&(item - offset..=item + offset))
-    }
-
-    fn fit<R>(&self, item: R) -> R
-    where
-        T: Clone + Into<R> + PartialOrd<R>,
-    {
-        if self.end() < &item {
-            self.end().clone().into()
-        } else if self.start() > &item {
-            self.start().clone().into()
-        } else {
-            item
-        }
-    }
-
-    fn extend<R>(self, value: R) -> Self
-    where
-        T: PartialOrd<R> + From<R>,
-    {
-        if self.start() > &value {
-            value.into()..=self.into_inner().1
-        } else if self.end() < &value {
-            self.into_inner().0..=value.into()
-        } else {
-            self
-        }
-    }
-
-    fn map_bounds<R>(self, mut f: impl FnMut(T) -> R) -> Self::RangeTy<R> {
-        let (start, end) = self.into_inner();
-        f(start)..=f(end)
-    }
-
-    fn to_pair(self) -> [T; 2] {
-        self.into_inner().into()
-    }
-}
-
 pub trait LooseEq<O = Self> {
     fn loose_eq(&self, value: Self, off: O) -> bool;
     fn loose_ne(&self, value: Self, off: O) -> bool
@@ -1369,8 +403,10 @@ pub trait LooseEq<O = Self> {
     }
 }
 
-impl<O: Copy, T: PartialOrd + Add<O, Output = Self> + Sub<O, Output = Self> + Copy> LooseEq<O>
-    for T
+impl<O, T> LooseEq<O> for T
+where
+    O: Copy,
+    T: PartialOrd + Add<O, Output = Self> + Sub<O, Output = Self> + Copy,
 {
     fn loose_eq(&self, value: Self, off: O) -> bool {
         (value - off..value + off).contains(self)
@@ -1401,45 +437,6 @@ where
     }
 }
 
-impl Add for Point {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self::Output {
-        self.checked_add(rhs)
-            .to_app_result()
-            .report()
-            .unwrap_or(self)
-    }
-}
-
-impl AddAssign for Point {
-    fn add_assign(&mut self, rhs: Self) {
-        self.checked_add_assign(rhs).to_app_result().report();
-    }
-}
-
-impl Sub for Point {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self::Output {
-        self.checked_sub(rhs)
-            .to_app_result()
-            .report()
-            .unwrap_or(self)
-    }
-}
-
-impl SubAssign for Point {
-    fn sub_assign(&mut self, rhs: Self) {
-        self.checked_sub_assign(rhs).to_app_result().report();
-    }
-}
-
-impl Neg for Point {
-    type Output = Self;
-    fn neg(self) -> Self::Output {
-        self.checked_neg().to_app_result().report().unwrap_or(self)
-    }
-}
-
 impl LooseEq for Point {
     fn loose_eq(&self, value: Self, off: Self) -> bool {
         self.x.loose_eq(value.x, off.x) && self.y.loose_eq(value.y, off.y)
@@ -1448,17 +445,47 @@ impl LooseEq for Point {
 
 impl RoundTo for Point {
     fn floor_to(self, step: Self) -> Self {
-        Self {
-            x: self.x.floor_to(step.x),
-            y: self.y.floor_to(step.y),
-        }
+        self.x.floor_to(step.x);
+        self.y.floor_to(step.y);
+        self
     }
 
     fn ceil_to(self, step: Self) -> Self {
-        Self {
-            x: self.x.ceil_to(step.x),
-            y: self.y.ceil_to(step.y),
-        }
+        self.x.ceil_to(step.x);
+        self.y.ceil_to(step.y);
+        self
+    }
+}
+
+impl Add for Point {
+    type Output = Option<Self>;
+    fn add(self, rhs: Self) -> Self::Output {
+        Some(Self {
+            x: self.x.checked_add(rhs.x)?,
+            y: self.y.checked_add(rhs.y)?,
+        })
+    }
+}
+
+impl Sub for Point {
+    type Output = Option<Self>;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Some(Self {
+            x: self.x.checked_sub(rhs.x)?,
+            y: self.y.checked_sub(rhs.y)?,
+        })
+    }
+}
+
+impl Neg for Point {
+    type Output = Option<Point>;
+
+    fn neg(self) -> Self::Output {
+        Some(Self {
+            x: self.x.checked_neg()?,
+            y: self.y.checked_neg()?,
+        })
     }
 }
 
@@ -1468,6 +495,7 @@ impl Point {
     pub fn is_zero(&self) -> bool {
         self.x == 0 && self.y == 0
     }
+
     pub fn nonzero(self) -> Option<Self> {
         if self.is_zero() {
             None
@@ -1488,54 +516,6 @@ impl Point {
 
     pub fn map<T>(self, mut f: impl FnMut(i32) -> T) -> [T; 2] {
         [f(self.x), f(self.y)]
-    }
-
-    pub fn checked_add(self, rhs: Self) -> Option<Self> {
-        Some(Self {
-            x: self.x.checked_add(rhs.x)?,
-            y: self.y.checked_add(rhs.y)?,
-        })
-    }
-
-    pub fn checked_add_assign(&mut self, rhs: Self) -> bool {
-        if let Some(x) = self.checked_add(rhs) {
-            *self = x;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
-        Some(Self {
-            x: self.x.checked_sub(rhs.x)?,
-            y: self.y.checked_sub(rhs.y)?,
-        })
-    }
-
-    pub fn checked_sub_assign(&mut self, rhs: Self) -> bool {
-        if let Some(x) = self.checked_sub(rhs) {
-            *self = x;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn checked_neg(self) -> Option<Self> {
-        Some(Self {
-            x: self.x.checked_neg()?,
-            y: self.y.checked_neg()?,
-        })
-    }
-
-    pub fn checked_neg_assign(&mut self) -> bool {
-        if let Some(x) = self.checked_neg() {
-            *self = x;
-            true
-        } else {
-            false
-        }
     }
 }
 
@@ -1565,8 +545,13 @@ pub trait RoundTo {
 macro_rules! round_to_4ints {
     ($($int:ty)+) => {$(
         impl RoundTo for $int {
-            fn floor_to(self, step: Self) -> Self {self - self % step}
-            fn  ceil_to(self, step: Self) -> Self {step - (self - 1) % step + self - 1}
+            fn floor_to(self, step: Self) -> Self {
+                self - self % step
+            }
+
+            fn ceil_to(self, step: Self) -> Self {
+                step - (self - 1) % step + self - 1
+            }
         }
     )+};
 }
@@ -1856,7 +841,8 @@ macro_rules! real_impl {
 
         impl Ord for $real {
             fn cmp(&self, other: &Self) -> Ordering {
-                unsafe{self.0.partial_cmp(&other.0).unwrap_unchecked()}
+                // Safety: the contained floats are guaranteed to never be NaN
+                unsafe { self.0.partial_cmp(&other.0).unwrap_unchecked() }
             }
         }
 
@@ -1890,12 +876,12 @@ macro_rules! real_impl {
 
         impl RoundTo for $real {
             fn floor_to(self, step: Self) -> Self {
-                if self.is_infinite() || step == 0 {return self}
+                if self.is_infinite() || step == 0 { return self }
                 Self(*self - *self % *step)
             }
 
-            fn  ceil_to(self, step: Self) -> Self {
-                if self.is_infinite() || step == 0 {return self}
+            fn ceil_to(self, step: Self) -> Self {
+                if self.is_infinite() || step == 0 { return self }
                 let prev = *self - 1.0;
                 Self(*step - prev % *step + prev)
             }

@@ -14,8 +14,10 @@ use std::{
 };
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
-    cell::Shared, default, js_function, r32, r64, AppError, AppResult, AppResultUtils, ArrayExt,
-    ArrayFrom, OptionExt, Pipe, RangeExt, R32, R64,
+    cell::Shared,
+    default,
+    ext::{ArrayExt, OptionExt, RangeExt},
+    js_function, r32, r64, AppError, AppResult, AppResultUtils, ArrayFrom, Pipe, R32, R64,
 };
 use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, Path2d};
 use yew::{html, Html};
@@ -290,33 +292,33 @@ impl NoiseSound {
             AppEvent::Volume(to) => ctx.register_action(EditorAction::SetVolume {
                 from: replace(&mut self.volume, to),
                 to,
-            }),
+            })?,
 
             AppEvent::Attack(to) => ctx.register_action(EditorAction::SetAttack {
                 from: replace(&mut self.attack, to),
                 to,
-            }),
+            })?,
 
             AppEvent::Decay(to) => ctx.register_action(EditorAction::SetDecay {
                 from: replace(&mut self.decay, to),
                 to,
-            }),
+            })?,
 
             AppEvent::Sustain(to) => ctx.register_action(EditorAction::SetSustain {
                 from: replace(&mut self.sustain, to),
                 to,
-            }),
+            })?,
 
             AppEvent::Release(to) => ctx.register_action(EditorAction::SetRelease {
                 from: replace(&mut self.release, to),
                 to,
-            }),
+            })?,
 
             AppEvent::RepCount(to) => {
                 ctx.register_action(EditorAction::SetRepCount {
                     from: replace(&mut self.rep_count, to),
                     to,
-                });
+                })?;
                 ctx.emit_event(AppEvent::RedrawEditorPlane);
             }
 

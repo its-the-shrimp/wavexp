@@ -9,7 +9,11 @@ use crate::{
     sound::{AudioInput, Beats, MSecs, SoundType},
     visual::SpecialAction,
 };
-use wavexp_utils::{cell::Shared, ArrayExt, Point, R32, R64};
+use wavexp_utils::{
+    cell::Shared,
+    ext::{ArrayExt, OptionExt},
+    AppError, AppResult, Point, R32, R64,
+};
 use web_sys::{AudioBuffer, Event, KeyboardEvent, MouseEvent, PointerEvent, UiEvent};
 
 /// the all-encompassing event type for the app
@@ -273,8 +277,13 @@ impl EditorAction {
 
     /// Try to incorporate `other` into `self`, returning either both of them,
     /// only `self` optionally modified, or none.
-    pub fn merge(self, other: Self) -> Option<(Self, Option<Self>)> {
-        match (self, other) {
+    #[allow(clippy::result_large_err)]
+    #[allow(clippy::type_complexity)]
+    pub fn merge(
+        self,
+        other: Self,
+    ) -> Result<Option<(Self, Option<Self>)>, (Self, Self, AppError)> {
+        Ok(match (self, other) {
             (Self::OpenPopup(_), Self::ClosePopup(_)) => None,
             (Self::SwitchTab { from, .. }, Self::SwitchTab { to, .. }) if from == to => None,
             (Self::SwitchTab { from, .. }, Self::SwitchTab { to, .. }) => {
@@ -328,19 +337,14 @@ impl EditorAction {
                     offset_delta: off_2,
                     scale_delta: s_2,
                 },
-            ) if eid_1 == eid_2
-                && Some(off_1) == off_2.checked_neg()
-                && s_1 == s_2.map(R64::recip) =>
-            {
-                None
-            }
+            ) if eid_1 == eid_2 && Some(off_1) == -off_2 && s_1 == s_2.map(R64::recip) => None,
             (
-                Self::DragPlane {
+                ref a @ Self::DragPlane {
                     editor_id: eid_1,
                     offset_delta: off_1,
                     scale_delta: s_1,
                 },
-                Self::DragPlane {
+                ref b @ Self::DragPlane {
                     editor_id: eid_2,
                     offset_delta: off_2,
                     scale_delta: s_2,
@@ -348,13 +352,15 @@ impl EditorAction {
             ) if eid_1 == eid_2 => Some((
                 Self::DragPlane {
                     editor_id: eid_1,
-                    offset_delta: off_1 + off_2,
+                    offset_delta: (off_1 + off_2)
+                        .to_app_result()
+                        .map_err(|e| (a.clone(), b.clone(), e))?,
                     scale_delta: s_1.zip(s_2, |d1, d2| d1 * d2),
                 },
                 None,
             )),
             (a, b) => Some((a, Some(b))),
-        }
+        })
     }
 }
 
@@ -382,7 +388,7 @@ impl<'app, 'editor> Deref for ContextRef<'app, 'editor> {
 }
 
 impl<'app, 'editor> ContextMut<'app, 'editor> {
-    pub fn register_action(&mut self, action: EditorAction) {
+    pub fn register_action(&mut self, action: EditorAction) -> AppResult<()> {
         self.editor.register_action(self.app, action)
     }
 

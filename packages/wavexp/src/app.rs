@@ -1,8 +1,8 @@
+use std::mem::take;
+
 use js_sys::Function;
 use wasm_bindgen::JsCast;
-use wavexp_utils::{
-    js_function, now, r64, window, AppResult, AppResultUtils, OptionExt, Take, R64,
-};
+use wavexp_utils::{ext::OptionExt, js_function, now, r64, window, AppResult, AppResultUtils, R64};
 use yew::{html, html::Context, Callback, Component, Html};
 
 use crate::{
@@ -98,14 +98,14 @@ impl Component for App {
                         e.prevent_default();
                         selected_proj
                             .ctx
-                            .register_action(&mut self.ctx, EditorAction::ClosePopup(closed));
+                            .register_action(&mut self.ctx, EditorAction::ClosePopup(closed))?;
                     }
                 }
 
                 AppEvent::OpenPopup(ref opened) => {
                     selected_proj
                         .ctx
-                        .register_action(&mut self.ctx, EditorAction::OpenPopup(opened.clone()));
+                        .register_action(&mut self.ctx, EditorAction::OpenPopup(opened.clone()))?;
                     self.popups.push(opened.clone());
                 }
 
@@ -113,7 +113,7 @@ impl Component for App {
                     let closed = self.popups.pop().to_app_result()?;
                     selected_proj
                         .ctx
-                        .register_action(&mut self.ctx, EditorAction::ClosePopup(closed));
+                        .register_action(&mut self.ctx, EditorAction::ClosePopup(closed))?;
                 }
 
                 AppEvent::Undo(ref actions) => {
@@ -152,30 +152,33 @@ impl Component for App {
                     },
                 )?;
             }
-            self.ctx.rerender_needed.take()
+            take(&mut self.ctx.rerender_needed)
         };
         res.report().unwrap_or(false)
     }
 
     fn view(&self, _: &Context<Self>) -> Html {
-        // TODO: no panics
-        let project = &self.projects[self.selected_proj];
-        let sequencer = project.sequencer.get().unwrap();
-        html! {
-            <>
-                if let Some(popup) = self.popups.last() {
-                    { popup.render(&self.ctx.event_emitter, &sequencer) }
-                }
-                { project.render(&self.ctx) }
-                // TODO: add a loading/auto-save indicator
-                <div
-                    id="error-sign"
-                    hidden=true
-                    data-main-hint="Error has occured"
-                    data-aux-hint="Check the console for more info"
-                ><img::Warning /></div>
-            </>
-        }
+        let res: AppResult<!> = try {
+            let project = self.projects.get(self.selected_proj).to_app_result()?;
+            let sequencer = project.sequencer.get()?;
+            return html! {
+                <>
+                    if let Some(popup) = self.popups.last() {
+                        { popup.render(&self.ctx.event_emitter, &sequencer) }
+                    }
+                    { project.render(&self.ctx)? }
+                    // TODO: add a loading/auto-save indicator
+                    <div
+                        id="error-sign"
+                        hidden=true
+                        data-main-hint="Error has occured"
+                        data-aux-hint="Check the console for more info"
+                    ><img::Warning /></div>
+                </>
+            };
+        };
+        res.report();
+        html! { <div id="error-sign"><img::Warning /></div> }
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {

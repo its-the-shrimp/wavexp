@@ -10,15 +10,20 @@ use std::{
     fmt::{self, Debug, Formatter},
     iter::{once, Iterator},
     mem::{replace, take},
-    ops::{Deref, DerefMut, Range, RangeInclusive},
+    ops::{Add, Deref, DerefMut, Range, RangeInclusive, Sub},
     rc::Rc,
     slice::from_raw_parts,
 };
 use wasm_bindgen::{Clamped, JsCast, JsValue};
 use wavexp_utils::{
-    cell::WasmCell, default, eval_once, iter::ToEveryNth, js_array, js_assert, r64, AppResult,
-    AppResultUtils, ArrayExt, ArrayFrom, BoolExt, FlippedArray, HtmlCanvasExt, HtmlElementExt,
-    IntoArray, OptionExt, Point, RangeExt, RoundTo, SliceExt, SliceRef, VecExt, R64,
+    cell::WasmCell,
+    default, eval_once,
+    ext::{
+        ArrayExt, BoolExt, HtmlCanvasExt, HtmlElementExt, OptionExt, RangeExt, SliceExt, VecExt,
+    },
+    iter::ToEveryNth,
+    js_array, js_assert, r64, AppResult, AppResultUtils, ArrayFrom, FlippedArray, IntoArray, Point,
+    RoundTo, SliceRef, R64,
 };
 use web_sys::{Element, HtmlCanvasElement, HtmlElement, ImageData, Path2d, SvgElement};
 use yew::{NodeRef, TargetCast};
@@ -811,13 +816,13 @@ impl<T: GraphPoint> GraphEditor<T> {
         ctx.emit_event(AppEvent::SetHint(main, aux.into()));
     }
 
-    fn set_zoom_focus(&mut self, cursor: Cursor) {
+    fn set_zoom_focus(&mut self, cursor: Cursor) -> AppResult<()> {
         self.focus = Focus::Zoom {
-            pivot: cursor.point + self.offset,
+            pivot: (cursor.point + self.offset).to_app_result()?,
             init_offset: self.offset,
             init_scale: self.scale,
         };
-        self.update_hint = true;
+        Ok(self.update_hint = true)
     }
 
     fn set_plane_focus(&mut self) {
@@ -900,7 +905,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     cur_ids: self.selection.to_box(),
                     cur_src: self.selection_src,
                     cur_size: self.selection_size,
-                });
+                })?;
                 T::on_selection_change(self, ctx)?;
             }
 
@@ -913,13 +918,13 @@ impl<T: GraphPoint> GraphEditor<T> {
                         editor_id: self.inner.id,
                         point_id,
                         point_loc: released_at,
-                    })
+                    })?
                 }
             }
 
             SpecialAction::Remove => match self.focus {
-                Focus::Point { id, .. } => ctx.register_action(self.remove_points(once(id))?),
-                Focus::Selection { .. } => ctx.register_action(self.filter_selected(|_| true)),
+                Focus::Point { id, .. } => ctx.register_action(self.remove_points(once(id))?)?,
+                Focus::Selection { .. } => ctx.register_action(self.filter_selected(|_| true))?,
                 _ => (),
             },
         })
@@ -948,7 +953,7 @@ impl<T: GraphPoint> GraphEditor<T> {
 
         let cursor_point_user = LazyCell::new({
             let off = self.offset;
-            move || R64::array_from(cursor.point + off).div(step)
+            move || R64::array_from(cursor.point.add(off).unwrap_or_default()).div(step)
         });
         let cursor_point_user_aligned_confined =
             LazyCell::new(|| [T::X_BOUND, T::Y_BOUND].fit(cursor_point_user.floor_to(snap_step)));
@@ -963,13 +968,18 @@ impl<T: GraphPoint> GraphEditor<T> {
             } => {
                 if cursor.left {
                     if !self.inner.last_cursor.left {
-                        *pivot = cursor.point + self.inner.offset;
+                        *pivot = (cursor.point + self.inner.offset).to_app_result()?;
                         *init_scale = self.inner.scale;
                         *init_offset = self.inner.offset;
                     } else {
                         self.inner.redraw = true;
                     }
-                    let point = cursor.point + *init_offset - *pivot;
+                    let point = cursor
+                        .point
+                        .add(*init_offset)
+                        .to_app_result()?
+                        .sub(*pivot)
+                        .to_app_result()?;
                     if !T::SCALE_X_BOUND.is_empty() {
                         self.inner.scale[0] =
                             T::SCALE_X_BOUND.fit(r64![50] / size[1] * point.x + init_scale[0]);
@@ -988,14 +998,14 @@ impl<T: GraphPoint> GraphEditor<T> {
                     }
                 } else {
                     if self.inner.last_cursor.left {
-                        let offset_delta = self.inner.offset - *init_offset;
+                        let offset_delta = self.inner.offset.sub(*init_offset).to_app_result()?;
                         let scale_delta = self.inner.scale.sub(init_scale);
                         if !offset_delta.is_zero() || scale_delta.any(|x| **x != 0.0) {
                             ctx.register_action(EditorAction::DragPlane {
                                 editor_id: self.inner.id,
                                 offset_delta,
                                 scale_delta,
-                            });
+                            })?;
                         }
                     }
                     if cursor.shift {
@@ -1015,7 +1025,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     shift: true,
                     left: false,
                     ..
-                } => self.set_zoom_focus(cursor),
+                } => self.set_zoom_focus(cursor)?,
 
                 Buttons {
                     left: false, meta, ..
@@ -1035,9 +1045,9 @@ impl<T: GraphPoint> GraphEditor<T> {
                             let init_offset = *init_offset;
                             ctx.register_action(EditorAction::DragPlane {
                                 editor_id: self.inner.id,
-                                offset_delta: self.inner.offset - init_offset,
+                                offset_delta: (self.inner.offset - init_offset).to_app_result()?,
                                 scale_delta: default(),
-                            });
+                            })?;
                         }
                     } else if self.point_in_selection(*cursor_point_user) {
                         self.set_selection_focus()
@@ -1140,11 +1150,11 @@ impl<T: GraphPoint> GraphEditor<T> {
                                 editor_id: self.id,
                                 point_id,
                                 delta,
-                            });
+                            })?;
                         }
                     }
                 } else if cursor.shift {
-                    self.set_zoom_focus(cursor)
+                    self.set_zoom_focus(cursor)?
                 } else if !self.data.get(*id).to_app_result()?.in_hitbox(
                     &cursor_point_user.map(|x| x..=x),
                     ctx.as_ref(),
@@ -1194,10 +1204,10 @@ impl<T: GraphPoint> GraphEditor<T> {
                         ctx.register_action(EditorAction::DragSelection {
                             editor_id: self.id,
                             delta: dst.sub(&src),
-                        });
+                        })?;
                     }
                 } else if cursor.shift {
-                    self.set_zoom_focus(cursor)
+                    self.set_zoom_focus(cursor)?
                 } else if !self.point_in_selection(*cursor_point_user) {
                     if let Some(p) =
                         self.point_by_pos(*cursor_point_user, ctx.as_mut(), sequencer, *visual_ctx)?
@@ -1315,7 +1325,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         } => {
                             if editor_id == self.id {
                                 self.redraw = true;
-                                self.offset -= offset_delta;
+                                self.offset = (self.offset - offset_delta).to_app_result()?;
                                 self.scale = self.scale.sub(&scale_delta);
                             }
                         }
@@ -1409,7 +1419,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         } => {
                             if editor_id == self.id {
                                 self.redraw = true;
-                                self.offset += offset_delta;
+                                self.offset = self.offset.add(offset_delta).to_app_result()?;
                                 self.scale = self.scale.add(&scale_delta);
                             }
                         }
@@ -1544,7 +1554,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         pivot, init_offset, ..
                     } => {
                         if self.last_cursor.left {
-                            let [x, y] = (pivot - init_offset).map(|x| x as f64);
+                            let [x, y] = pivot.sub(init_offset).to_app_result()?.map(|x| x as f64);
                             solid.move_to(x - 10.0, y);
                             solid.line_to(x + 10.0, y);
                             solid.move_to(x, y - 10.0);

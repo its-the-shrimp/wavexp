@@ -9,10 +9,12 @@ use crate::{
 use std::{cmp::Ordering, iter::once, mem::take, slice::from_ref};
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
-    cell::Shared, default, js_function, r64, window, AppResult, BoolExt, OptionExt, SliceExt,
-    ToAttrValue, R64,
+    cell::Shared,
+    default,
+    ext::{BoolExt, OptionExt, SliceExt},
+    js_function, r64, window, AppResult, ToAttrValue, R64,
 };
-use yew::{html, AttrValue, Html};
+use yew::{html, AttrValue, Callback, Html};
 
 pub struct EditorContext {
     actions: Vec<EditorAction>,
@@ -35,18 +37,21 @@ impl EditorContext {
         }
     }
 
-    pub fn register_action(&mut self, app: &mut AppContext, action: EditorAction) {
+    pub fn register_action(&mut self, app: &mut AppContext, action: EditorAction) -> AppResult<()> {
         app.force_rerender();
         self.actions
             .drain(self.actions.len() - take(&mut self.undid_actions)..);
-        if let Some(last) = self.actions.pop() {
-            let Some((first, second)) = last.merge(action) else {
-                return;
+        Ok(if let Some(last) = self.actions.pop() {
+            match last.merge(action) {
+                Ok(None) => (),
+                Ok(Some((first, None))) => self.actions.push(first),
+                Ok(Some((first, Some(second)))) => self.actions.extend([first, second]),
+                Err((first, second, err)) => {
+                    self.actions.extend([first, second]);
+                    return Err(err);
+                }
             };
-            self.actions.push(first);
-            let Some(second) = second else { return };
-            self.actions.push(second);
-        }
+        })
     }
 }
 
@@ -69,10 +74,6 @@ impl ContextMut<'_, '_> {
 
     pub fn actions(&self) -> &[EditorAction] {
         &self.editor.actions
-    }
-
-    pub fn undid_actions(&self) -> usize {
-        self.editor.undid_actions
     }
 }
 
@@ -103,7 +104,7 @@ impl Editor {
                 ctx.register_action(EditorAction::SetSnapStep {
                     from: ctx.editor.snap_step,
                     to,
-                });
+                })?;
                 ctx.editor.snap_step = to;
             }
 
@@ -111,7 +112,7 @@ impl Editor {
                 ctx.register_action(EditorAction::SwitchTab {
                     from: ctx.editor.selected_tab,
                     to,
-                });
+                })?;
                 ctx.editor.selected_tab = to;
             }
 
@@ -189,7 +190,7 @@ impl Editor {
                         from: ctx.editor.selected_block,
                         to,
                         prev_selected_tab,
-                    });
+                    })?;
                     ctx.editor.selected_block = to
                 }
             }
@@ -200,9 +201,9 @@ impl Editor {
                 let id = ctx.selected_block().to_app_result()?;
                 let block_id = *pattern.selection().get(id).to_app_result()?;
                 let action = pattern.remove_points(once(block_id))?;
-                ctx.register_action(action);
+                ctx.register_action(action)?;
                 let from = take(&mut ctx.editor.selected_tab);
-                ctx.register_action(EditorAction::SwitchTab { from, to: 0 });
+                ctx.register_action(EditorAction::SwitchTab { from, to: 0 })?;
             }
 
             AppEvent::Enter(id, _) => {
@@ -265,16 +266,17 @@ impl Editor {
         self.forward_event(event, app)
     }
 
-    pub fn render(&self, app: &AppContext) -> Html {
+    pub fn render(&self, app: &AppContext) -> AppResult<Html> {
         // TODO: add switching between selected blocks
-        // TODO: no unwrap()s
-        let sequencer = self.sequencer.get().unwrap();
-        let pattern = sequencer.pattern().get().unwrap();
+        let sequencer = self.sequencer.get()?;
+        let pattern = sequencer.pattern().get()?;
         let block = self
             .ctx
             .selected_block
-            .and_then(|i| pattern.selection().get(i))
-            .and_then(|i| pattern.data().get(*i));
+            .map(|i| pattern.selection().get(i).to_app_result())
+            .transpose()?
+            .map(|i| pattern.data().get(*i).to_app_result())
+            .transpose()?;
         let ctx = ContextRef {
             editor: &self.ctx,
             app,
@@ -282,7 +284,7 @@ impl Editor {
         let emitter = ctx.event_emitter();
         let special_action = self.ctx.special_action;
 
-        html! {
+        Ok(html! {
             <>
                 <div id="main-panel">
                     <div
@@ -327,48 +329,13 @@ impl Editor {
                 </div>
                 <div id="io-panel" data-main-hint="Editor plane settings">
                     <div class="horizontal-menu" id="actions">
-                        { for ctx.actions().iter().rev().enumerate().map(|(i, a)|
-                        match i.cmp(&self.ctx.undid_actions) {
-                            Ordering::Less if let Some(name) = a.name() => {
-                                let i = ctx.undid_actions() - i;
-                                html!{
-                                    <Button {name} class="undone"
-                                    help={match i {
-                                        1 => AttrValue::Static("Click to redo this action"),
-                                        2 => AttrValue::Static("Click to redo this and the previous action"),
-                                        _ => format!("Click to redo this and {i} previous actions").into()
-                                    }}
-                                    onclick={emitter.reform(move |_| AppEvent::Rewind(i))}>
-                                        <s>{name}</s>
-                                    </Button>
-                                }
-                            },
-
-                            Ordering::Equal => html!{<>
-                                if let Some(name) = a.name() {
-                                    <Button {name} class="selected" help="Last action">
-                                        <p>{name}</p>
-                                    </Button>
-                                }
-                            </>},
-
-                            Ordering::Greater if let Some(name) = a.name() => {
-                                let i = i - self.ctx.undid_actions;
-                                html!{
-                                    <Button {name}
-                                    help={match i {
-                                        1 => AttrValue::Static("Click to undo the next action"),
-                                        _ => format!("Click to undo {i} subsequent actions").into()
-                                    }}
-                                    onclick={emitter.reform(move |_| AppEvent::Unwind(i))}>
-                                        <p>{name}</p>
-                                    </Button>
-                                }
-                            }
-
-                            _ => html!{}
+                        {for ctx
+                            .actions()
+                            .iter()
+                            .rev()
+                            .enumerate()
+                            .map(|(i, a)| self.render_action(a, i, emitter))
                         }
-                    ) }
                     </div>
                     <div id="special-actions">
                         <Button
@@ -431,7 +398,7 @@ impl Editor {
                     />
                 </div>
             </>
-        }
+        })
     }
 }
 
@@ -453,5 +420,53 @@ impl Editor {
                 .inner()
                 .handle_event(event, ctx.as_mut(), &sequencer, offset)?;
         })
+    }
+
+    fn render_action(
+        &self,
+        action: &EditorAction,
+        index: usize,
+        emitter: &Callback<AppEvent>,
+    ) -> Html {
+        match index.cmp(&self.ctx.undid_actions) {
+            Ordering::Less if let Some(name) = action.name() => {
+                let index = self.ctx.undid_actions - index;
+                html! {
+                    <Button {name} class="undone"
+                    help={match index {
+                        1 => AttrValue::Static("Click to redo this action"),
+                        2 => AttrValue::Static("Click to redo this and the previous action"),
+                        _ => format!("Click to redo this and {index} previous actions").into()
+                    }}
+                    onclick={emitter.reform(move |_| AppEvent::Rewind(index))}>
+                        <s>{name}</s>
+                    </Button>
+                }
+            },
+
+            Ordering::Equal => html! {
+                if let Some(name) = action.name() {
+                    <Button {name} class="selected" help="Last action">
+                        <p>{name}</p>
+                    </Button>
+                }
+            },
+
+            Ordering::Greater if let Some(name) = action.name() => {
+                let index = index - self.ctx.undid_actions;
+                html! {
+                    <Button {name}
+                    help={match index {
+                        1 => AttrValue::Static("Click to undo the next action"),
+                        _ => format!("Click to undo {index} subsequent actions").into()
+                    }}
+                    onclick={emitter.reform(move |_| AppEvent::Unwind(index))}>
+                        <p>{name}</p>
+                    </Button>
+                }
+            }
+
+            _ => html!()
+        }
     }
 }
