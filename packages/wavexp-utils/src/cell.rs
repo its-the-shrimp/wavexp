@@ -9,7 +9,7 @@ use std::{
 
 use yew::html::ImplicitClone;
 
-use crate::{app_error, default, AppError, AppResult};
+use crate::{app_error, default, AppError, Result};
 
 /// this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
 /// them from containing types that don't implement `Sync`. On any other architecture this
@@ -26,20 +26,20 @@ impl<T> Deref for WasmCell<T> {
     }
 }
 
-pub struct SharedRef<'a, T> {
+pub struct SharedRef<'src, T> {
     value: NonNull<T>,
     count: NonNull<isize>,
-    marker: PhantomData<&'a T>,
+    marker: PhantomData<&'src T>,
 }
 
-impl<'a, T> Deref for SharedRef<'a, T> {
+impl<'src, T> Deref for SharedRef<'src, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe { self.value.as_ref() }
     }
 }
 
-impl<'a, T> Clone for SharedRef<'a, T> {
+impl<'src, T> Clone for SharedRef<'src, T> {
     fn clone(&self) -> Self {
         let &Self {
             value,
@@ -55,14 +55,14 @@ impl<'a, T> Clone for SharedRef<'a, T> {
     }
 }
 
-impl<'a, T> Drop for SharedRef<'a, T> {
+impl<'src, T> Drop for SharedRef<'src, T> {
     fn drop(&mut self) {
         unsafe { *self.count.as_mut() -= 1 }
     }
 }
 
-impl<'a, T> From<SharedAwareRef<'a, T>> for SharedRef<'a, T> {
-    fn from(SharedAwareRef { value, outer }: SharedAwareRef<'a, T>) -> Self {
+impl<'src, T> From<SharedAwareRef<'src, T>> for SharedRef<'src, T> {
+    fn from(SharedAwareRef { value, outer }: SharedAwareRef<'src, T>) -> Self {
         Self {
             value,
             count: unsafe { NonNull::new_unchecked(&raw mut (*outer.0.get()).1) },
@@ -71,11 +71,11 @@ impl<'a, T> From<SharedAwareRef<'a, T>> for SharedRef<'a, T> {
     }
 }
 
-impl<'a, T> From<SharedRefMut<'a, T>> for SharedRef<'a, T> {
+impl<'src, T> From<SharedRefMut<'src, T>> for SharedRef<'src, T> {
     fn from(
         SharedRefMut {
             value, mut count, ..
-        }: SharedRefMut<'a, T>,
+        }: SharedRefMut<'src, T>,
     ) -> Self {
         unsafe { *count.as_mut() -= 2 }
         Self {
@@ -86,38 +86,38 @@ impl<'a, T> From<SharedRefMut<'a, T>> for SharedRef<'a, T> {
     }
 }
 
-pub struct SharedRefMut<'a, T> {
+pub struct SharedRefMut<'src, T> {
     value: NonNull<T>,
     count: NonNull<isize>,
-    marker: PhantomData<&'a mut T>,
+    marker: PhantomData<&'src mut T>,
 }
 
-impl<'a, T> Deref for SharedRefMut<'a, T> {
+impl<'src, T> Deref for SharedRefMut<'src, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe { self.value.as_ref() }
     }
 }
 
-impl<'a, T> DerefMut for SharedRefMut<'a, T> {
+impl<'src, T> DerefMut for SharedRefMut<'src, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { self.value.as_mut() }
     }
 }
 
-impl<'a, T> Drop for SharedRefMut<'a, T> {
+impl<'src, T> Drop for SharedRefMut<'src, T> {
     fn drop(&mut self) {
         unsafe { *self.count.as_mut() += 1 }
     }
 }
 
-impl<'a, T> From<SharedAwareRefMut<'a, T>> for SharedRefMut<'a, T> {
+impl<'src, T> From<SharedAwareRefMut<'src, T>> for SharedRefMut<'src, T> {
     fn from(
         SharedAwareRefMut {
             value,
             outer,
             marker,
-        }: SharedAwareRefMut<'a, T>,
+        }: SharedAwareRefMut<'src, T>,
     ) -> Self {
         Self {
             value,
@@ -127,19 +127,19 @@ impl<'a, T> From<SharedAwareRefMut<'a, T>> for SharedRefMut<'a, T> {
     }
 }
 
-impl<'a, T> TryFrom<SharedRef<'a, T>> for SharedRefMut<'a, T> {
+impl<'src, T> TryFrom<SharedRef<'src, T>> for SharedRefMut<'src, T> {
     type Error = AppError;
     fn try_from(
         SharedRef {
             value, mut count, ..
-        }: SharedRef<'a, T>,
+        }: SharedRef<'src, T>,
     ) -> Result<Self, Self::Error> {
         unsafe {
             if *count.as_ref() != 1 {
-                return Err(app_error!("borrowed more than once"));
+                return Result::Err(app_error!("borrowed more than once"));
             }
             *count.as_mut() = -1;
-            Ok(Self {
+            Result::Ok(Self {
                 value,
                 count,
                 marker: default(),
@@ -148,8 +148,8 @@ impl<'a, T> TryFrom<SharedRef<'a, T>> for SharedRefMut<'a, T> {
     }
 }
 
-impl<'a, T> SharedRefMut<'a, T> {
-    pub fn get_sub_ref<U>(self, f: impl FnOnce(&T) -> &Shared<U>) -> AppResult<SharedRef<'a, U>> {
+impl<'src, T> SharedRefMut<'src, T> {
+    pub fn get_sub_ref<U>(self, f: impl FnOnce(&T) -> &Shared<U>) -> Result<SharedRef<'src, U>> {
         // Safety: the contained shared reference will get locked if the function succeeds,
         // preventing double mutation
         f(unsafe { self.value.as_ref() }).get()
@@ -158,26 +158,26 @@ impl<'a, T> SharedRefMut<'a, T> {
     pub fn get_sub_ref_mut<U>(
         &self,
         f: impl FnOnce(&T) -> &Shared<U>,
-    ) -> AppResult<SharedRefMut<'a, U>> {
+    ) -> Result<SharedRefMut<'src, U>> {
         // Safety: the contained shared reference will get locked if the function succeeds,
         // preventing double mutation
         f(unsafe { self.value.as_ref() }).get_mut()
     }
 }
 
-pub struct SharedAwareRef<'a, T> {
+pub struct SharedAwareRef<'src, T> {
     value: NonNull<T>,
-    outer: &'a Shared<T>,
+    outer: &'src Shared<T>,
 }
 
-impl<'a, T> Deref for SharedAwareRef<'a, T> {
+impl<'src, T> Deref for SharedAwareRef<'src, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe { self.value.as_ref() }
     }
 }
 
-impl<'a, T> Clone for SharedAwareRef<'a, T> {
+impl<'src, T> Clone for SharedAwareRef<'src, T> {
     fn clone(&self) -> Self {
         let &Self { value, outer } = self;
         unsafe { (*outer.0.get()).1 += 1 }
@@ -185,62 +185,62 @@ impl<'a, T> Clone for SharedAwareRef<'a, T> {
     }
 }
 
-impl<'a, T> Drop for SharedAwareRef<'a, T> {
+impl<'src, T> Drop for SharedAwareRef<'src, T> {
     fn drop(&mut self) {
         unsafe { (*self.outer.0.get()).1 -= 1 }
     }
 }
 
-impl<'a, T> From<SharedAwareRefMut<'a, T>> for SharedAwareRef<'a, T> {
-    fn from(SharedAwareRefMut { value, outer, .. }: SharedAwareRefMut<'a, T>) -> Self {
+impl<'src, T> From<SharedAwareRefMut<'src, T>> for SharedAwareRef<'src, T> {
+    fn from(SharedAwareRefMut { value, outer, .. }: SharedAwareRefMut<'src, T>) -> Self {
         unsafe { (*outer.0.get()).1 -= 2 }
         Self { value, outer }
     }
 }
 
-impl<'a, T> SharedAwareRef<'a, T> {
+impl<'src, T> SharedAwareRef<'src, T> {
     pub fn outer(&self) -> Shared<T> {
         self.outer.clone()
     }
 }
 
-pub struct SharedAwareRefMut<'a, T> {
+pub struct SharedAwareRefMut<'src, T> {
     value: NonNull<T>,
-    outer: &'a Shared<T>,
-    marker: PhantomData<&'a mut T>,
+    outer: &'src Shared<T>,
+    marker: PhantomData<&'src mut T>,
 }
 
-impl<'a, T> Deref for SharedAwareRefMut<'a, T> {
+impl<'src, T> Deref for SharedAwareRefMut<'src, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe { self.value.as_ref() }
     }
 }
 
-impl<'a, T> DerefMut for SharedAwareRefMut<'a, T> {
+impl<'src, T> DerefMut for SharedAwareRefMut<'src, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { self.value.as_mut() }
     }
 }
 
-impl<'a, T> Drop for SharedAwareRefMut<'a, T> {
+impl<'src, T> Drop for SharedAwareRefMut<'src, T> {
     fn drop(&mut self) {
         unsafe { (*self.outer.0.get()).1 += 1 }
     }
 }
 
-impl<'a, T> TryFrom<SharedAwareRef<'a, T>> for SharedAwareRefMut<'a, T> {
+impl<'src, T> TryFrom<SharedAwareRef<'src, T>> for SharedAwareRefMut<'src, T> {
     type Error = AppError;
     fn try_from(
-        SharedAwareRef { value, outer }: SharedAwareRef<'a, T>,
+        SharedAwareRef { value, outer }: SharedAwareRef<'src, T>,
     ) -> Result<Self, Self::Error> {
         unsafe {
             let mut count = NonNull::new_unchecked(&raw mut (*outer.0.get()).1);
             if *count.as_ref() != 1 {
-                return Err(app_error!("borrowed more than once"));
+                return Result::Err(app_error!("borrowed more than once"));
             }
             *count.as_mut() = -1;
-            Ok(Self {
+            Result::Ok(Self {
                 value,
                 outer,
                 marker: default(),
@@ -249,12 +249,12 @@ impl<'a, T> TryFrom<SharedAwareRef<'a, T>> for SharedAwareRefMut<'a, T> {
     }
 }
 
-impl<'a, T> SharedAwareRefMut<'a, T> {
+impl<'src, T> SharedAwareRefMut<'src, T> {
     pub fn outer(&self) -> Shared<T> {
         self.outer.clone()
     }
 
-    pub fn get_sub_ref<U>(&self, f: impl FnOnce(&T) -> &Shared<U>) -> AppResult<SharedRef<'a, U>> {
+    pub fn get_sub_ref<U>(&self, f: impl FnOnce(&T) -> &Shared<U>) -> Result<SharedRef<'src, U>> {
         // Safety: the contained shared reference will get locked if the function succeeds,
         // preventing double mutation
         f(unsafe { self.value.as_ref() }).get()
@@ -263,7 +263,7 @@ impl<'a, T> SharedAwareRefMut<'a, T> {
     pub fn get_sub_ref_mut<U>(
         &self,
         f: impl FnOnce(&T) -> &Shared<U>,
-    ) -> AppResult<SharedRefMut<'a, U>> {
+    ) -> Result<SharedRefMut<'src, U>> {
         // Safety: the contained shared reference will get locked if the function succeeds,
         // preventing double mutation
         f(unsafe { self.value.as_ref() }).get_mut()
@@ -310,7 +310,7 @@ impl<T> From<T> for Shared<T> {
 }
 
 impl<T> Shared<T> {
-    pub fn get(&self) -> AppResult<SharedRef<'_, T>> {
+    pub fn get(&self) -> Result<SharedRef<'_, T>> {
         let (value, count) = unsafe { self.0.get().as_mut().unwrap_unchecked() };
         if *count < 0 {
             return Err(app_error!("already mutably borrowed"));
@@ -323,7 +323,7 @@ impl<T> Shared<T> {
         })
     }
 
-    pub fn get_mut(&self) -> AppResult<SharedRefMut<'_, T>> {
+    pub fn get_mut(&self) -> Result<SharedRefMut<'_, T>> {
         let (value, count) = unsafe { self.0.get().as_mut().unwrap_unchecked() };
         match count.cmp(&&mut 0) {
             Ordering::Less => Err(app_error!("already mutably borrowed")),
@@ -339,7 +339,7 @@ impl<T> Shared<T> {
         }
     }
 
-    pub fn get_aware(&self) -> AppResult<SharedAwareRef<'_, T>> {
+    pub fn get_aware(&self) -> Result<SharedAwareRef<'_, T>> {
         let (value, count) = unsafe { self.0.get().as_mut().unwrap_unchecked() };
         if *count < 0 {
             return Err(app_error!("already mutably borrowed"));
@@ -351,7 +351,7 @@ impl<T> Shared<T> {
         })
     }
 
-    pub fn get_aware_mut(&self) -> AppResult<SharedAwareRefMut<'_, T>> {
+    pub fn get_aware_mut(&self) -> Result<SharedAwareRefMut<'_, T>> {
         let (value, count) = unsafe { self.0.get().as_mut().unwrap_unchecked() };
         match count.cmp(&&mut 0) {
             Ordering::Less => Err(app_error!("already mutably borrowed")),

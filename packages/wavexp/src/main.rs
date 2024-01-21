@@ -1,6 +1,4 @@
-#![feature(downcast_unchecked)]
 #![feature(iter_advance_by)]
-#![feature(arbitrary_self_types)]
 #![feature(try_blocks)]
 #![feature(never_type)]
 #![feature(unwrap_infallible)]
@@ -12,10 +10,7 @@
 #![feature(let_chains)]
 #![feature(if_let_guard)]
 #![feature(try_find)]
-#![allow(clippy::unit_arg)]
-#![allow(clippy::option_map_unit_fn)]
-#![allow(clippy::comparison_chain)]
-#![deny(clippy::single_char_lifetime_names)]
+#![feature(iterator_try_collect)]
 
 mod app;
 mod ctx;

@@ -22,8 +22,9 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use wavexp_utils::{
     default,
-    ext::{BoolExt, OptionExt},
-    r32, r64, AppResult, AppResultUtils, R32, R64,
+    error::{AppError, Result},
+    ext::ResultExt,
+    r32, r64, R32, R64,
 };
 use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, BaseAudioContext, File};
 use yew::{html, Html};
@@ -64,7 +65,7 @@ impl Add<isize> for Note {
     type Output = Note;
     fn add(self, rhs: isize) -> Self::Output {
         self.checked_add(rhs)
-            .to_app_result()
+            .ok_or_else(AppError::on_none)
             .report()
             .unwrap_or(self)
     }
@@ -72,7 +73,7 @@ impl Add<isize> for Note {
 
 impl AddAssign<isize> for Note {
     fn add_assign(&mut self, rhs: isize) {
-        self.checked_add_assign(rhs).to_app_result().report();
+        self.checked_add_assign(rhs);
     }
 }
 
@@ -80,7 +81,7 @@ impl Sub<isize> for Note {
     type Output = Note;
     fn sub(self, rhs: isize) -> Self::Output {
         self.checked_sub(rhs)
-            .to_app_result()
+            .ok_or_else(AppError::on_none)
             .report()
             .unwrap_or(self)
     }
@@ -92,7 +93,7 @@ impl Sub for Note {
     fn sub(self, rhs: Self) -> Self::Output {
         let x = self.0 as isize;
         x.checked_sub(rhs.0 as isize)
-            .to_app_result()
+            .ok_or_else(AppError::on_none)
             .report()
             .unwrap_or(x)
     }
@@ -100,7 +101,7 @@ impl Sub for Note {
 
 impl SubAssign<isize> for Note {
     fn sub_assign(&mut self, rhs: isize) {
-        self.checked_sub_assign(rhs).to_app_result().report();
+        self.checked_sub_assign(rhs);
     }
 }
 
@@ -153,7 +154,7 @@ impl Note {
         "E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4",
     ];
 
-    pub fn checked_add(self, rhs: isize) -> Option<Self> {
+    pub const fn checked_add(self, rhs: isize) -> Option<Self> {
         let new = self.0 as isize + rhs;
         if new >= 0 && new < Self::N_NOTES as isize {
             Some(Self(new as u8))
@@ -171,7 +172,7 @@ impl Note {
         }
     }
 
-    pub fn checked_sub(self, rhs: isize) -> Option<Self> {
+    pub const fn checked_sub(self, rhs: isize) -> Option<Self> {
         let new = self.0 as isize - rhs;
         if new >= 0 && new < Self::N_NOTES as isize {
             Some(Self(new as u8))
@@ -236,11 +237,11 @@ pub struct AudioInput {
 }
 
 impl AudioInput {
-    pub fn new_file(file: File, sequencer: &Sequencer) -> impl Future<Output = AppResult<Self>> {
+    pub fn new_file(file: File, sequencer: &Sequencer) -> impl Future<Output = Result<Self>> {
         Self::new_file_base(file, sequencer.audio_ctx().clone())
     }
 
-    async fn new_file_base(file: File, audio_ctx: BaseAudioContext) -> AppResult<Self> {
+    async fn new_file_base(file: File, audio_ctx: BaseAudioContext) -> Result<Self> {
         let raw = JsFuture::from(file.array_buffer()).await?.dyn_into()?;
         let mut raw: AudioBuffer = JsFuture::from(audio_ctx.decode_audio_data(&raw)?)
             .await?
@@ -270,7 +271,7 @@ impl AudioInput {
     }
 
     /// Name of the input, exists solely for the user's convenience.
-    pub fn name(&self) -> &Rc<str> {
+    pub const fn name(&self) -> &Rc<str> {
         &self.name
     }
     /// Sets the name of the input, returning the old one.
@@ -278,11 +279,11 @@ impl AudioInput {
         replace(&mut self.name, name)
     }
     /// Duration of the raw buffer, unchanged since the moment the input was created.
-    pub fn raw_duration(&self) -> Secs {
+    pub const fn raw_duration(&self) -> Secs {
         self.raw_duration
     }
     /// Duration of the buffer with all the requested changes baked in.
-    pub fn baked_duration(&self) -> Secs {
+    pub const fn baked_duration(&self) -> Secs {
         self.duration
     }
 
@@ -290,7 +291,7 @@ impl AudioInput {
     // pub fn raw(&self) -> &AudioBuffer {&self.raw}
 
     /// Get a struct holding all the changes yet to be baked into the input.
-    pub fn changes(&self) -> AudioInputChanges {
+    pub const fn changes(&self) -> AudioInputChanges {
         self.pending_changes
     }
     /// Get a mutable reference to a struct holding all the changes yet to be baked into the input.
@@ -300,7 +301,7 @@ impl AudioInput {
 
     /// Bake all of the changes into a buffer that will be accessible through `.baked()` method.
     /// If an error occurs, the input will appear unbaked.
-    pub fn bake(&mut self, bps: Beats) -> AppResult<()> {
+    pub fn bake(&mut self, bps: Beats) -> Result<()> {
         if self.pending_changes == self.baked_changes {
             return Ok(());
         };
@@ -350,7 +351,7 @@ pub enum SoundType {
 }
 
 impl SoundType {
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
             Self::Note => NoteSound::NAME,
             Self::Noise => NoiseSound::NAME,
@@ -375,7 +376,7 @@ impl Sound {
         SoundType::Custom
     ];
 
-    pub fn new(sound_type: SoundType) -> AppResult<Self> {
+    pub fn new(sound_type: SoundType) -> Result<Self> {
         Ok(match sound_type {
             SoundType::Note => Self::Note(default()),
             SoundType::Noise => Self::Noise(NoiseSound::new()?),
@@ -383,7 +384,7 @@ impl Sound {
         })
     }
 
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
             Self::None => "Undefined",
             Self::Note(_) => NoteSound::NAME,
@@ -392,22 +393,14 @@ impl Sound {
         }
     }
 
-    pub fn prepare(&mut self, bps: Beats) -> AppResult<()> {
+    pub fn prepare(&mut self, bps: Beats) -> Result<()> {
         match self {
-            Sound::None => Ok(()),
-            Sound::Note(inner) => inner.prepare(),
-            Sound::Noise(inner) => inner.prepare(),
             Sound::Custom(inner) => inner.prepare(bps),
+            _ => Ok(()),
         }
     }
 
-    pub fn play(
-        &self,
-        plug: &AudioNode,
-        now: Secs,
-        self_offset: Secs,
-        bps: Beats,
-    ) -> AppResult<()> {
+    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> Result<()> {
         match self {
             Self::None => Ok(()),
             Self::Note(inner) => inner.play(plug, now, self_offset, bps),
@@ -416,7 +409,7 @@ impl Sound {
         }
     }
 
-    pub fn len(&self, bps: Beats) -> AppResult<Beats> {
+    pub fn len(&self, bps: Beats) -> Result<Beats> {
         match self {
             Self::None => Ok(r64![1]),
             Self::Note(inner) => inner.len(),
@@ -425,7 +418,7 @@ impl Sound {
         }
     }
 
-    pub fn rep_count(&self) -> NonZeroUsize {
+    pub const fn rep_count(&self) -> NonZeroUsize {
         match self {
             Self::None => NonZeroUsize::MIN,
             Self::Note(inner) => inner.rep_count(),
@@ -460,7 +453,7 @@ impl Sound {
         mut ctx: ContextMut,
         sequencer: &Sequencer,
         offset: Beats,
-    ) -> AppResult<()> {
+    ) -> Result<()> {
         let r = &mut false;
         match self {
             Sound::None => match event {

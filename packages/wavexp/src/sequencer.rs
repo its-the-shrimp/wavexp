@@ -8,20 +8,21 @@ use crate::{
 };
 use hound::{SampleFormat, WavSpec, WavWriter};
 use js_sys::{Array, Uint8Array};
+use macro_rules_attribute::apply;
 use std::{
     cmp::Ordering,
     fmt::{self, Display, Formatter},
     io::Cursor,
     iter::zip,
-    ops::{Add, Deref, DerefMut, Mul, Not, Range, RangeInclusive},
+    ops::{Add, Deref, DerefMut, Mul, Range, RangeInclusive},
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use wavexp_utils::{
     cell::Shared,
     const_assert, default, document,
-    ext::{ArrayExt, OptionExt, RangeExt},
-    js_function, now, r64, AppResult, AppResultUtils, ArrayFrom, R32, R64,
+    ext::{ArrayExt, RangeExt, ResultExt, SliceExt},
+    fallible, js_function, now, r64, ArrayFrom, R32, R64,
 };
 use web_sys::{
     AnalyserNode, AudioContext, BaseAudioContext, Blob, GainNode, HtmlAnchorElement,
@@ -106,41 +107,41 @@ impl GraphPoint for SoundBlock {
         [self.offset, self.layer.into()]
     }
 
-    fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], _: bool) {
-        match point {
-            Ok(SoundBlock { layer, offset, .. }) => {
-                *offset = r64![0].max(*offset + delta[0]);
-                *layer += i32::from(delta[1]);
-            }
-            Err(point) => {
-                point[0] = r64![0].max(point[0] + delta[0]);
-                point[1] += delta[1];
-            }
-        }
+    fn r#move(&mut self, delta: [R64; 2], _: bool) {
+        self.offset = r64![0].max(self.offset + delta[0]);
+        self.layer += i32::from(delta[1]);
     }
 
+    fn move_point(point: &mut [R64; 2], delta: [R64; 2], _: bool) {
+        point[0] = r64![0].max(point[0] + delta[0]);
+        point[1] += delta[1];
+    }
+
+    #[apply(fallible!)]
     fn in_hitbox(
         &self,
         area: &[RangeInclusive<R64>; 2],
         _: ContextRef,
         sequencer: &Sequencer,
         _: Self::VisualContext,
-    ) -> AppResult<bool> {
-        Ok(area[1].clone().map_bounds(i32::from).contains(&self.layer)
+    ) -> bool {
+        area[1].clone().map_bounds(i32::from).contains(&self.layer)
             && (self.offset..=self.offset + self.sound.len(sequencer.bps())?.max(r64![0.1]))
-                .overlap(&area[0]))
+                .overlap(&area[0])
     }
 
     fn fmt_loc(loc: [R64; 2]) -> String {
         format!("{:.3}, layer {}", loc[0], loc[1].floor())
     }
 
-    fn on_selection_change(editor: &mut GraphEditor<Self>, ctx: ContextMut) -> AppResult<()> {
-        Ok(ctx.emit_event(AppEvent::Select(
-            editor.selection().is_empty().not().then_some(0),
-        )))
+    #[apply(fallible!)]
+    fn on_selection_change(editor: &mut GraphEditor<Self>, ctx: ContextMut) {
+        ctx.emit_event(AppEvent::Select(
+            editor.selection().not_empty().then_some(0),
+        ))
     }
 
+    #[apply(fallible!)]
     fn on_redraw(
         editor: &mut GraphEditor<Self>,
         ctx: ContextRef,
@@ -149,11 +150,11 @@ impl GraphPoint for SoundBlock {
         solid: &Path2d,
         dotted: &Path2d,
         _: Self::VisualContext,
-    ) -> AppResult<()> {
+    ) {
         let step = &canvas_size.div(&editor.scale());
         let offset = &R64::array_from(editor.offset());
         let bps = sequencer.bps();
-        for block in editor.data().iter() {
+        for block in editor.data() {
             let [mut x, y] = block.loc().mul(step).sub(offset).map(|x| *x);
             let n_reps = block.rep_count().get();
             let w = *block.len(bps)? * *step[0];
@@ -164,23 +165,20 @@ impl GraphPoint for SoundBlock {
             }
         }
 
-        Ok(if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
+        if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
             editor.force_redraw();
             let x = (ctx.frame() - start).secs_to_beats(bps) * step[0] - offset[0];
             solid.move_to(*x, 0.0);
             solid.line_to(*x, *canvas_size[1]);
-        })
+        }
     }
 
-    fn canvas_coords(canvas: &HtmlCanvasElement) -> AppResult<[u32; 2]> {
+    #[apply(fallible!)]
+    fn canvas_coords(canvas: &HtmlCanvasElement) -> [u32; 2] {
         let doc = document();
-        let w = doc.body().to_app_result()?.client_width()
-            - canvas
-                .previous_element_sibling()
-                .to_app_result()?
-                .client_width();
+        let w = doc.body()?.client_width() - canvas.previous_element_sibling()?.client_width();
         let h = canvas.client_height();
-        Ok([w as u32, h as u32])
+        [w as u32, h as u32]
     }
 }
 
@@ -218,13 +216,15 @@ pub enum PlaybackContext {
 }
 
 impl PlaybackContext {
-    pub fn playing(&self) -> bool {
+    pub const fn playing(&self) -> bool {
         !matches!(self, Self::None)
     }
-    pub fn all_playing(&self) -> bool {
+
+    pub const fn all_playing(&self) -> bool {
         matches!(self, Self::All(..))
     }
-    pub fn played_input(&self) -> Option<&Shared<AudioInput>> {
+
+    pub const fn played_input(&self) -> Option<&Shared<AudioInput>> {
         if let Self::One(x, _) = self {
             Some(x)
         } else {
@@ -248,7 +248,8 @@ impl Sequencer {
     pub const SAMPLE_RATE: u32 = 44100;
     pub const CHANNEL_COUNT: u32 = 2;
 
-    pub fn new() -> AppResult<Self> {
+    #[apply(fallible!)]
+    pub fn new() -> Self {
         let audio_ctx =
             OfflineAudioContext::new_with_number_of_channels_and_length_and_sample_rate(
                 Self::CHANNEL_COUNT,
@@ -257,31 +258,31 @@ impl Sequencer {
             )?;
         let gain = audio_ctx.create_gain()?;
         gain.gain().set_value(0.2);
-        Ok(Self {
+        Self {
             pattern: default(),
             inputs: vec![],
             analyser: audio_ctx.create_analyser()?,
             gain,
             audio_ctx: audio_ctx.into(),
-            ctx_created_at: now().to_app_result()? / 1000,
+            ctx_created_at: now()? / 1000,
             bps: r64![2],
             playback_ctx: PlaybackContext::None,
-        })
+        }
     }
 
-    pub fn bps(&self) -> Beats {
+    pub const fn bps(&self) -> Beats {
         self.bps
     }
-    pub fn pattern(&self) -> &Shared<GraphEditor<SoundBlock>> {
+    pub const fn pattern(&self) -> &Shared<GraphEditor<SoundBlock>> {
         &self.pattern
     }
-    pub fn audio_ctx(&self) -> &BaseAudioContext {
+    pub const fn audio_ctx(&self) -> &BaseAudioContext {
         &self.audio_ctx
     }
-    pub fn analyser(&self) -> &AnalyserNode {
+    pub const fn analyser(&self) -> &AnalyserNode {
         &self.analyser
     }
-    pub fn playback_ctx(&self) -> &PlaybackContext {
+    pub const fn playback_ctx(&self) -> &PlaybackContext {
         &self.playback_ctx
     }
 
@@ -344,7 +345,7 @@ impl Sequencer {
                     {for self.inputs.iter().map(|input| html!{
                         <AudioInputButton
                         playing={self.playback_ctx.played_input().is_some_and(|i| i.eq(input))}
-                        name={input.get().map_or_else(|_| "".into(), |x| x.name().clone())}
+                        name={input.get().map_or_default(|x| AttrValue::from(x.name().clone()))}
                         {input} {emitter} bps={self.bps} class="extend-inner-button-panel"/>
                     })}
                     <Button name="Add audio input" onclick={emitter.reform(|_| AppEvent::StartInputAdd)}>
@@ -359,8 +360,9 @@ impl Sequencer {
         }
     }
 
-    pub fn handle_event(&mut self, event: &AppEvent, mut ctx: ContextMut) -> AppResult<()> {
-        Ok(match *event {
+    #[apply(fallible!)]
+    pub fn handle_event(&mut self, event: &AppEvent, mut ctx: ContextMut) {
+        match *event {
             AppEvent::PreparePlay(ref input) => {
                 if self.audio_ctx.is_instance_of::<AudioContext>() {
                     self.playback_ctx = PlaybackContext::None;
@@ -370,7 +372,7 @@ impl Sequencer {
                     self.analyser = self.audio_ctx.create_analyser()?;
                     self.analyser
                         .connect_with_audio_node(&self.audio_ctx.destination())?;
-                    self.ctx_created_at = now().to_app_result()?;
+                    self.ctx_created_at = now()?;
                 }
                 if let Some(input) = input {
                     input.get_mut()?.bake(self.bps)?;
@@ -387,12 +389,12 @@ impl Sequencer {
             }
 
             AppEvent::StartPlay(ref input) => {
-                let now = now().to_app_result()? - self.ctx_created_at;
+                let now = now()? - self.ctx_created_at;
                 if let Some(input) = input {
                     let player = self.audio_ctx.create_buffer_source()?;
                     {
                         let input = input.get()?;
-                        player.set_buffer(input.baked().to_app_result()?.into());
+                        player.set_buffer(input.baked()?.into());
                         player.connect_with_audio_node(&self.gain)?;
                     }
                     self.playback_ctx =
@@ -499,16 +501,15 @@ impl Sequencer {
             }
 
             AppEvent::AudioUploaded(ref e) => {
-                let target: HtmlInputElement = e.target_dyn_into().to_app_result()?;
+                let target: HtmlInputElement = e.target_dyn_into()?;
                 let emitter = ctx.event_emitter().clone();
 
-                let file = target.files().and_then(|x| x.get(0)).to_app_result()?;
+                let file = target.files().and_then(|x| x.get(0))?;
                 let future_file = AudioInput::new_file(file, self);
                 spawn_local(async move {
-                    future_file
-                        .await
-                        .map(|i| emitter.emit(AppEvent::AddInput(i.into())))
-                        .report();
+                    if let Some(input) = future_file.await.report() {
+                        emitter.emit(AppEvent::AddInput(input.into()))
+                    }
                 })
             }
 
@@ -520,7 +521,7 @@ impl Sequencer {
             AppEvent::MasterVolume(to) => {
                 let gain = self.gain.gain();
                 ctx.register_action(EditorAction::SetMasterVolume {
-                    from: R32::new(gain.value()).to_app_result()?,
+                    from: R32::new(gain.value())?,
                     to,
                 })?;
                 gain.set_value(*to);
@@ -574,6 +575,6 @@ impl Sequencer {
                 .pattern
                 .get_mut()?
                 .handle_event(event, ctx, self, || ())?,
-        })
+        }
     }
 }

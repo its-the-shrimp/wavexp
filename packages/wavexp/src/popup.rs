@@ -1,9 +1,10 @@
 use std::{mem::replace, rc::Rc};
 
+use macro_rules_attribute::apply;
 use wavexp_utils::{
     cell::Shared,
-    ext::{BoolExt, OptionExt},
-    AppResult, AppResultUtils,
+    ext::{BoolExt, ResultExt},
+    fallible,
 };
 use web_sys::HtmlInputElement;
 use yew::{html, AttrValue, Callback, Html, TargetCast};
@@ -31,15 +32,12 @@ pub enum Popup {
 }
 
 impl Popup {
-    pub fn handle_event(&mut self, event: &AppEvent, mut ctx: ContextMut) -> AppResult<()> {
-        Ok(match *event {
+    #[apply(fallible!)]
+    pub fn handle_event(&mut self, event: &AppEvent, mut ctx: ContextMut) {
+        match *event {
             AppEvent::SetOutputFileName(ref e) => {
                 if let Self::Export { filename, err_msg } = self {
-                    let to: Rc<str> = e
-                        .target_dyn_into::<HtmlInputElement>()
-                        .to_app_result()?
-                        .value()
-                        .into();
+                    let to: Rc<str> = e.target_dyn_into::<HtmlInputElement>()?.value().into();
                     let from = replace(filename, to.clone());
                     *err_msg = "".into();
                     ctx.register_action(EditorAction::SetOutputFileName { from, to })?;
@@ -48,11 +46,7 @@ impl Popup {
 
             AppEvent::ExplainInvalidExportFileName(ref e) => {
                 if let Self::Export { err_msg, .. } = self {
-                    let value: Rc<str> = e
-                        .target_dyn_into::<HtmlInputElement>()
-                        .to_app_result()?
-                        .value()
-                        .into();
+                    let value: Rc<str> = e.target_dyn_into::<HtmlInputElement>()?.value().into();
                     let mut parts = value.split('.');
                     let [base, ext] = [parts.next(), parts.next()];
                     // empty name case isn't matched as browser's indications should suffice then
@@ -70,11 +64,7 @@ impl Popup {
 
             AppEvent::SetInputName(ref e) => {
                 if let Self::EditInput(input) = self {
-                    let to: Rc<str> = e
-                        .target_dyn_into::<HtmlInputElement>()
-                        .to_app_result()?
-                        .value()
-                        .into();
+                    let to: Rc<str> = e.target_dyn_into::<HtmlInputElement>()?.value().into();
                     if !to.is_empty() {
                         let from = input.get_mut()?.set_name(to.clone());
                         ctx.register_action(EditorAction::SetInputName { from, to })?;
@@ -190,7 +180,7 @@ impl Popup {
             }
 
             _ => (),
-        })
+        }
     }
 
     pub fn render(&self, emitter: &Callback<AppEvent>, sequencer: &Sequencer) -> Html {
@@ -213,7 +203,7 @@ impl Popup {
                                     }}
                                     playing={sequencer.playback_ctx().played_input()
                                         .is_some_and(|cur| cur.eq(input))}
-                                    name={input.get().map_or_else(|_| "".into(), |x| x.name().clone())}/>
+                                    name={input.get().map_or_default(|x| AttrValue::Rc(x.name().clone()))}/>
                                 })}
                                 <Button name="Add audio input"
                                 onclick={emitter.reform(|_| AppEvent::StartInputAdd)}>

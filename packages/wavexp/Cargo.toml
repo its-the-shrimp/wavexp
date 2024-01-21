@@ -39,3 +39,7 @@ web-sys = { version = "0.3.64", features = [
 ]}
 yew = { version = "0.20.0", features = ["csr"] }
 hound = "3.5.1"
+macro_rules_attribute = "0.2.0"
+
+[lints]
+workspace = true

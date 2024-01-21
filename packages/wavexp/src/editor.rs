@@ -6,13 +6,14 @@ use crate::{
     sequencer::{Sequencer, SoundBlock},
     visual::{HintHandler, SoundVisualiser, SpecialAction},
 };
+use macro_rules_attribute::apply;
 use std::{cmp::Ordering, iter::once, mem::take, slice::from_ref};
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
     cell::Shared,
     default,
     ext::{BoolExt, OptionExt, SliceExt},
-    js_function, r64, window, AppResult, ToAttrValue, R64,
+    fallible, js_function, r64, window, ToAttrValue, R64,
 };
 use yew::{html, AttrValue, Callback, Html};
 
@@ -37,11 +38,12 @@ impl EditorContext {
         }
     }
 
-    pub fn register_action(&mut self, app: &mut AppContext, action: EditorAction) -> AppResult<()> {
+    #[apply(fallible!)]
+    pub fn register_action(&mut self, app: &mut AppContext, action: EditorAction) {
         app.force_rerender();
         self.actions
             .drain(self.actions.len() - take(&mut self.undid_actions)..);
-        Ok(if let Some(last) = self.actions.pop() {
+        if let Some(last) = self.actions.pop() {
             match last.merge(action) {
                 Ok(None) => (),
                 Ok(Some((first, None))) => self.actions.push(first),
@@ -51,7 +53,7 @@ impl EditorContext {
                     return Err(err);
                 }
             };
-        })
+        }
     }
 }
 
@@ -85,16 +87,18 @@ pub struct Editor {
 }
 
 impl Editor {
+    #[apply(fallible!)]
     pub fn new() -> Self {
         Self {
             hint_handler: default(),
-            sequencer: Sequencer::new().unwrap().into(),
+            sequencer: Sequencer::new()?.into(),
             sound_visualiser: SoundVisualiser::new(),
             ctx: EditorContext::new(),
         }
     }
 
-    pub fn handle_event(&mut self, event: &mut AppEvent, app: &mut AppContext) -> AppResult<()> {
+    #[apply(fallible!)]
+    pub fn handle_event(&mut self, event: &mut AppEvent, app: &mut AppContext) {
         let mut ctx = ContextMut {
             editor: &mut self.ctx,
             app,
@@ -160,8 +164,7 @@ impl Editor {
                 let unwound = ctx
                     .editor
                     .actions
-                    .get(ctx.editor.actions.len() - n - ctx.editor.undid_actions..)
-                    .to_app_result()?
+                    .get(ctx.editor.actions.len() - n - ctx.editor.undid_actions..)?
                     .iter()
                     .rev()
                     .cloned()
@@ -175,9 +178,8 @@ impl Editor {
                 let rewound = ctx
                     .editor
                     .actions
-                    .get(ctx.editor.actions.len() - ctx.editor.undid_actions..)
-                    .and_then(|actions| actions.get(..n))
-                    .to_app_result()?
+                    .get(ctx.editor.actions.len() - ctx.editor.undid_actions..)?
+                    .get(..n)?
                     .to_box();
                 ctx.editor.undid_actions -= n;
                 ctx.emit_event(AppEvent::Redo(rewound))
@@ -198,8 +200,8 @@ impl Editor {
             AppEvent::Remove => {
                 let sequencer = self.sequencer.get()?;
                 let mut pattern = sequencer.pattern().get_mut()?;
-                let id = ctx.selected_block().to_app_result()?;
-                let block_id = *pattern.selection().get(id).to_app_result()?;
+                let id = ctx.selected_block()?;
+                let block_id = *pattern.selection().get(id)?;
                 let action = pattern.remove_points(once(block_id))?;
                 ctx.register_action(action)?;
                 let from = take(&mut ctx.editor.selected_tab);
@@ -263,20 +265,19 @@ impl Editor {
             _ => (),
         }
 
-        self.forward_event(event, app)
+        self.forward_event(event, app)?
     }
 
-    pub fn render(&self, app: &AppContext) -> AppResult<Html> {
+    #[apply(fallible!)]
+    pub fn render(&self, app: &AppContext) -> Html {
         // TODO: add switching between selected blocks
         let sequencer = self.sequencer.get()?;
         let pattern = sequencer.pattern().get()?;
         let block = self
             .ctx
             .selected_block
-            .map(|i| pattern.selection().get(i).to_app_result())
-            .transpose()?
-            .map(|i| pattern.data().get(*i).to_app_result())
-            .transpose()?;
+            .try_map(|i| pattern.selection().get(i))?
+            .try_map(|i| pattern.data().get(*i))?;
         let ctx = ContextRef {
             editor: &self.ctx,
             app,
@@ -284,7 +285,7 @@ impl Editor {
         let emitter = ctx.event_emitter();
         let special_action = self.ctx.special_action;
 
-        Ok(html! {
+        html! {
             <>
                 <div id="main-panel">
                     <div
@@ -329,13 +330,12 @@ impl Editor {
                 </div>
                 <div id="io-panel" data-main-hint="Editor plane settings">
                     <div class="horizontal-menu" id="actions">
-                        {for ctx
+                        { for ctx
                             .actions()
                             .iter()
                             .rev()
                             .enumerate()
-                            .map(|(i, a)| self.render_action(a, i, emitter))
-                        }
+                            .map(|(i, a)| self.render_action(a, i, emitter)) }
                     </div>
                     <div id="special-actions">
                         <Button
@@ -398,12 +398,13 @@ impl Editor {
                     />
                 </div>
             </>
-        })
+        }
     }
 }
 
 impl Editor {
-    fn forward_event(&mut self, event: &mut AppEvent, app: &mut AppContext) -> AppResult<()> {
+    #[apply(fallible!)]
+    fn forward_event(&mut self, event: &mut AppEvent, app: &mut AppContext) {
         let mut ctx = ContextMut {
             editor: &mut self.ctx,
             app,
@@ -413,13 +414,13 @@ impl Editor {
         self.sound_visualiser.handle_event(event, &sequencer)?;
         sequencer.handle_event(event, ctx.as_mut())?;
         let mut pattern = sequencer.pattern().get_mut()?;
-        Ok(if let Some(&id) = pattern.selection().first() {
-            let mut block = pattern.get_mut(id).to_app_result()?;
+        if let Some(&id) = pattern.selection().first() {
+            let mut block = pattern.get_mut(id)?;
             let offset = block.offset;
             block
                 .inner()
                 .handle_event(event, ctx.as_mut(), &sequencer, offset)?;
-        })
+        }
     }
 
     fn render_action(

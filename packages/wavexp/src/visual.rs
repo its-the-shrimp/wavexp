@@ -3,6 +3,7 @@ use crate::{
     input::{Buttons, Cursor},
     sequencer::Sequencer,
 };
+use macro_rules_attribute::apply;
 use std::{
     borrow::Cow,
     cell::{Cell, LazyCell},
@@ -17,18 +18,20 @@ use std::{
 use wasm_bindgen::{Clamped, JsCast, JsValue};
 use wavexp_utils::{
     cell::WasmCell,
-    default, eval_once,
+    default,
+    error::Result,
+    eval_once,
     ext::{
         ArrayExt, BoolExt, HtmlCanvasExt, HtmlElementExt, OptionExt, RangeExt, SliceExt, VecExt,
     },
+    fallible,
     iter::ToEveryNth,
-    js_array, js_assert, r64, AppResult, AppResultUtils, ArrayFrom, FlippedArray, IntoArray, Point,
-    RoundTo, SliceRef, R64,
+    js_array, js_assert, r64, ArrayFrom, FlippedArray, IntoArray, Point, RoundTo, SliceRef, R64,
 };
 use web_sys::{Element, HtmlCanvasElement, HtmlElement, ImageData, Path2d, SvgElement};
 use yew::{NodeRef, TargetCast};
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rgba {
     pub r: u8,
     pub g: u8,
@@ -64,10 +67,10 @@ impl fmt::Display for Rgba {
 }
 
 fn interp<const N: usize>(colours: &[Rgba; N], index: u8) -> Rgba {
-    let index = (index as usize * (N - 1)) as f32 / 255.0;
+    let index = index as f32 / 255.0 * (N as f32 - 1.0);
     let lower = colours.get_saturating(index.floor() as usize);
     let upper = colours.get_saturating(index.ceil() as usize);
-    let weight = (index / (N - 1) as f32).fract();
+    let weight = (index / (N as f32 - 1.0)).fract();
     let weight_recip = 1.0 - weight;
     Rgba {
         r: (lower.r as f32 * weight_recip + upper.r as f32 * weight) as u8,
@@ -112,22 +115,23 @@ impl SoundVisualiser {
         }
     }
 
-    pub fn canvas(&self) -> &NodeRef {
+    pub const fn canvas(&self) -> &NodeRef {
         &self.canvas
     }
 
     // TODO: correctly readjust the graph when shrinked in the UI
-    pub fn handle_event(&mut self, event: &AppEvent, sequencer: &Sequencer) -> AppResult<()> {
-        Ok(match event {
+    #[apply(fallible!)]
+    pub fn handle_event(&mut self, event: &AppEvent, sequencer: &Sequencer) {
+        match event {
             AppEvent::Resize => {
-                let canvas: HtmlCanvasElement = self.canvas.cast().to_app_result()?;
+                let canvas: HtmlCanvasElement = self.canvas.cast()?;
                 let [w, h] = canvas.client_size().map(|x| x as u32);
                 canvas.set_width(w);
                 canvas.set_height(h);
                 self.width = w;
                 self.height = h;
                 self.in_data.resize(w as usize, 0);
-                self.out_data.resize(w as usize * w as usize, Self::BG);
+                self.out_data.resize(w.checked_mul(w)? as usize, Self::BG);
             }
 
             AppEvent::Frame(..) => {
@@ -145,19 +149,21 @@ impl SoundVisualiser {
                     }
 
                     let out = unsafe {
-                        from_raw_parts(self.out_data.as_ptr().cast(), self.out_data.len() * 4)
+                        from_raw_parts(
+                            self.out_data.as_ptr().cast(),
+                            self.out_data.len().checked_mul(4)?,
+                        )
                     };
                     let out = ImageData::new_with_u8_clamped_array(Clamped(out), self.width)?;
                     self.canvas
-                        .cast::<HtmlCanvasElement>()
-                        .to_app_result()?
+                        .cast::<HtmlCanvasElement>()?
                         .get_2d_context()?
                         .put_image_data(&out, 0.0, 0.0)?;
                 }
             }
 
             _ => (),
-        })
+        }
     }
 }
 
@@ -168,23 +174,18 @@ pub struct HintHandler {
 }
 
 impl HintHandler {
-    pub fn handle_event(&mut self, event: &AppEvent) -> AppResult<()> {
-        Ok(match event {
+    #[apply(fallible!)]
+    pub fn handle_event(&mut self, event: &AppEvent) {
+        match event {
             AppEvent::SetHint(main, aux) => {
-                self.main_bar
-                    .cast::<HtmlElement>()
-                    .to_app_result()?
-                    .set_inner_text(main);
-                self.aux_bar
-                    .cast::<HtmlElement>()
-                    .to_app_result()?
-                    .set_inner_text(aux);
+                self.main_bar.cast::<HtmlElement>()?.set_inner_text(main);
+                self.aux_bar.cast::<HtmlElement>()?.set_inner_text(aux);
             }
 
             AppEvent::FetchHint(e) => {
-                let main_bar: HtmlElement = self.main_bar.cast().to_app_result()?;
-                let aux_bar: HtmlElement = self.aux_bar.cast().to_app_result()?;
-                let mut src: Element = e.target_dyn_into().to_app_result()?;
+                let main_bar: HtmlElement = self.main_bar.cast()?;
+                let aux_bar: HtmlElement = self.aux_bar.cast()?;
+                let mut src: Element = e.target_dyn_into()?;
 
                 loop {
                     let dataset = if let Some(x) = src.dyn_ref::<HtmlElement>() {
@@ -210,14 +211,14 @@ impl HintHandler {
             }
 
             _ => (),
-        })
+        }
     }
 
-    pub fn main_bar(&self) -> &NodeRef {
+    pub const fn main_bar(&self) -> &NodeRef {
         &self.main_bar
     }
 
-    pub fn aux_bar(&self) -> &NodeRef {
+    pub const fn aux_bar(&self) -> &NodeRef {
         &self.aux_bar
     }
 }
@@ -263,9 +264,12 @@ pub trait GraphPoint: Sized + Clone + Ord + 'static {
     fn y_mut(&mut self) -> &mut Self::Y;
     /// location of the point in user coordinates
     fn loc(&self) -> [R64; 2];
+    /// change the location of `self` in user coordinates when moved in the UI
+    /// `meta` signifies whether the meta key was held while moving the point
+    fn r#move(&mut self, delta: [R64; 2], meta: bool);
     /// change the location of the point in user coordinates when moved in the UI
     /// `meta` signifies whether the meta key was held while moving the point
-    fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], meta: bool);
+    fn move_point(point: &mut [R64; 2], delta: [R64; 2], meta: bool);
     /// returns `true` if the given `area` in user coordinates overlaps with the hitbox of the point.
     fn in_hitbox(
         &self,
@@ -273,7 +277,7 @@ pub trait GraphPoint: Sized + Clone + Ord + 'static {
         ctx: ContextRef,
         sequencer: &Sequencer,
         visual_ctx: Self::VisualContext,
-    ) -> AppResult<bool>;
+    ) -> Result<bool>;
 
     ////// HANDLERS
     /// Handle points being moved in the UI.
@@ -286,7 +290,7 @@ pub trait GraphPoint: Sized + Clone + Ord + 'static {
         cursor: Cursor,
         delta: [R64; 2],
         point: Option<usize>,
-    ) -> AppResult<()> {
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -308,21 +312,21 @@ pub trait GraphPoint: Sized + Clone + Ord + 'static {
         solid: &Path2d,
         dotted: &Path2d,
         visual_ctx: Self::VisualContext,
-    ) -> AppResult<()>;
+    ) -> Result<()>;
 
     /// Handle change of selection area.
     /// `editor` is the editor, the selection area of which was changed.
     /// `app` is the application context.
     /// The current selection can be obtained through `editor.selection()`.
     #[allow(unused_variables)]
-    fn on_selection_change(editor: &mut GraphEditor<Self>, ctx: ContextMut) -> AppResult<()> {
+    fn on_selection_change(editor: &mut GraphEditor<Self>, ctx: ContextMut) -> Result<()> {
         Ok(())
     }
 
     /// `loc` is in user coordinates
     fn fmt_loc(loc: [R64; 2]) -> String;
     /// the canvas's coordinate space
-    fn canvas_coords(canvas: &HtmlCanvasElement) -> AppResult<[u32; 2]> {
+    fn canvas_coords(canvas: &HtmlCanvasElement) -> Result<[u32; 2]> {
         Ok([canvas.client_width() as u32, canvas.client_height() as u32])
     }
 }
@@ -422,10 +426,10 @@ impl AnyGraphEditor {
     /// an ID that's guaranteed to never be used by any graph editor
     pub const INVALID_ID: usize = 0;
 
-    pub fn id(&self) -> usize {
+    pub const fn id(&self) -> usize {
         self.id
     }
-    pub fn canvas(&self) -> &NodeRef {
+    pub const fn canvas(&self) -> &NodeRef {
         &self.canvas
     }
     pub fn selection(&self) -> &[usize] {
@@ -434,12 +438,12 @@ impl AnyGraphEditor {
     /// Offsets which must be subtracted from a canvas coordinate point for
     /// it to be correctly displayed to the user.
     /// Changed by the user dragging the editor plane.
-    pub fn offset(&self) -> Point {
+    pub const fn offset(&self) -> Point {
         self.offset
     }
     /// Coefficients by which a user coordinate point must be
     /// multiplied to get a canvas coordinate point.
-    pub fn scale(&self) -> [R64; 2] {
+    pub const fn scale(&self) -> [R64; 2] {
         self.scale
     }
 }
@@ -529,7 +533,7 @@ impl<T: GraphPoint> GraphEditor<T> {
     pub fn remove_points(
         &mut self,
         to_remove: impl Iterator<Item = usize> + DoubleEndedIterator,
-    ) -> AppResult<EditorAction> {
+    ) -> Result<EditorAction> {
         self.redraw = true;
         let GraphEditor { inner, data } = self;
         let mut ids_iter = inner.selection.iter_mut().rev();
@@ -576,8 +580,9 @@ impl<T: GraphPoint> GraphEditor<T> {
     }
 
     /// must be called when a canvas has just been bound or its dimensions have been changed
-    pub fn init(&mut self) -> AppResult<()> {
-        let canvas: HtmlCanvasElement = self.canvas.cast().to_app_result()?;
+    #[apply(fallible!)]
+    pub fn init(&mut self) {
+        let canvas: HtmlCanvasElement = self.canvas.cast()?;
         let [w, h] = T::canvas_coords(&canvas)?;
         canvas.set_width(w);
         canvas.set_height(h);
@@ -592,7 +597,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         let ctx = canvas.get_2d_context()?;
         ctx.set_font(AnyGraphEditor::FONT);
         ctx.set_line_width(AnyGraphEditor::LINE_WIDTH);
-        Ok(self.redraw = true)
+        self.redraw = true;
     }
 
     fn point_by_pos(
@@ -601,7 +606,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         ctx: ContextMut,
         sequencer: &Sequencer,
         visual_ctx: T::VisualContext,
-    ) -> AppResult<Option<SliceRef<'_, T>>> {
+    ) -> Result<Option<SliceRef<'_, T>>> {
         Ok(self
             .data
             .iter()
@@ -816,13 +821,14 @@ impl<T: GraphPoint> GraphEditor<T> {
         ctx.emit_event(AppEvent::SetHint(main, aux.into()));
     }
 
-    fn set_zoom_focus(&mut self, cursor: Cursor) -> AppResult<()> {
+    #[apply(fallible!)]
+    fn set_zoom_focus(&mut self, cursor: Cursor) {
         self.focus = Focus::Zoom {
-            pivot: (cursor.point + self.offset).to_app_result()?,
+            pivot: (cursor.point + self.offset)?,
             init_offset: self.offset,
             init_scale: self.scale,
         };
-        Ok(self.update_hint = true)
+        self.update_hint = true;
     }
 
     fn set_plane_focus(&mut self) {
@@ -857,11 +863,12 @@ impl<T: GraphPoint> GraphEditor<T> {
         _ctx: ContextMut,
         _sequencer: &Sequencer,
         _cur_loc: [R64; 2],
-    ) -> AppResult<()> {
+    ) -> Result<()> {
         Ok(())
     }
 
     /// Executes the selected special action after a click.
+    #[apply(fallible!)]
     fn special_action_on_click(
         &mut self,
         mut ctx: ContextMut,
@@ -869,8 +876,8 @@ impl<T: GraphPoint> GraphEditor<T> {
         pressed_at: [R64; 2],
         released_at: [R64; 2],
         visual_ctx: impl Deref<Target = T::VisualContext>,
-    ) -> AppResult<()> {
-        Ok(match ctx.special_action() {
+    ) {
+        match ctx.special_action() {
             SpecialAction::Select => {
                 let area = [pressed_at, released_at]
                     .flipped()
@@ -881,12 +888,13 @@ impl<T: GraphPoint> GraphEditor<T> {
                     .iter()
                     .enumerate()
                     .filter_map(|(id, x)| {
-                        x.in_hitbox(&area, ctx.as_ref(), sequencer, *visual_ctx)
-                            .report()
-                            .unwrap_or(false)
-                            .then_some(id)
+                        match x.in_hitbox(&area, ctx.as_ref(), sequencer, *visual_ctx) {
+                            Ok(true) => Some(Ok(id)),
+                            Ok(false) => None,
+                            Err(e) => Some(Err(e)),
+                        }
                     })
-                    .collect();
+                    .try_collect()?;
                 let prev_src = replace(
                     &mut self.selection_src,
                     area.clone().map(|x| x.into_inner().0),
@@ -927,9 +935,10 @@ impl<T: GraphPoint> GraphEditor<T> {
                 Focus::Selection { .. } => ctx.register_action(self.filter_selected(|_| true))?,
                 _ => (),
             },
-        })
+        }
     }
 
+    #[apply(fallible!)]
     fn handle_hover(
         &mut self,
         cursor: Option<Cursor>,
@@ -937,17 +946,13 @@ impl<T: GraphPoint> GraphEditor<T> {
         sequencer: &Sequencer,
         // lazy evaluation :D
         visual_ctx: impl Deref<Target = T::VisualContext>,
-    ) -> AppResult<()> {
+    ) {
         let Some(cursor) = cursor else {
             self.focus = Focus::None;
             return Ok(());
         };
 
-        let size = self
-            .canvas
-            .cast::<HtmlCanvasElement>()
-            .to_app_result()?
-            .size();
+        let size = self.canvas.cast::<HtmlCanvasElement>()?.size();
         let snap_step = [ctx.snap_step(), T::Y_SNAP];
         let step = &R64::array_from(size).div(&self.scale);
 
@@ -968,18 +973,13 @@ impl<T: GraphPoint> GraphEditor<T> {
             } => {
                 if cursor.left {
                     if !self.inner.last_cursor.left {
-                        *pivot = (cursor.point + self.inner.offset).to_app_result()?;
+                        *pivot = (cursor.point + self.inner.offset)?;
                         *init_scale = self.inner.scale;
                         *init_offset = self.inner.offset;
                     } else {
                         self.inner.redraw = true;
                     }
-                    let point = cursor
-                        .point
-                        .add(*init_offset)
-                        .to_app_result()?
-                        .sub(*pivot)
-                        .to_app_result()?;
+                    let point = cursor.point.add(*init_offset)?.sub(*pivot)?;
                     if !T::SCALE_X_BOUND.is_empty() {
                         self.inner.scale[0] =
                             T::SCALE_X_BOUND.fit(r64![50] / size[1] * point.x + init_scale[0]);
@@ -998,7 +998,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     }
                 } else {
                     if self.inner.last_cursor.left {
-                        let offset_delta = self.inner.offset.sub(*init_offset).to_app_result()?;
+                        let offset_delta = self.inner.offset.sub(*init_offset)?;
                         let scale_delta = self.inner.scale.sub(init_scale);
                         if !offset_delta.is_zero() || scale_delta.any(|x| **x != 0.0) {
                             ctx.register_action(EditorAction::DragPlane {
@@ -1045,7 +1045,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                             let init_offset = *init_offset;
                             ctx.register_action(EditorAction::DragPlane {
                                 editor_id: self.inner.id,
-                                offset_delta: (self.inner.offset - init_offset).to_app_result()?,
+                                offset_delta: (self.inner.offset - init_offset)?,
                                 scale_delta: default(),
                             })?;
                         }
@@ -1128,7 +1128,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         };
                         if delta.any(|x| *x != 0) {
                             let id = *id;
-                            T::move_point(Ok(self.data.get_mut(id).to_app_result()?), delta, false);
+                            T::r#move(self.data.get_mut(id)?, delta, false);
                             self.redraw = true;
                             T::on_move(self, ctx.as_mut(), cursor, delta, Some(id))?
                         }
@@ -1155,7 +1155,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     }
                 } else if cursor.shift {
                     self.set_zoom_focus(cursor)?
-                } else if !self.data.get(*id).to_app_result()?.in_hitbox(
+                } else if !self.data.get(*id)?.in_hitbox(
                     &cursor_point_user.map(|x| x..=x),
                     ctx.as_ref(),
                     sequencer,
@@ -1178,14 +1178,10 @@ impl<T: GraphPoint> GraphEditor<T> {
                     };
                     if delta.any(|x| *x != 0) {
                         self.inner.redraw = true;
-                        for &id in self.inner.selection.iter() {
-                            T::move_point(
-                                Ok(unsafe { self.data.get_unchecked_mut(id) }),
-                                delta,
-                                *meta,
-                            );
+                        for &id in &self.inner.selection {
+                            T::r#move(self.data.get_mut(id)?, delta, *meta);
                         }
-                        T::move_point(Err(&mut self.inner.selection_src), delta, *meta);
+                        T::move_point(&mut self.inner.selection_src, delta, *meta);
                         T::on_move(self, ctx.as_mut(), cursor, delta, None)?
                     }
                 } else if self.inner.last_cursor.left {
@@ -1223,19 +1219,16 @@ impl<T: GraphPoint> GraphEditor<T> {
         let old_buttons = *replace(&mut self.last_cursor, cursor);
         let buttons_changed = old_buttons != *cursor;
         self.redraw |= buttons_changed;
-        Ok(if self.update_hint | buttons_changed {
+        if self.update_hint | buttons_changed {
             self.update_hint = false;
             self.update_hint(ctx, cursor);
-        })
+        }
     }
 
     /// an offset of 0 is assumed
     /// the returned array are the actual bounds of the rendered grid in user coordinates
-    fn draw_grid(
-        canvas_size: [R64; 2],
-        step: [R64; 2],
-        scale: [R64; 2],
-    ) -> AppResult<(Path2d, [R64; 2])> {
+    #[apply(fallible!)]
+    fn draw_grid(canvas_size: [R64; 2], step: [R64; 2], scale: [R64; 2]) -> (Path2d, [R64; 2]) {
         let res = Path2d::new()?;
         let steps: [usize; 2] = [T::X_BOUND.end, T::Y_BOUND.end]
             .mul(&step)
@@ -1257,17 +1250,18 @@ impl<T: GraphPoint> GraphEditor<T> {
             }
         }
 
-        Ok((res, scale))
+        (res, scale)
     }
 
+    #[apply(fallible!)]
     pub fn handle_event(
         &mut self,
         event: &AppEvent,
         mut ctx: ContextMut,
         sequencer: &Sequencer,
         visual_ctx: impl FnOnce() -> T::VisualContext,
-    ) -> AppResult<()> {
-        Ok(match event {
+    ) {
+        match event {
             AppEvent::Enter(id, e) | AppEvent::Hover(id, e) if *id == self.id => self
                 .handle_hover(
                     Some(e.try_into()?),
@@ -1277,8 +1271,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                 )?,
 
             AppEvent::Focus(id, e) if *id == self.id => {
-                e.target_dyn_into::<Element>()
-                    .to_app_result()?
+                e.target_dyn_into::<Element>()?
                     .set_pointer_capture(e.pointer_id())?;
                 self.handle_hover(
                     Some(e.try_into()?),
@@ -1325,7 +1318,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         } => {
                             if editor_id == self.id {
                                 self.redraw = true;
-                                self.offset = (self.offset - offset_delta).to_app_result()?;
+                                self.offset = (self.offset - offset_delta)?;
                                 self.scale = self.scale.sub(&scale_delta);
                             }
                         }
@@ -1338,11 +1331,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                             if editor_id == self.id {
                                 self.redraw = true;
                                 delta = delta.map(|x| -x);
-                                T::move_point(
-                                    Ok(self.data.get_mut(point_id).to_app_result()?),
-                                    delta,
-                                    false,
-                                )
+                                T::r#move(self.data.get_mut(point_id)?, delta, false)
                             }
                         }
 
@@ -1353,14 +1342,10 @@ impl<T: GraphPoint> GraphEditor<T> {
                             if editor_id == self.id {
                                 self.redraw = true;
                                 delta = delta.map(|x| -x);
-                                for &id in self.inner.selection.iter() {
-                                    T::move_point(
-                                        Ok(self.data.get_mut(id).to_app_result()?),
-                                        delta,
-                                        false,
-                                    );
+                                for &id in &self.inner.selection {
+                                    T::r#move(self.data.get_mut(id)?, delta, false);
                                 }
-                                T::move_point(Err(&mut self.selection_src), delta, false)
+                                T::move_point(&mut self.selection_src, delta, false)
                             }
                         }
 
@@ -1394,10 +1379,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                                 was_selected,
                             } in points.iter()
                             {
-                                self.data.insert(
-                                    index,
-                                    point.downcast_ref::<T>().to_app_result()?.clone(),
-                                );
+                                self.data.insert(index, point.downcast_ref::<T>()?.clone());
                                 if was_selected {
                                     self.selection.push(index);
                                 }
@@ -1419,7 +1401,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         } => {
                             if editor_id == self.id {
                                 self.redraw = true;
-                                self.offset = self.offset.add(offset_delta).to_app_result()?;
+                                self.offset = self.offset.add(offset_delta)?;
                                 self.scale = self.scale.add(&scale_delta);
                             }
                         }
@@ -1431,25 +1413,17 @@ impl<T: GraphPoint> GraphEditor<T> {
                         } => {
                             if editor_id == self.id {
                                 self.redraw = true;
-                                T::move_point(
-                                    Ok(self.data.get_mut(point_id).to_app_result()?),
-                                    delta,
-                                    false,
-                                )
+                                T::r#move(self.data.get_mut(point_id)?, delta, false)
                             }
                         }
 
                         EditorAction::DragSelection { editor_id, delta } => {
                             if editor_id == self.id {
                                 self.redraw = true;
-                                for &id in self.inner.selection.iter() {
-                                    T::move_point(
-                                        Ok(self.data.get_mut(id).to_app_result()?),
-                                        delta,
-                                        false,
-                                    );
+                                for &id in &self.inner.selection {
+                                    T::r#move(self.data.get_mut(id)?, delta, false);
                                 }
-                                T::move_point(Err(&mut self.selection_src), delta, false)
+                                T::move_point(&mut self.selection_src, delta, false)
                             }
                         }
 
@@ -1491,7 +1465,7 @@ impl<T: GraphPoint> GraphEditor<T> {
             }
 
             AppEvent::Frame(_) if self.redraw => {
-                let canvas: HtmlCanvasElement = self.canvas.cast().to_app_result()?;
+                let canvas: HtmlCanvasElement = self.canvas.cast()?;
                 let size = canvas.size().map(R64::from);
                 let snap_step = [ctx.snap_step(), T::Y_SNAP];
                 let canvas_ctx = canvas.get_2d_context()?;
@@ -1554,7 +1528,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         pivot, init_offset, ..
                     } => {
                         if self.last_cursor.left {
-                            let [x, y] = pivot.sub(init_offset).to_app_result()?.map(|x| x as f64);
+                            let [x, y] = pivot.sub(init_offset)?.map(|x| x as f64);
                             solid.move_to(x - 10.0, y);
                             solid.line_to(x + 10.0, y);
                             solid.move_to(x, y - 10.0);
@@ -1613,6 +1587,6 @@ impl<T: GraphPoint> GraphEditor<T> {
             }
 
             _ => (),
-        })
+        }
     }
 }

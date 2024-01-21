@@ -1,8 +1,9 @@
 use std::mem::take;
 
 use js_sys::Function;
+use macro_rules_attribute::apply;
 use wasm_bindgen::JsCast;
-use wavexp_utils::{ext::OptionExt, js_function, now, r64, window, AppResult, AppResultUtils, R64};
+use wavexp_utils::{ext::ResultExt, fallible, js_function, now, r64, window, R64};
 use yew::{html, html::Context, Callback, Component, Html};
 
 use crate::{
@@ -21,12 +22,13 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    pub fn new(event_emitter: Callback<AppEvent>) -> AppResult<Self> {
-        Ok(Self {
-            frame: now().to_app_result()? / 1000,
+    #[apply(fallible!)]
+    pub fn new(event_emitter: Callback<AppEvent>) -> Self {
+        Self {
+            frame: now()? / 1000,
             rerender_needed: false,
             event_emitter,
-        })
+        }
     }
 
     pub fn force_rerender(&mut self) {
@@ -67,10 +69,11 @@ impl Component for App {
     type Message = AppEvent;
     type Properties = ();
 
+    #[allow(clippy::unwrap_used)]
     fn create(ctx: &Context<Self>) -> Self {
         let cb = ctx.link().callback(AppEvent::Frame);
         let res = Self {
-            projects: vec![Editor::new()],
+            projects: vec![Editor::new().unwrap()],
             selected_proj: 0,
             ctx: AppContext::new(ctx.link().callback(|x| x)).unwrap(),
             frame_emitter: js_function!(|x| cb.emit(R64::new_or(r64![0], x))),
@@ -83,8 +86,8 @@ impl Component for App {
     }
 
     fn update(&mut self, _: &Context<Self>, mut msg: Self::Message) -> bool {
-        let res: AppResult<_> = try {
-            let selected_proj = self.projects.get_mut(self.selected_proj).to_app_result()?;
+        fallible! {
+            let selected_proj = self.projects.get_mut(self.selected_proj)?;
             match msg {
                 AppEvent::Frame(frame) => {
                     window().request_animation_frame(&self.frame_emitter)?;
@@ -110,7 +113,7 @@ impl Component for App {
                 }
 
                 AppEvent::ClosePopup => {
-                    let closed = self.popups.pop().to_app_result()?;
+                    let closed = self.popups.pop()?;
                     selected_proj
                         .ctx
                         .register_action(&mut self.ctx, EditorAction::ClosePopup(closed))?;
@@ -153,13 +156,14 @@ impl Component for App {
                 )?;
             }
             take(&mut self.ctx.rerender_needed)
-        };
-        res.report().unwrap_or(false)
+        }
+        .report()
+        .unwrap_or(false)
     }
 
     fn view(&self, _: &Context<Self>) -> Html {
-        let res: AppResult<!> = try {
-            let project = self.projects.get(self.selected_proj).to_app_result()?;
+        fallible! {
+            let project = self.projects.get(self.selected_proj)?;
             let sequencer = project.sequencer.get()?;
             return html! {
                 <>
@@ -176,8 +180,8 @@ impl Component for App {
                     ><img::Warning /></div>
                 </>
             };
-        };
-        res.report();
+        }
+        .report();
         html! { <div id="error-sign"><img::Warning /></div> }
     }
 

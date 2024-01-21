@@ -1,37 +1,41 @@
 use std::{
     array::from_fn,
-    fmt::Display,
     iter::{successors, Sum},
     ops::{
         Add, AddAssign, DivAssign, MulAssign, Neg, Range, RangeBounds, RangeInclusive, RemAssign,
-        Sub, SubAssign,
+        Residual, Sub, SubAssign, Try,
     },
     ptr,
 };
 
+use macro_rules_attribute::apply;
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, Document, Element, HtmlCanvasElement};
 
-use crate::{app_error, AppError, AppResult, Point, Rect, RoundTo, SliceRef};
+use crate::{
+    app_error, default,
+    error::{report_err, Result},
+    fallible, AppError, Point, Rect, RoundTo, SliceRef,
+};
 
 pub trait ArrayExt<T, const N: usize>: Sized {
     fn zip<O, R>(self, other: [O; N], f: impl FnMut(T, O) -> R) -> [R; N];
     fn zip_fold<O, R>(self, init: R, other: [O; N], f: impl FnMut(R, T, O) -> R) -> R;
-    fn add<'a, O>(self, other: &'a [O; N]) -> Self
+    fn add<'other, O>(self, other: &'other [O; N]) -> Self
     where
-        T: AddAssign<&'a O>;
-    fn sub<'a, O>(self, other: &'a [O; N]) -> Self
+        T: AddAssign<&'other O>;
+    fn sub<'other, O>(self, other: &'other [O; N]) -> Self
     where
-        T: SubAssign<&'a O>;
-    fn mul<'a, O>(self, other: &'a [O; N]) -> Self
+        T: SubAssign<&'other O>;
+    fn mul<'other, O>(self, other: &'other [O; N]) -> Self
     where
-        T: MulAssign<&'a O>;
-    fn div<'a, O>(self, other: &'a [O; N]) -> Self
+        T: MulAssign<&'other O>;
+    fn div<'other, O>(self, other: &'other [O; N]) -> Self
     where
-        T: DivAssign<&'a O>;
-    fn rem<'a, O>(self, other: &'a [O; N]) -> Self
+        T: DivAssign<&'other O>;
+    fn rem<'other, O>(self, other: &'other [O; N]) -> Self
     where
-        T: RemAssign<&'a O>;
+        T: RemAssign<&'other O>;
     fn floor_to(self, other: Self) -> Self
     where
         T: RoundTo;
@@ -68,9 +72,9 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
             .fold(init, |r, (x, y)| f(r, x, y))
     }
 
-    fn add<'a, O>(mut self, other: &'a [O; N]) -> Self
+    fn add<'other, O>(mut self, other: &'other [O; N]) -> Self
     where
-        T: AddAssign<&'a O>,
+        T: AddAssign<&'other O>,
     {
         for (dst, src) in self.iter_mut().zip(other.iter()) {
             *dst += src
@@ -78,9 +82,9 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
         self
     }
 
-    fn sub<'a, O>(mut self, other: &'a [O; N]) -> Self
+    fn sub<'other, O>(mut self, other: &'other [O; N]) -> Self
     where
-        T: SubAssign<&'a O>,
+        T: SubAssign<&'other O>,
     {
         for (dst, src) in self.iter_mut().zip(other.iter()) {
             *dst -= src
@@ -88,9 +92,9 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
         self
     }
 
-    fn mul<'a, O>(mut self, other: &'a [O; N]) -> Self
+    fn mul<'other, O>(mut self, other: &'other [O; N]) -> Self
     where
-        T: MulAssign<&'a O>,
+        T: MulAssign<&'other O>,
     {
         for (dst, src) in self.iter_mut().zip(other.iter()) {
             *dst *= src
@@ -98,9 +102,9 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
         self
     }
 
-    fn div<'a, O>(mut self, other: &'a [O; N]) -> Self
+    fn div<'other, O>(mut self, other: &'other [O; N]) -> Self
     where
-        T: DivAssign<&'a O>,
+        T: DivAssign<&'other O>,
     {
         for (d, s) in self.iter_mut().zip(other.iter()) {
             *d /= s
@@ -108,9 +112,9 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
         self
     }
 
-    fn rem<'a, O>(mut self, other: &'a [O; N]) -> Self
+    fn rem<'other, O>(mut self, other: &'other [O; N]) -> Self
     where
-        T: RemAssign<&'a O>,
+        T: RemAssign<&'other O>,
     {
         for (d, s) in self.iter_mut().zip(other.iter()) {
             *d %= s
@@ -176,7 +180,7 @@ pub trait BoolExt {
     fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
     fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T>;
     fn flip(&mut self);
-    fn to_app_result(self) -> AppResult<()>;
+    //fn to_app_result(self) -> AppResult<()>;
 }
 
 impl BoolExt for bool {
@@ -228,66 +232,73 @@ impl BoolExt for bool {
         *self = !*self
     }
 
-    fn to_app_result(self) -> AppResult<()> {
+    /*fn to_app_result(self) -> AppResult<()> {
         if self {
             Ok(())
         } else {
             Err(app_error!("expected `true`, found `false`"))
         }
-    }
+    }*/
 }
 
 pub trait ResultExt<T, E> {
-    fn to_app_result(self) -> AppResult<T>
+    /*fn to_app_result(self) -> AppResult<T>
     where
-        E: Display;
-    fn explain_err(self, msg: &str) -> AppResult<T>;
-    fn explain_err_with(self, f: impl FnOnce() -> String) -> AppResult<T>;
+        E: Display;*/
     fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
+    fn report(self) -> Option<T>
+    where
+        E: Into<AppError>;
 }
 
 impl<T, E> ResultExt<T, E> for Result<T, E> {
-    fn to_app_result(self) -> AppResult<T>
+    /*fn to_app_result(self) -> AppResult<T>
     where
         E: Display,
     {
         self.map_err(|e| AppError::new(&e.to_string()))
-    }
-
-    fn explain_err(self, msg: &str) -> AppResult<T> {
-        self.map_err(|_| AppError::new(msg))
-    }
-
-    fn explain_err_with(self, f: impl FnOnce() -> String) -> AppResult<T> {
-        self.map_err(|_| AppError::new(&f()))
-    }
+    }*/
 
     fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
+        self.map_or_else(|_| default(), f)
+    }
+
+    fn report(self) -> Option<T>
+    where
+        E: Into<AppError>,
+    {
         match self {
-            Ok(x) => f(x),
-            Err(_) => U::default(),
+            Ok(x) => Some(x),
+            Err(e) => {
+                report_err(e.into().into());
+                None
+            }
         }
     }
 }
 
 pub trait OptionExt<T> {
-    fn to_app_result(self) -> AppResult<T>;
+    //fn to_app_result(self) -> AppResult<T>;
     fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
     fn choose<U>(&self, on_some: U, on_none: U) -> U;
     fn drop(self) -> Option<()>;
     fn get_or_try_insert<E>(&mut self, f: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E>;
+    fn try_map<U, R>(self, f: impl FnOnce(T) -> R) -> <R::Residual as Residual<Option<U>>>::TryType
+    where
+        R: Try<Output = U>,
+        R::Residual: Residual<Option<U>>;
 }
 
 impl<T> OptionExt<T> for Option<T> {
-    fn to_app_result(self) -> AppResult<T> {
-        self.ok_or_else(|| app_error!("`Option` contained the `None` value"))
-    }
+    /*fn to_app_result(self) -> AppResult<T> {
+        match self {
+            Some(x) => Ok(x),
+            None => Err(AppError::on_none()),
+        }
+    }*/
 
     fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
-        match self {
-            Some(x) => f(x),
-            None => U::default(),
-        }
+        self.map_or_else(default, f)
     }
 
     fn choose<U>(&self, on_some: U, on_none: U) -> U {
@@ -312,18 +323,30 @@ impl<T> OptionExt<T> for Option<T> {
         }
         Ok(unsafe { self.as_mut().unwrap_unchecked() })
     }
+
+    fn try_map<U, R>(self, f: impl FnOnce(T) -> R) -> <R::Residual as Residual<Option<U>>>::TryType
+    where
+        R: Try<Output = U>,
+        R::Residual: Residual<Option<U>>,
+    {
+        match self {
+            Some(x) => Try::from_output(Some(f(x)?)),
+            None => Try::from_output(None),
+        }
+    }
 }
 
 pub trait HtmlCanvasExt {
-    fn get_2d_context(&self) -> AppResult<CanvasRenderingContext2d>;
+    fn get_2d_context(&self) -> Result<CanvasRenderingContext2d>;
     fn rect(&self) -> Rect;
     fn size(&self) -> [u32; 2];
     fn sync(&self);
 }
 
 impl HtmlCanvasExt for HtmlCanvasElement {
-    fn get_2d_context(&self) -> AppResult<CanvasRenderingContext2d> {
-        Ok(self.get_context("2d")?.to_app_result()?.unchecked_into())
+    #[apply(fallible!)]
+    fn get_2d_context(&self) -> CanvasRenderingContext2d {
+        self.get_context("2d")??.unchecked_into()
     }
 
     fn rect(&self) -> Rect {
@@ -379,6 +402,7 @@ impl HtmlElementExt for Element {
 }
 
 pub trait SliceExt<T> {
+    fn not_empty(&self) -> bool;
     fn any(&self, f: impl FnMut(&T) -> bool) -> bool;
     fn all(&self, f: impl FnMut(&T) -> bool) -> bool;
     fn to_box(&self) -> Box<Self>
@@ -388,8 +412,8 @@ pub trait SliceExt<T> {
     fn get_saturating_mut(&mut self, id: usize) -> &mut T;
     fn get_wrapping(&self, id: usize) -> &T;
     fn get_wrapping_mut(&mut self, id: usize) -> &mut T;
-    fn get_var<'a>(&'a self, ids: &[usize]) -> Option<Vec<&'a T>>;
-    fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Option<Vec<&'a mut T>>;
+    fn get_var<'this>(&'this self, ids: &[usize]) -> Option<Vec<&'this T>>;
+    fn get_var_mut<'this>(&'this mut self, ids: &[usize]) -> Option<Vec<&'this mut T>>;
     fn get_aware(&self, index: usize) -> Option<SliceRef<'_, T>>;
     /// # Safety
     /// `index` must be a valid index into `self`
@@ -397,6 +421,10 @@ pub trait SliceExt<T> {
 }
 
 impl<T> SliceExt<T> for [T] {
+    fn not_empty(&self) -> bool {
+        !self.is_empty()
+    }
+
     fn any(&self, mut f: impl FnMut(&T) -> bool) -> bool {
         let mut res = false;
         for i in self {
@@ -436,7 +464,7 @@ impl<T> SliceExt<T> for [T] {
         unsafe { self.get_unchecked_mut(id % self.len()) }
     }
 
-    fn get_var<'a>(&'a self, ids: &[usize]) -> Option<Vec<&'a T>> {
+    fn get_var<'this>(&'this self, ids: &[usize]) -> Option<Vec<&'this T>> {
         let len = self.len();
         for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
             if *id >= len || rest.contains(id) {
@@ -448,7 +476,7 @@ impl<T> SliceExt<T> for [T] {
         Some(ids.iter().map(|x| unsafe { &*base.add(*x) }).collect())
     }
 
-    fn get_var_mut<'a>(&'a mut self, ids: &[usize]) -> Option<Vec<&'a mut T>> {
+    fn get_var_mut<'this>(&'this mut self, ids: &[usize]) -> Option<Vec<&'this mut T>> {
         let len = self.len();
         for (id, rest) in successors(ids.split_first(), |x| x.1.split_first()) {
             if *id >= len || rest.contains(id) {
@@ -489,29 +517,30 @@ fn slice_get_var_mut() {
 }
 
 pub trait VecExt<T> {
-    fn try_remove(&mut self, index: usize) -> AppResult<T>;
+    fn try_remove(&mut self, index: usize) -> Result<T>;
     /// # Safety
     /// `index` must be a valid index into `self`
     unsafe fn remove_unchecked(&mut self, index: usize) -> T;
-    fn try_swap_remove(&mut self, index: usize) -> AppResult<T>;
-    fn try_insert(&mut self, index: usize, element: T) -> AppResult<&mut T>;
+    fn try_swap_remove(&mut self, index: usize) -> Result<T>;
+    fn try_insert(&mut self, index: usize, element: T) -> Result<&mut T>;
     fn push_unique(&mut self, value: T, f: impl Fn(&T, &T) -> bool) -> bool;
 }
 
 impl<T> VecExt<T> for Vec<T> {
-    fn try_remove(&mut self, index: usize) -> AppResult<T> {
+    #[apply(fallible!)]
+    fn try_remove(&mut self, index: usize) -> T {
         let len = self.len();
         if index >= len {
-            return Err(AppError::new(&format!(
+            return Err(app_error!(
                 "removal index (is {index}) should be < len (is {len})"
-            )));
+            ));
         }
         unsafe {
             let ptr = self.as_mut_ptr().add(index);
             let ret = ptr::read(ptr);
             ptr::copy(ptr.add(1), ptr, len - index - 1);
             self.set_len(len - 1);
-            Ok(ret)
+            ret
         }
     }
 
@@ -524,38 +553,40 @@ impl<T> VecExt<T> for Vec<T> {
         ret
     }
 
-    fn try_swap_remove(&mut self, index: usize) -> AppResult<T> {
+    #[apply(fallible!)]
+    fn try_swap_remove(&mut self, index: usize) -> T {
         let len = self.len();
         if index >= len {
-            return Err(AppError::new(&format!(
+            return Err(app_error!(
                 "removal index (is {index}) should be < len (is {len})"
-            )));
+            ));
         }
         unsafe {
             let value = ptr::read(self.as_ptr().add(index));
             let base_ptr = self.as_mut_ptr();
             ptr::copy(base_ptr.add(len - 1), base_ptr.add(index), 1);
             self.set_len(len - 1);
-            Ok(value)
+            value
         }
     }
 
-    fn try_insert(&mut self, index: usize, element: T) -> AppResult<&mut T> {
+    #[apply(fallible!)]
+    fn try_insert(&mut self, index: usize, element: T) -> &mut T {
         let len = self.len();
         if index > len {
-            return Err(AppError::new(&format!(
+            return Err(app_error!(
                 "insertion index (is {index}) should be <= len (is {len})"
-            )));
+            ));
         }
         if len == self.capacity() {
-            self.try_reserve(1).to_app_result()?;
+            self.try_reserve(1)?;
         }
         unsafe {
             let p = self.as_mut_ptr().add(index);
             ptr::copy(p, p.add(1), len - index);
             ptr::write(p, element);
             self.set_len(len + 1);
-            Ok(&mut *p)
+            &mut *p
         }
     }
 

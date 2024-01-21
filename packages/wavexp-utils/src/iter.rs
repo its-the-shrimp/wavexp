@@ -1,12 +1,12 @@
-pub struct EveryNth<'a, T> {
-    iter: &'a [T],
+pub struct EveryNth<'slice, T> {
+    iter: &'slice [T],
     n: usize,
     state: usize,
     off: usize,
 }
 
-impl<'a, T> Iterator for EveryNth<'a, T> {
-    type Item = &'a T;
+impl<'slice, T> Iterator for EveryNth<'slice, T> {
+    type Item = &'slice T;
     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
         if let res @ Some(_) = self.iter.get(self.state) {
             self.state += self.n;
@@ -23,15 +23,15 @@ impl<'a, T> Iterator for EveryNth<'a, T> {
     }
 }
 
-pub struct EveryNthMut<'a, T> {
-    iter: &'a mut [T],
+pub struct EveryNthMut<'slice, T> {
+    iter: &'slice mut [T],
     n: usize,
     state: usize,
     off: usize,
 }
 
-impl<'a, T> Iterator for EveryNthMut<'a, T> {
-    type Item = &'a mut T;
+impl<'slice, T> Iterator for EveryNthMut<'slice, T> {
+    type Item = &'slice mut T;
     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
         if let Some(res) = self.iter.get_mut(self.state) {
             self.state += self.n;

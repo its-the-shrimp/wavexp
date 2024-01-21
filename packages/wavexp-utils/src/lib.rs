@@ -4,12 +4,18 @@
 #![feature(try_blocks)]
 #![feature(raw_ref_op)]
 #![feature(result_option_inspect)]
+#![feature(try_trait_v2)]
+#![feature(try_trait_v2_residual)]
+#![feature(unwrap_infallible)]
+
+extern crate self as wavexp_utils;
 
 pub mod cell;
+pub mod error;
 pub mod ext;
 pub mod iter;
 
-use ext::HtmlDocumentExt;
+use error::{report_err, AppError, Result};
 pub use js_sys;
 use std::{
     cmp::Ordering,
@@ -26,11 +32,7 @@ use std::{
     },
 };
 pub use wasm_bindgen;
-use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{
-    console::{warn_1, warn_2},
-    Document, HtmlElement, Window,
-};
+use web_sys::{Document, Window};
 use yew::{html::IntoPropValue, AttrValue};
 
 pub fn default<T: Default>() -> T {
@@ -38,9 +40,9 @@ pub fn default<T: Default>() -> T {
 }
 
 #[repr(transparent)]
-pub struct Alias<'a, T: ?Sized>(pub &'a T);
+pub struct Alias<'inner, T: ?Sized>(pub &'inner T);
 
-impl<'a, T: ?Sized + Deref> Deref for Alias<'a, T> {
+impl<'inner, T: ?Sized + Deref> Deref for Alias<'inner, T> {
     type Target = T::Target;
     fn deref(&self) -> &Self::Target {
         self.0.deref()
@@ -187,30 +189,30 @@ impl<T, const OUTER: usize, const INNER: usize> FlippedArray<T, OUTER, INNER>
     }
 }
 
-pub struct SliceRef<'a, T: ?Sized> {
-    inner: &'a T,
+pub struct SliceRef<'inner, T: ?Sized> {
+    inner: &'inner T,
     index: usize,
 }
 
-impl<'a, T> Deref for SliceRef<'a, T> {
+impl<'inner, T> Deref for SliceRef<'inner, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         self.inner
     }
 }
 
-impl<'a, T> SliceRef<'a, T> {
-    pub fn new(slice: &'a [T], index: usize) -> Option<Self> {
+impl<'inner, T> SliceRef<'inner, T> {
+    pub fn new(slice: &'inner [T], index: usize) -> Option<Self> {
         slice.get(index).map(|inner| Self { inner, index })
     }
 
     /// # Safety
     /// `inner` must be a reference to the `index`-th item in its array
-    pub unsafe fn raw(inner: &'a T, index: usize) -> Self {
+    pub const unsafe fn raw(inner: &'inner T, index: usize) -> Self {
         Self { inner, index }
     }
 
-    pub fn index(&self) -> usize {
+    pub const fn index(&self) -> usize {
         self.index
     }
 }
@@ -317,82 +319,6 @@ pub fn now() -> Option<R64> {
         .map(|p| unsafe { R64::new_unchecked(p.now()) } / 1000)
 }
 
-pub fn report_err(err: js_sys::Error) {
-    warn_2(
-        &err,
-        &js_sys::Reflect::get(err.as_ref(), &"stack".into()).unwrap_or_else(|e| e),
-    );
-    if let Some(x) = document().element_dyn_into::<HtmlElement>("error-sign") {
-        x.set_hidden(false)
-    } else {
-        warn_1(&JsValue::from("#error-sign element not found in the DOM"))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct AppError(js_sys::Error);
-
-impl From<JsValue> for AppError {
-    fn from(value: JsValue) -> Self {
-        match value.dyn_into() {
-            Ok(x) => Self(x),
-            Err(x) => Self::new(&String::from(js_sys::Object::from(x).to_string())),
-        }
-    }
-}
-
-/// `format!`-like macro to create an `AppError`
-#[macro_export]
-macro_rules! app_error {
-    ($x:literal $(,)? $($arg:tt)*) => {
-        $crate::AppError::new(&format!($x, $($arg)*))
-    };
-}
-
-macro_rules! impl_into_app_error {
-    ($($t:ty)+) => {
-        $(
-            impl From<$t> for AppError {
-                fn from(value: $t) -> Self {
-                    Self::new(&value.to_string())
-                }
-            }
-        )+
-    };
-}
-
-impl_into_app_error!(hound::Error);
-
-impl From<AppError> for js_sys::Error {
-    fn from(value: AppError) -> Self {
-        value.0
-    }
-}
-
-impl AppError {
-    pub fn new(msg: &str) -> Self {
-        Self(js_sys::Error::new(msg))
-    }
-}
-
-pub type AppResult<T> = Result<T, AppError>;
-
-pub trait AppResultUtils<T>: Sized {
-    fn report(self) -> Option<T>;
-}
-
-impl<T> AppResultUtils<T> for AppResult<T> {
-    fn report(self) -> Option<T> {
-        match self {
-            Ok(x) => Some(x),
-            Err(e) => {
-                report_err(e.into());
-                None
-            }
-        }
-    }
-}
-
 pub trait LooseEq<O = Self> {
     fn loose_eq(&self, value: Self, off: O) -> bool;
     fn loose_ne(&self, value: Self, off: O) -> bool
@@ -492,11 +418,11 @@ impl Neg for Point {
 impl Point {
     pub const ZERO: Self = Self { x: 0, y: 0 };
 
-    pub fn is_zero(&self) -> bool {
+    pub const fn is_zero(&self) -> bool {
         self.x == 0 && self.y == 0
     }
 
-    pub fn nonzero(self) -> Option<Self> {
+    pub const fn nonzero(self) -> Option<Self> {
         if self.is_zero() {
             None
         } else {
@@ -523,16 +449,16 @@ impl Point {
 pub struct Rect(Point, Point);
 
 impl Rect {
-    fn left(&self) -> i32 {
+    const fn left(&self) -> i32 {
         self.0.x
     }
-    fn bottom(&self) -> i32 {
+    const fn bottom(&self) -> i32 {
         self.1.y
     }
-    fn width(&self) -> i32 {
+    const fn width(&self) -> i32 {
         self.1.x - self.0.x
     }
-    fn height(&self) -> i32 {
+    const fn height(&self) -> i32 {
         self.1.y - self.0.y
     }
 }
@@ -705,12 +631,12 @@ macro_rules! impl_op {
             fn $method(self, rhs: &$rhs_ty) -> Self::Output {$op::$method(self, *rhs)}
         }
 
-        impl<'a> $op<$rhs_ty> for &'a $real {
+        impl<'this> $op<$rhs_ty> for &'this $real {
             type Output = $out;
             fn $method(self, rhs: $rhs_ty) -> Self::Output {$op::$method(*self, rhs)}
         }
 
-        impl<'a> $op<&$rhs_ty> for &'a $real {
+        impl<'this> $op<&$rhs_ty> for &'this $real {
             type Output = $out;
             fn $method(self, rhs: &$rhs_ty) -> Self::Output {$op::$method(*self, *rhs)}
         }
@@ -893,8 +819,8 @@ macro_rules! real_impl {
             }
         }
 
-        impl<'a> Sum<&'a $real> for $real {
-            fn sum<I>(iter: I) -> Self where I: Iterator<Item=&'a $real> {
+        impl<'item> Sum<&'item $real> for $real {
+            fn sum<I>(iter: I) -> Self where I: Iterator<Item=&'item $real> {
                 iter.fold(Self(0.0), |s, n| s + n)
             }
         }
@@ -977,7 +903,7 @@ macro_rules! real_impl {
 
             pub fn round(self) -> Self {Self(self.0.round())}
 
-            pub fn is_finite(&self) -> bool {self.0.is_finite()}
+            pub const fn is_finite(&self) -> bool {self.0.is_finite()}
 
             pub fn abs(self) -> Self {Self(self.0.abs())}
 

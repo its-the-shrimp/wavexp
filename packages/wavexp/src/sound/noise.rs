@@ -7,6 +7,7 @@ use crate::{
     visual::{GraphEditor, GraphPoint},
 };
 use js_sys::Math::random;
+use macro_rules_attribute::apply;
 use std::{
     mem::replace,
     num::NonZeroUsize,
@@ -16,8 +17,9 @@ use wasm_bindgen::JsCast;
 use wavexp_utils::{
     cell::Shared,
     default,
-    ext::{ArrayExt, OptionExt, RangeExt},
-    js_function, r32, r64, AppError, AppResult, AppResultUtils, ArrayFrom, Pipe, R32, R64,
+    error::AppError,
+    ext::{ArrayExt, OptionExt, RangeExt, ResultExt},
+    fallible, js_function, r32, r64, ArrayFrom, Pipe, R32, R64,
 };
 use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, Path2d};
 use yew::{html, Html};
@@ -65,40 +67,39 @@ impl GraphPoint for NoiseBlock {
         [self.offset, self.pitch.recip().index().into()]
     }
 
-    fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], meta: bool) {
-        match point {
-            Ok(NoiseBlock { offset, pitch, len }) => {
-                if meta {
-                    *len += delta[0];
-                } else {
-                    *offset += delta[0];
-                    *offset = R64::ZERO.max(*offset);
-                }
-                *pitch -= delta[1].into();
-            }
-            Err(point) => {
-                if !meta {
-                    point[0] += delta[0];
-                }
-                point[1] += delta[1];
-            }
+    fn r#move(&mut self, delta: [R64; 2], meta: bool) {
+        if meta {
+            self.len += delta[0];
+        } else {
+            self.offset += delta[0];
+            self.offset = R64::ZERO.max(self.offset);
         }
+        self.pitch -= delta[1].into();
     }
 
+    fn move_point(point: &mut [R64; 2], delta: [R64; 2], meta: bool) {
+        if !meta {
+            point[0] += delta[0];
+        }
+        point[1] += delta[1];
+    }
+
+    #[apply(fallible!)]
     fn in_hitbox(
         &self,
         area: &[RangeInclusive<R64>; 2],
         _: ContextRef,
         _: &Sequencer,
         _: Self::VisualContext,
-    ) -> AppResult<bool> {
-        Ok(area[1]
+    ) -> bool {
+        area[1]
             .clone()
             .map_bounds(usize::from)
             .contains(&self.pitch.recip().index())
-            && (self.offset..=self.offset + self.len).overlap(&area[0]))
+            && (self.offset..=self.offset + self.len).overlap(&area[0])
     }
 
+    #[apply(fallible!)]
     fn on_redraw(
         editor: &mut GraphEditor<Self>,
         ctx: ContextRef,
@@ -107,17 +108,17 @@ impl GraphPoint for NoiseBlock {
         solid: &Path2d,
         _: &Path2d,
         (sb_offset, n_reps): Self::VisualContext,
-    ) -> AppResult<()> {
+    ) {
         let bps = sequencer.bps();
         let step = &canvas_size.div(&editor.scale());
         let offset = &R64::array_from(editor.offset());
-        for block in editor.data().iter() {
+        for block in editor.data() {
             let [x, y] = block.loc().mul(step).sub(offset);
             solid.rect(*x, *y, *block.len * *step[0], *step[1]);
         }
 
         let total_len = editor.data().last().map_or_default(|x| x.offset + x.len);
-        Ok(if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
+        if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
             let progress = (ctx.frame() - start).secs_to_beats(bps) - sb_offset;
             if progress < total_len * n_reps {
                 editor.force_redraw();
@@ -125,7 +126,7 @@ impl GraphPoint for NoiseBlock {
                 solid.move_to(*x, 0.0);
                 solid.line_to(*x, *canvas_size[1]);
             }
-        })
+        }
     }
 
     fn fmt_loc(loc: [R64; 2]) -> String {
@@ -148,11 +149,8 @@ pub struct NoiseSound {
 impl NoiseSound {
     pub const NAME: &'static str = "White Noise";
 
-    pub fn prepare(&self) -> AppResult<()> {
-        Ok(())
-    }
-
-    pub fn new() -> AppResult<Self> {
+    #[apply(fallible!)]
+    pub fn new() -> Self {
         let mut buf = vec![0.0; Sequencer::SAMPLE_RATE as usize]; // 1 second of noise
         buf.fill_with(|| random() as f32 * 2.0 - 1.0);
         let src = AudioBufferOptions::new(Sequencer::SAMPLE_RATE, Sequencer::SAMPLE_RATE as f32)
@@ -161,7 +159,7 @@ impl NoiseSound {
         for i in 0..Sequencer::CHANNEL_COUNT as i32 {
             src.copy_to_channel(&buf, i)?;
         }
-        Ok(Self {
+        Self {
             pattern: default(),
             src,
             volume: r32![0.2],
@@ -170,16 +168,11 @@ impl NoiseSound {
             sustain: r32![1],
             release: r64![0.2],
             rep_count: NonZeroUsize::MIN,
-        })
+        }
     }
 
-    pub fn play(
-        &self,
-        plug: &AudioNode,
-        now: Secs,
-        self_offset: Secs,
-        bps: Beats,
-    ) -> AppResult<()> {
+    #[apply(fallible!)]
+    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) {
         let pat = self.pattern.get()?;
         let Some(last) = pat.data().last() else {
             return Ok(());
@@ -187,8 +180,8 @@ impl NoiseSound {
         let pat_len = (last.offset + last.len).to_secs(bps);
         let ctx = plug.context();
 
-        Ok(for rep in 0..self.rep_count.get() {
-            for NoiseBlock { offset, len, pitch } in pat.data().iter() {
+        for rep in 0..self.rep_count.get() {
+            for NoiseBlock { offset, len, pitch } in pat.data() {
                 let block = ctx.create_gain()?;
                 let gain = block.gain();
                 let start = now + self_offset + pat_len * rep + offset.to_secs(bps);
@@ -219,19 +212,19 @@ impl NoiseSound {
                     block_core.disconnect().map_err(AppError::from).report();
                 })));
             }
-        })
+        }
     }
 
-    pub fn len(&self) -> AppResult<Beats> {
-        Ok(self
-            .pattern
+    #[apply(fallible!)]
+    pub fn len(&self) -> Beats {
+        self.pattern
             .get()?
             .data()
             .last()
-            .map_or_default(|x| x.offset + x.len))
+            .map_or_default(|x| x.offset + x.len)
     }
 
-    pub fn rep_count(&self) -> NonZeroUsize {
+    pub const fn rep_count(&self) -> NonZeroUsize {
         self.rep_count
     }
 
@@ -280,6 +273,7 @@ impl NoiseSound {
 
     /// `reset_sound` is set to `false` initially,
     /// if set to true, resets the sound block to an `Undefined` type
+    #[apply(fallible!)]
     pub fn handle_event(
         &mut self,
         event: &AppEvent,
@@ -287,8 +281,8 @@ impl NoiseSound {
         sequencer: &Sequencer,
         reset_sound: &mut bool,
         offset: Beats,
-    ) -> AppResult<()> {
-        Ok(match *event {
+    ) {
+        match *event {
             AppEvent::Volume(to) => ctx.register_action(EditorAction::SetVolume {
                 from: replace(&mut self.volume, to),
                 to,
@@ -390,6 +384,6 @@ impl NoiseSound {
                         .handle_event(event, ctx, sequencer, || (offset, self.rep_count))?;
                 }
             }
-        })
+        }
     }
 }

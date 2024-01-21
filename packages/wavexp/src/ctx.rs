@@ -11,8 +11,9 @@ use crate::{
 };
 use wavexp_utils::{
     cell::Shared,
-    ext::{ArrayExt, OptionExt},
-    AppError, AppResult, Point, R32, R64,
+    error::{AppError, Result},
+    ext::ArrayExt,
+    Point, R32, R64,
 };
 use web_sys::{AudioBuffer, Event, KeyboardEvent, MouseEvent, PointerEvent, UiEvent};
 
@@ -353,8 +354,7 @@ impl EditorAction {
                 Self::DragPlane {
                     editor_id: eid_1,
                     offset_delta: (off_1 + off_2)
-                        .to_app_result()
-                        .map_err(|e| (a.clone(), b.clone(), e))?,
+                        .ok_or_else(|| (a.clone(), b.clone(), AppError::on_none()))?,
                     scale_delta: s_1.zip(s_2, |d1, d2| d1 * d2),
                 },
                 None,
@@ -388,7 +388,7 @@ impl<'app, 'editor> Deref for ContextRef<'app, 'editor> {
 }
 
 impl<'app, 'editor> ContextMut<'app, 'editor> {
-    pub fn register_action(&mut self, action: EditorAction) -> AppResult<()> {
+    pub fn register_action(&mut self, action: EditorAction) -> Result<()> {
         self.editor.register_action(self.app, action)
     }
 

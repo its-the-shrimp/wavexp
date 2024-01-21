@@ -5,6 +5,7 @@ use crate::{
     sound::{AudioInput, Beats},
     visual::{GraphEditor, GraphPoint},
 };
+use macro_rules_attribute::apply;
 use std::{
     marker::PhantomData,
     ops::{Add, Deref, DerefMut, Div, Mul},
@@ -12,8 +13,9 @@ use std::{
 use wavexp_utils::{
     cell::Shared,
     default,
-    ext::{BoolExt, HtmlCanvasExt, HtmlElementExt, OptionExt},
-    r64, AppError, AppResult, AppResultUtils, Pipe, Point, R64,
+    error::AppError,
+    ext::{BoolExt, HtmlCanvasExt, HtmlElementExt, ResultExt},
+    fallible, r64, Pipe, Point, R64,
 };
 use web_sys::{Element, HtmlCanvasElement, KeyboardEvent, MouseEvent, PointerEvent};
 use yew::{
@@ -58,41 +60,45 @@ impl Add<&KeyboardEvent> for Cursor {
 
 impl TryFrom<&MouseEvent> for Cursor {
     type Error = AppError;
-    fn try_from(value: &MouseEvent) -> Result<Self, Self::Error> {
-        let canvas: HtmlCanvasElement = value.target_dyn_into().to_app_result()?;
+
+    #[apply(fallible!)]
+    fn try_from(value: &MouseEvent) -> Self {
+        let canvas: HtmlCanvasElement = value.target_dyn_into()?;
         let point = Point {
             x: value.offset_x(),
             y: value.offset_y(),
         }
         .normalise(canvas.client_rect(), canvas.rect());
-        Ok(Self {
+        Self {
             point,
             buttons: Buttons {
                 left: value.buttons() & 1 == 1,
                 shift: value.shift_key(),
                 meta: value.meta_key(),
             },
-        })
+        }
     }
 }
 
 impl TryFrom<&PointerEvent> for Cursor {
     type Error = AppError;
-    fn try_from(value: &PointerEvent) -> Result<Self, Self::Error> {
-        let canvas: HtmlCanvasElement = value.target_dyn_into().to_app_result()?;
+
+    #[apply(fallible!)]
+    fn try_from(value: &PointerEvent) -> Self {
+        let canvas: HtmlCanvasElement = value.target_dyn_into()?;
         let point = Point {
             x: value.offset_x(),
             y: value.offset_y(),
         }
         .normalise(canvas.client_rect(), canvas.rect());
-        Ok(Self {
+        Self {
             point,
             buttons: Buttons {
                 left: value.buttons() & 1 == 1,
                 shift: value.shift_key(),
                 meta: value.meta_key(),
             },
-        })
+        }
     }
 }
 
@@ -139,7 +145,7 @@ impl Component for Slider {
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        let res: AppResult<_> = try {
+        fallible! {
             let SliderProps {
                 setter,
                 min,
@@ -150,13 +156,7 @@ impl Component for Slider {
             match &msg {
                 Cmd::Drag(e) => {
                     self.value = R64::from(e.movement_y())
-                        .div(
-                            -self
-                                .target
-                                .cast::<Element>()
-                                .to_app_result()?
-                                .client_height(),
-                        )
+                        .div(-self.target.cast::<Element>()?.client_height())
                         .div(e.shift_key().choose(400u16, 2))
                         .mul(max - min)
                         .add(self.value)
@@ -165,16 +165,14 @@ impl Component for Slider {
 
                 Cmd::Focus(e) => {
                     self.target
-                        .cast::<Element>()
-                        .to_app_result()?
+                        .cast::<Element>()?
                         .set_pointer_capture(e.pointer_id())?;
                     self.old_value = *self.value;
                 }
 
                 Cmd::Unfocus(e) => {
                     self.target
-                        .cast::<Element>()
-                        .to_app_result()?
+                        .cast::<Element>()?
                         .release_pointer_capture(e.pointer_id())?;
                     if self.old_value != *self.value {
                         setter.emit(self.value)
@@ -183,8 +181,9 @@ impl Component for Slider {
                 }
             }
             true
-        };
-        res.report().unwrap_or(false)
+        }
+        .report()
+        .unwrap_or(false)
     }
 
     fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
@@ -264,30 +263,23 @@ impl Component for Switch {
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        let res: AppResult<_> = try {
+        fallible! {
             let SwitchProps {
                 options, setter, ..
             } = ctx.props();
             match msg {
                 Cmd::Drag(e) => {
                     self.value = R64::from(e.movement_y())
-                        .div(
-                            self.target
-                                .cast::<Element>()
-                                .to_app_result()?
-                                .client_height(),
-                        )
+                        .div(self.target.cast::<Element>()?.client_height())
                         .mul(-4i8)
                         .div(options.len())
                         .add(self.value)
-                        .rem_euclid(options.len().into())
-                        .to_app_result()?
+                        .rem_euclid(options.len().into())?
                 }
 
                 Cmd::Focus(e) => {
                     self.target
-                        .cast::<Element>()
-                        .to_app_result()?
+                        .cast::<Element>()?
                         .set_pointer_capture(e.pointer_id())?;
                     self.focused = true;
                     self.old_value = self.value.into();
@@ -295,8 +287,7 @@ impl Component for Switch {
 
                 Cmd::Unfocus(e) => {
                     self.target
-                        .cast::<Element>()
-                        .to_app_result()?
+                        .cast::<Element>()?
                         .release_pointer_capture(e.pointer_id())?;
                     let value = self.value.into();
                     if self.old_value != value {
@@ -306,8 +297,9 @@ impl Component for Switch {
                 }
             }
             true
-        };
-        res.report().unwrap_or(false)
+        }
+        .report()
+        .unwrap_or(false)
     }
 
     fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
@@ -497,20 +489,14 @@ impl Component for Counter {
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        let res: AppResult<_> = try {
+        fallible! {
             let CounterProps {
                 setter, coef, min, ..
             } = ctx.props();
             match msg {
                 Cmd::Drag(e) => {
                     self.value = R64::from(e.movement_y())
-                        .div(
-                            -self
-                                .target
-                                .cast::<Element>()
-                                .to_app_result()?
-                                .client_height(),
-                        )
+                        .div(-self.target.cast::<Element>()?.client_height())
                         .mul(coef)
                         .pipe_if(e.shift_key(), |x| x / 200)
                         .add(self.value)
@@ -519,16 +505,14 @@ impl Component for Counter {
 
                 Cmd::Focus(e) => {
                     self.target
-                        .cast::<Element>()
-                        .to_app_result()?
+                        .cast::<Element>()?
                         .set_pointer_capture(e.pointer_id())?;
                     self.old_value = *self.value;
                 }
 
                 Cmd::Unfocus(e) => {
                     self.target
-                        .cast::<Element>()
-                        .to_app_result()?
+                        .cast::<Element>()?
                         .release_pointer_capture(e.pointer_id())?;
                     if self.old_value != *self.value {
                         setter.emit(self.value)
@@ -537,8 +521,9 @@ impl Component for Counter {
                 }
             }
             true
-        };
-        res.report().unwrap_or(false)
+        }
+        .report()
+        .unwrap_or(false)
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {

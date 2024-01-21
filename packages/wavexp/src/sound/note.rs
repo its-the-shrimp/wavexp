@@ -5,6 +5,7 @@ use crate::{
     sound::{Beats, FromBeats, Note, Secs},
     visual::{GraphEditor, GraphPoint},
 };
+use macro_rules_attribute::apply;
 use std::{
     cmp::Ordering,
     mem::replace,
@@ -15,8 +16,9 @@ use wasm_bindgen::JsCast;
 use wavexp_utils::{
     cell::Shared,
     default,
-    ext::{ArrayExt, OptionExt, RangeExt},
-    js_function, r32, r64, AppError, AppResult, AppResultUtils, ArrayFrom, R32, R64,
+    error::{AppError, Result},
+    ext::{ArrayExt, OptionExt, RangeExt, ResultExt},
+    fallible, js_function, r32, r64, ArrayFrom, R32, R64,
 };
 use web_sys::{AudioNode, Path2d};
 use yew::{html, Html};
@@ -84,61 +86,60 @@ impl GraphPoint for NoteBlock {
         [self.offset, self.value.recip().index().into()]
     }
 
-    fn move_point(point: Result<&mut Self, &mut [R64; 2]>, delta: [R64; 2], meta: bool) {
-        match point {
-            Ok(NoteBlock { offset, value, len }) => {
-                if meta {
-                    *len += delta[0];
-                } else {
-                    *offset += delta[0];
-                    *offset = R64::ZERO.max(*offset);
-                }
-                *value -= delta[1].into();
-            }
-            Err(point) => {
-                if !meta {
-                    point[0] += delta[0];
-                }
-                point[1] += delta[1];
-            }
+    fn r#move(&mut self, delta: [R64; 2], meta: bool) {
+        if meta {
+            self.len += delta[0];
+        } else {
+            self.offset += delta[0];
+            self.offset = R64::ZERO.max(self.offset);
         }
+        self.value -= delta[1].into();
     }
 
+    fn move_point(point: &mut [R64; 2], delta: [R64; 2], meta: bool) {
+        if !meta {
+            point[0] += delta[0];
+        }
+        point[1] += delta[1];
+    }
+
+    #[apply(fallible!)]
     fn in_hitbox(
         &self,
         area: &[RangeInclusive<R64>; 2],
         _: ContextRef,
         _: &Sequencer,
         _: Self::VisualContext,
-    ) -> AppResult<bool> {
-        Ok(area[1]
+    ) -> bool {
+        area[1]
             .clone()
             .map_bounds(usize::from)
             .contains(&self.value.recip().index())
-            && (self.offset..=self.offset + self.len).overlap(&area[0]))
+            && (self.offset..=self.offset + self.len).overlap(&area[0])
     }
 
     fn fmt_loc(loc: [R64; 2]) -> String {
         format!("{:.3}, {}", loc[0], Note::from_index(loc[1].into()).recip())
     }
 
+    #[apply(fallible!)]
     fn on_move(
         editor: &mut GraphEditor<Self>,
         ctx: ContextMut,
         _: Cursor,
         _: [R64; 2],
         point: Option<usize>,
-    ) -> AppResult<()> {
+    ) {
         let Some(last) = editor.data().len().checked_sub(1) else {
             return Ok(());
         };
-        Ok(
-            if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
-                ctx.emit_event(AppEvent::RedrawEditorPlane)
-            },
-        )
+
+        if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
+            ctx.emit_event(AppEvent::RedrawEditorPlane)
+        }
     }
 
+    #[apply(fallible!)]
     fn on_redraw(
         editor: &mut GraphEditor<Self>,
         ctx: ContextRef,
@@ -147,16 +148,16 @@ impl GraphPoint for NoteBlock {
         solid: &Path2d,
         _: &Path2d,
         (sb_offset, n_reps): Self::VisualContext,
-    ) -> AppResult<()> {
+    ) {
         let step = &canvas_size.div(&editor.scale());
         let offset = &R64::array_from(editor.offset());
-        for block in editor.data().iter() {
+        for block in editor.data() {
             let [x, y] = block.loc().mul(step).sub(offset);
             solid.rect(*x, *y, *block.len * *step[0], *step[1]);
         }
-
         let total_len = editor.data().last().map_or_default(|x| x.offset + x.len);
-        Ok(if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
+
+        if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
             let progress = (ctx.frame() - start).secs_to_beats(sequencer.bps()) - sb_offset;
             if progress < total_len * n_reps {
                 editor.force_redraw();
@@ -164,7 +165,7 @@ impl GraphPoint for NoteBlock {
                 solid.move_to(*x, 0.0);
                 solid.line_to(*x, *canvas_size[1]);
             }
-        })
+        }
     }
 }
 
@@ -196,17 +197,7 @@ impl Default for NoteSound {
 impl NoteSound {
     pub const NAME: &'static str = "Simple Wave";
 
-    pub fn prepare(&self) -> AppResult<()> {
-        Ok(())
-    }
-
-    pub fn play(
-        &self,
-        plug: &AudioNode,
-        now: Secs,
-        self_offset: Secs,
-        bps: Beats,
-    ) -> AppResult<()> {
+    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> Result<()> {
         let pat = self.pattern.get()?;
         let Some(last) = pat.data().last() else {
             return Ok(());
@@ -215,7 +206,7 @@ impl NoteSound {
         let ctx = plug.context();
 
         Ok(for rep in 0..self.rep_count.get() {
-            for NoteBlock { offset, value, len } in pat.data().iter() {
+            for NoteBlock { offset, value, len } in pat.data() {
                 let block = ctx.create_gain()?;
                 let gain = block.gain();
                 let start = now + self_offset + pat_len * rep + offset.to_secs(bps);
@@ -245,7 +236,7 @@ impl NoteSound {
         })
     }
 
-    pub fn len(&self) -> AppResult<Beats> {
+    pub fn len(&self) -> Result<Beats> {
         Ok(self
             .pattern
             .get()?
@@ -254,7 +245,7 @@ impl NoteSound {
             .map_or_default(|x| x.offset + x.len))
     }
 
-    pub fn rep_count(&self) -> NonZeroUsize {
+    pub const fn rep_count(&self) -> NonZeroUsize {
         self.rep_count
     }
 
@@ -277,7 +268,7 @@ impl NoteSound {
             1 /* Envelope */ => html!{<div id="inputs">
                 <Counter key="note-att"
                 setter={emitter.reform(AppEvent::Attack)}
-                name="Noise Attack Time" postfix="Beats"
+                name="Note Attack Time" postfix="Beats"
                 initial={self.attack}/>
                 <Counter key="note-dec"
                 setter={emitter.reform(AppEvent::Decay)}
@@ -310,7 +301,7 @@ impl NoteSound {
         sequencer: &Sequencer,
         reset_sound: &mut bool,
         offset: Beats,
-    ) -> AppResult<()> {
+    ) -> Result<()> {
         Ok(match *event {
             AppEvent::Volume(to) => ctx.register_action(EditorAction::SetVolume {
                 from: replace(&mut self.volume, to),
