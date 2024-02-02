@@ -7,6 +7,10 @@
 #![feature(try_trait_v2)]
 #![feature(try_trait_v2_residual)]
 #![feature(unwrap_infallible)]
+#![feature(array_try_from_fn)]
+#![feature(unchecked_math)]
+#![feature(const_trait_impl)]
+#![feature(associated_type_defaults)]
 
 extern crate self as wavexp_utils;
 
@@ -14,30 +18,29 @@ pub mod cell;
 pub mod error;
 pub mod ext;
 pub mod iter;
+pub mod range;
 
-use error::{report_err, AppError, Result};
+use error::{AppError, Result};
+use ext::add;
 pub use js_sys;
 use std::{
+    array::from_fn,
     cmp::Ordering,
     fmt::{self, Debug, Display, Formatter},
     iter::Sum,
-    mem::{forget, transmute_copy, MaybeUninit},
+    mem::ManuallyDrop,
     num::{
         NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroIsize, NonZeroU16, NonZeroU32,
         NonZeroU64, NonZeroU8, NonZeroUsize, TryFromIntError,
     },
     ops::{
-        Add, AddAssign, Deref, Div, DivAssign, Mul, MulAssign, Neg, RangeBounds, Rem, RemAssign,
-        Sub, SubAssign,
+        Add, AddAssign, Deref, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub, SubAssign,
     },
+    ptr,
 };
 pub use wasm_bindgen;
 use web_sys::{Document, Window};
 use yew::{html::IntoPropValue, AttrValue};
-
-pub fn default<T: Default>() -> T {
-    T::default()
-}
 
 #[repr(transparent)]
 pub struct Alias<'inner, T: ?Sized>(pub &'inner T);
@@ -48,41 +51,6 @@ impl<'inner, T: ?Sized + Deref> Deref for Alias<'inner, T> {
         self.0.deref()
     }
 }
-
-pub trait Check: Sized {
-    fn check(self, f: impl FnOnce(&Self) -> bool) -> Result<Self, Self> {
-        if f(&self) {
-            Ok(self)
-        } else {
-            Err(self)
-        }
-    }
-
-    fn check_in<R>(self, range: R) -> Result<Self, Self>
-    where
-        Self: PartialOrd,
-        R: RangeBounds<Self>,
-    {
-        if range.contains(&self) {
-            Ok(self)
-        } else {
-            Err(self)
-        }
-    }
-
-    fn check_not_in<R>(self, range: R) -> Result<Self, Self>
-    where
-        Self: PartialOrd,
-        R: RangeBounds<Self>,
-    {
-        if !range.contains(&self) {
-            Ok(self)
-        } else {
-            Err(self)
-        }
-    }
-}
-impl<T> Check for T {}
 
 pub trait Tee: Sized {
     fn tee(self, f: impl FnOnce(&Self)) -> Self {
@@ -98,6 +66,7 @@ pub trait Tee: Sized {
         self
     }
 }
+
 impl<T> Tee for T {}
 
 /// like `ToString`, but for `AttrValue`
@@ -152,40 +121,17 @@ where
     }
 }
 
-pub trait FlippedArray<T, const OUTER: usize, const INNER: usize> {
-    fn flipped(self) -> [[T; OUTER]; INNER];
+pub trait TransposedArray<T, const OUTER: usize, const INNER: usize> {
+    fn transposed(self) -> [[T; OUTER]; INNER];
 }
 
-impl<T, const OUTER: usize, const INNER: usize> FlippedArray<T, OUTER, INNER>
+impl<T, const OUTER: usize, const INNER: usize> TransposedArray<T, OUTER, INNER>
     for [[T; INNER]; OUTER]
 {
-    fn flipped(mut self) -> [[T; OUTER]; INNER] {
-        unsafe {
-            if OUTER == INNER {
-                let mut src = self.as_mut_ptr() as *mut T;
-                for outer in 0..OUTER {
-                    src = src.add(outer + 1);
-                    for inner in outer + 1..INNER {
-                        src.swap(src.add((inner - outer) * (INNER - 1)));
-                        src = src.add(1);
-                    }
-                }
-                transmute_copy(&self)
-            } else {
-                let mut new_self: MaybeUninit<_> = MaybeUninit::uninit();
-                let mut res = new_self.as_mut_ptr() as *mut T;
-                for inner in 0..INNER {
-                    let mut src = (self.as_mut_ptr() as *mut T).add(inner);
-                    for _ in 0..OUTER {
-                        res.copy_from(src, 1);
-                        res = res.add(1);
-                        src = src.add(INNER);
-                    }
-                }
-                forget(self);
-                new_self.assume_init()
-            }
-        }
+    // [[1, 2], [4, 5], [7, 8]] => [[1, 4, 7], [2, 5, 8]]
+    fn transposed(self) -> [[T; OUTER]; INNER] {
+        let original = ManuallyDrop::new(self);
+        from_fn(|i| from_fn(|j| unsafe { ptr::read(&original[j][i]) }))
     }
 }
 
@@ -280,17 +226,6 @@ macro_rules! js_log {
 }
 
 #[macro_export]
-macro_rules! js_assert {
-    ($($s:tt)+) => {
-        if !$($s)+ {
-            Err($crate::wasm_bindgen::JsValue::from($crate::js_sys::Error::new(stringify!($($s)+))))
-        } else {
-            Ok(())
-        }
-    };
-}
-
-#[macro_export]
 macro_rules! eval_once {
     ($t:ty : $e:expr) => {{
         static RES: $crate::cell::WasmCell<std::cell::OnceCell<$t>> =
@@ -314,29 +249,7 @@ pub fn document() -> Document {
 
 /// returns precise current time in seconds.
 pub fn now() -> Option<R64> {
-    window()
-        .performance()
-        .map(|p| unsafe { R64::new_unchecked(p.now()) } / 1000)
-}
-
-pub trait LooseEq<O = Self> {
-    fn loose_eq(&self, value: Self, off: O) -> bool;
-    fn loose_ne(&self, value: Self, off: O) -> bool
-    where
-        Self: Sized,
-    {
-        !self.loose_eq(value, off)
-    }
-}
-
-impl<O, T> LooseEq<O> for T
-where
-    O: Copy,
-    T: PartialOrd + Add<O, Output = Self> + Sub<O, Output = Self> + Copy,
-{
-    fn loose_eq(&self, value: Self, off: O) -> bool {
-        (value - off..value + off).contains(self)
-    }
+    Some(R64::new(window().performance()?.now())? / 1000)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -360,12 +273,6 @@ where
 {
     fn array_from(x: Point) -> [Self; 2] {
         [x.x.into(), x.y.into()]
-    }
-}
-
-impl LooseEq for Point {
-    fn loose_eq(&self, value: Self, off: Self) -> bool {
-        self.x.loose_eq(value.x, off.x) && self.y.loose_eq(value.y, off.y)
     }
 }
 
@@ -430,14 +337,25 @@ impl Point {
         }
     }
 
-    pub fn normalise(mut self, old_space: Rect, new_space: Rect) -> Self {
-        self.y = (((self.y - old_space.bottom()) as f32 / old_space.height() as f32)
-            * new_space.height() as f32) as i32
-            + new_space.bottom();
-        self.x = (((self.x - old_space.left()) as f32 / old_space.width() as f32)
-            * new_space.width() as f32) as i32
-            + new_space.left();
-        self
+    pub fn normalise(self, old_space: Rect, new_space: Rect) -> Option<Self> {
+        Some(Self {
+            x: self
+                .x
+                .checked_sub(old_space.left())?
+                .cast::<f32>()
+                .div(old_space.width()? as f32)
+                .mul(new_space.width()? as f32)
+                .cast::<i32>()
+                .checked_add(new_space.left())?,
+            y: self
+                .y
+                .checked_sub(old_space.bottom())?
+                .cast::<f32>()
+                .div(old_space.height()? as f32)
+                .mul(new_space.height()? as f32)
+                .cast::<i32>()
+                .checked_add(new_space.bottom())?,
+        })
     }
 
     pub fn map<T>(self, mut f: impl FnMut(i32) -> T) -> [T; 2] {
@@ -455,40 +373,116 @@ impl Rect {
     const fn bottom(&self) -> i32 {
         self.1.y
     }
-    const fn width(&self) -> i32 {
-        self.1.x - self.0.x
+    const fn width(&self) -> Option<i32> {
+        self.1.x.checked_sub(self.0.x)
     }
-    const fn height(&self) -> i32 {
-        self.1.y - self.0.y
+    const fn height(&self) -> Option<i32> {
+        self.1.y.checked_sub(self.0.y)
     }
 }
 
-pub trait RoundTo {
-    fn floor_to(self, step: Self) -> Self;
-    fn ceil_to(self, step: Self) -> Self;
+pub trait RoundTo: Sized {
+    type Output = Self;
+    fn floor_to(self, step: Self) -> Self::Output;
+    fn ceil_to(self, step: Self) -> Self::Output;
 }
 
 macro_rules! round_to_4ints {
-    ($($int:ty)+) => {$(
-        impl RoundTo for $int {
-            fn floor_to(self, step: Self) -> Self {
-                self - self % step
-            }
+    ($($int:ty)+) => {
+        $(
+            impl RoundTo for $int {
+                type Output = Option<$int>;
 
-            fn ceil_to(self, step: Self) -> Self {
-                step - (self - 1) % step + self - 1
+                fn floor_to(self, step: Self) -> Self::Output {
+                    self.checked_sub(self)?.checked_rem(step)
+                }
+
+                fn ceil_to(self, step: Self) -> Self::Output {
+                    let self_pred = self.checked_sub(1)?;
+                    step.checked_sub(self_pred.checked_rem(step)?)?.checked_add(self_pred)
+                }
             }
-        }
-    )+};
+        )+
+    };
 }
 
 round_to_4ints!(i8 u8 i16 u16 i32 u32 isize usize i64 u64);
+
+/// Exists for better chainability; "als" is German for "as"
+pub trait Cast: Sized {
+    #[allow(private_bounds)]
+    fn cast<R: ThruAs<Self>>(self) -> R {
+        R::thru_as(self)
+    }
+}
+
+impl<T> Cast for T {}
+
+/// impl detail
+trait ThruAs<Src> {
+    fn thru_as(src: Src) -> Self;
+}
+
+macro_rules! impl_als {
+    ($src:ty as int) => {
+        impl_als!($src as u8);
+        impl_als!($src as i8);
+        impl_als!($src as u16);
+        impl_als!($src as i16);
+        impl_als!($src as u32);
+        impl_als!($src as i32);
+        impl_als!($src as usize);
+        impl_als!($src as isize);
+        impl_als!($src as u64);
+        impl_als!($src as i64);
+    };
+
+    ($src:ty as float) => {
+        impl_als!($src as f32);
+        impl_als!($src as f64);
+    };
+
+    ($src:ty as $res:ty) => {
+        impl ThruAs<$src> for $res {
+            fn thru_as(src: $src) -> Self {
+                src as Self
+            }
+        }
+    };
+}
+
+impl_als!(u8 as float);
+impl_als!(u16 as float);
+impl_als!(u32 as float);
+impl_als!(usize as float);
+impl_als!(u64 as float);
+impl_als!(i8 as float);
+impl_als!(i16 as float);
+impl_als!(i32 as float);
+impl_als!(isize as float);
+impl_als!(i64 as float);
+impl_als!(u8 as int);
+impl_als!(u16 as int);
+impl_als!(u32 as int);
+impl_als!(usize as int);
+impl_als!(u64 as int);
+impl_als!(i8 as int);
+impl_als!(i16 as int);
+impl_als!(i32 as int);
+impl_als!(isize as int);
+impl_als!(i64 as int);
+impl_als!(f32 as float);
+impl_als!(f64 as float);
+impl_als!(f32 as int);
+impl_als!(f64 as int);
 
 macro_rules! real_from_unsigned_ints_impl {
     ($real:ty { $float:ty } : $($nonzero:ty{ $int:ty }),+) => {
         $(
             impl From<$int> for $real {
-                fn from(x: $int) -> Self {Self(x as $float)}
+                fn from(x: $int) -> Self {
+                    Self(x as $float)
+                }
             }
 
             impl IntoPropValue<$real> for $int {
@@ -620,10 +614,12 @@ macro_rules! real_from_signed_ints_impl {
 }
 
 macro_rules! impl_op {
-    ($op:ident :: $method:ident ($self:ident : $real:ty , $rhs:ident : $rhs_ty:ty) -> $out:ty { $($s:stmt);+ }) => {
+    {
+        fn $op:ident::$method:ident($self:ident: $real:ty, $rhs:ident: $rhs_ty:ty) -> $out:ty $body:block
+    } => {
         impl $op<$rhs_ty> for $real {
             type Output = $out;
-            fn $method($self, $rhs: $rhs_ty) -> Self::Output { $($s)+ }
+            fn $method($self, $rhs: $rhs_ty) -> Self::Output $body
         }
 
         impl $op<&$rhs_ty> for $real {
@@ -644,9 +640,11 @@ macro_rules! impl_op {
 }
 
 macro_rules! impl_assign_op {
-    ($op:ident :: $method:ident ($self:ident : $real:ty , $rhs:ident : $rhs_ty:ty) { $($s:stmt);+ }) => {
+    {
+        fn $op:ident::$method:ident($self:ident: $real:ty, $rhs:ident: $rhs_ty:ty) $body:block
+    } => {
         impl $op<$rhs_ty> for $real {
-            fn $method(&mut $self, $rhs: $rhs_ty) { $($s)+ }
+            fn $method(&mut $self, $rhs: $rhs_ty) $body
         }
 
         impl $op<&$rhs_ty> for $real {
@@ -658,17 +656,18 @@ macro_rules! impl_assign_op {
 macro_rules! real_float_operator_impl {
     ($real:ty { $float:ty } , $other_float:ty : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
         $(
-            impl_op!($op::$method(self: $real, rhs: $other_float) -> $real {
-                let res = self.0.$method(rhs as $float);
-                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method)))); self}
-                else {Self(res)}
-            });
+            impl_op! {
+                fn $op::$method(self: $real, rhs: $other_float) -> $real {
+                    Self::new(self.0.$method(rhs as $float))
+                        .unwrap_or_else(|| <$real>::INFINITY.copysign(self))
+                }
+            }
 
-            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $other_float) {
-                let res = self.0.$method(rhs as $float);
-                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))))}
-                else {self.0 = res}
-            });
+            impl_assign_op! {
+                fn $assign_op::$assign_method(self: $real, rhs: $other_float) {
+                    *self = self.$method(rhs)
+                }
+            }
         )+
     }
 }
@@ -676,45 +675,58 @@ macro_rules! real_float_operator_impl {
 macro_rules! real_int_operator_impl {
     (infallible $op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident for $real:ty { $float:ty } and $($nonzero:ty { $int:ty } ),+) => {
         $(
-            impl_op!($op::$method(self: $real, rhs: $int) -> $real {
-                Self(self.0.$method(rhs as $float))
-            });
+            impl_op! {
+                fn $op::$method(self: $real, rhs: $int) -> $real {
+                    Self(self.0.$method(rhs as $float))
+                }
+            }
 
-            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $int) {
-                self.0.$assign_method(rhs as $float)
-            });
+            impl_assign_op! {
+                fn $assign_op::$assign_method(self: $real, rhs: $int) {
+                    self.0.$assign_method(rhs as $float)
+                }
+            }
 
-            impl_op!($op::$method(self: $real, rhs: $nonzero) -> $real {
-                Self(self.0.$method(rhs.get() as $float))
-            });
+            impl_op! {
+                fn $op::$method(self: $real, rhs: $nonzero) -> $real {
+                    Self(self.0.$method(rhs.get() as $float))
+                }
+            }
 
-            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $nonzero) {
-                self.0.$assign_method(rhs.get() as $float)
-            });
+            impl_assign_op! {
+                fn $assign_op::$assign_method(self: $real, rhs: $nonzero) {
+                    self.0.$assign_method(rhs.get() as $float)
+                }
+            }
         )+
     };
 
     (fallible $op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident for $real:ty { $float:ty } and $($nonzero:ty { $int:ty } ),+) => {
         $(
-            impl_op!($op::$method(self: $real, rhs: $int) -> $real {
-                let res = self.0.$method(rhs as $float);
-                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method)))); self}
-                else {Self(res)}
-            });
+            impl_op! {
+                fn $op::$method(self: $real, rhs: $int) -> $real {
+                    Self::new(self.0.$method(rhs as $float))
+                        .unwrap_or_else(|| <$real>::INFINITY.copysign(self))
+                }
+            }
 
-            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $int) {
-                let res = self.0.$method(rhs as $float);
-                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))))}
-                else {self.0 = res}
-            });
+            impl_assign_op! {
+                fn $assign_op::$assign_method(self: $real, rhs: $int) {
+                    *self = self.$method(rhs)
+                }
+            }
 
-            impl_op!($op::$method(self: $real, rhs: $nonzero) -> $real {
-                Self(self.0.$method(rhs.get() as $float))
-            });
+            impl_op! {
+                fn $op::$method(self: $real, rhs: $nonzero) -> $real {
+                    self.$method(rhs.get())
+                }
+            }
 
-            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $nonzero) {
-                self.0.$assign_method(rhs.get() as $float)
-            });
+            impl_assign_op! {
+                fn $assign_op::$assign_method(self: $real, rhs: $nonzero) {
+                    *self = self.$method(rhs)
+                }
+            }
         )+
     };
 }
@@ -722,17 +734,18 @@ macro_rules! real_int_operator_impl {
 macro_rules! real_real_operator_impl {
     ($real:ty { $float:ty } , $other_real:ty { $other_float:ty } : $($op:ident :: $method:ident | $assign_op:ident :: $assign_method:ident),+) => {
         $(
-            impl_op!($op::$method(self: $real, rhs: $other_real) -> $real {
-                let res = self.0.$method(rhs.0 as $float);
-                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method)))); self}
-                else {Self(res)}
-            });
+            impl_op! {
+                fn $op::$method(self: $real, rhs: $other_real) -> $real {
+                    Self::new(self.0.$method(rhs.0 as $float))
+                        .unwrap_or_else(|| <$real>::INFINITY.copysign(self))
+                }
+            }
 
-            impl_assign_op!($assign_op::$assign_method(self: $real, rhs: $other_real) {
-                let res = self.0.$method(rhs.0 as $float);
-                if res.is_nan() {report_err(js_sys::Error::new(&format!("{self} {} {rhs} = NaN", stringify!($method))))}
-                else {self.0 = res}
-            });
+            impl_assign_op! {
+                fn $assign_op::$assign_method(self: $real, rhs: $other_real) {
+                    *self = self.$method(rhs)
+                }
+            }
         )+
     }
 }
@@ -744,7 +757,9 @@ macro_rules! real_impl {
 
         impl Deref for $real {
             type Target = $float;
-            fn deref(&self) -> &Self::Target {&self.0}
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
         }
 
         impl PartialEq<$float> for $real {
@@ -777,16 +792,20 @@ macro_rules! real_impl {
         impl TryFrom<$float> for $real {
             type Error = AppError;
             fn try_from(x: $float) -> Result<Self, Self::Error> {
-                Self::new(x).ok_or(app_error!("the value is NaN"))
+                Self::new(x).ok_or_else(|| app_error!("the value is NaN"))
             }
         }
 
         impl From<$other_real> for $real {
-            fn from(x: $other_real) -> Self {Self(x.0 as $float)}
+            fn from(x: $other_real) -> Self {
+                Self(x.0 as $float)
+            }
         }
 
         impl IntoPropValue<$other_real> for $real {
-            fn into_prop_value(self) -> $other_real {self.into()}
+            fn into_prop_value(self) -> $other_real {
+                self.into()
+            }
         }
 
         impl Display for $real {
@@ -797,71 +816,120 @@ macro_rules! real_impl {
 
         impl Neg for $real {
             type Output = Self;
-            fn neg(self) -> Self::Output {Self(-self.0)}
+            fn neg(self) -> Self::Output {
+                Self(-self.0)
+            }
         }
 
         impl RoundTo for $real {
             fn floor_to(self, step: Self) -> Self {
-                if self.is_infinite() || step == 0 { return self }
+                if self.is_infinite() || step == 0 {
+                    return self;
+                }
                 Self(*self - *self % *step)
             }
 
             fn ceil_to(self, step: Self) -> Self {
-                if self.is_infinite() || step == 0 { return self }
+                if self.is_infinite() || step == 0 {
+                    return self;
+                }
                 let prev = *self - 1.0;
                 Self(*step - prev % *step + prev)
             }
         }
 
-        impl Sum for $real {
-            fn sum<I>(iter: I) -> Self where I: Iterator<Item=$real> {
-                iter.fold(Self(0.0), |s, n| s + n)
+        impl Sum<$real> for $real {
+            fn sum<I>(iter: I) -> Self
+            where
+                I: Iterator<Item = $real>,
+            {
+                iter.fold($real(0.0), add)
             }
         }
 
         impl<'item> Sum<&'item $real> for $real {
-            fn sum<I>(iter: I) -> Self where I: Iterator<Item=&'item $real> {
-                iter.fold(Self(0.0), |s, n| s + n)
+            fn sum<I>(iter: I) -> Self
+            where
+                I: Iterator<Item = &'item $real>,
+            {
+                iter.fold($real(0.0), add)
             }
         }
 
-        real_from_unsigned_ints_impl!($real{$float}:
-            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64});
-        real_from_signed_ints_impl!($real{$float}:
-            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
+        real_from_unsigned_ints_impl! {
+            $real{$float}:
+            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64}
+        }
+        real_from_signed_ints_impl! {
+            $real{$float}:
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64}
+        }
 
-        real_int_operator_impl!(infallible Add::add|AddAssign::add_assign for $real{$float} and
+        real_int_operator_impl! {
+            infallible Add::add | AddAssign::add_assign for $real{$float} and
             NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
-            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
-        real_int_operator_impl!(infallible Sub::sub|SubAssign::sub_assign for $real{$float} and
-            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
-            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
-        real_int_operator_impl!(fallible Mul::mul|MulAssign::mul_assign for $real{$float} and
-            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
-            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
-        real_int_operator_impl!(fallible Div::div|DivAssign::div_assign for $real{$float} and
-            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
-            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
-        real_int_operator_impl!(fallible Rem::rem|RemAssign::rem_assign for $real{$float} and
-            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
-            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64});
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64}
+        }
 
-        real_float_operator_impl!($real{$float}, $float:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_float_operator_impl!($real{$float}, $other_float:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_real_operator_impl!($real{$float}, $real{$float}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
-        real_real_operator_impl!($real{$float}, $other_real{$other_float}:
-            Add::add|AddAssign::add_assign, Sub::sub|SubAssign::sub_assign,
-            Mul::mul|MulAssign::mul_assign, Div::div|DivAssign::div_assign,
-            Rem::rem|RemAssign::rem_assign);
+        real_int_operator_impl! {
+            infallible Sub::sub | SubAssign::sub_assign for $real{$float} and
+            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64}
+        }
+
+        real_int_operator_impl! {
+            fallible Mul::mul | MulAssign::mul_assign for $real{$float} and
+            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64}
+        }
+
+        real_int_operator_impl! {
+            fallible Div::div | DivAssign::div_assign for $real{$float} and
+            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64}
+        }
+
+        real_int_operator_impl! {
+            fallible Rem::rem | RemAssign::rem_assign for $real{$float} and
+            NonZeroU8{u8}, NonZeroU16{u16}, NonZeroU32{u32}, NonZeroUsize{usize}, NonZeroU64{u64},
+            NonZeroI8{i8}, NonZeroI16{i16}, NonZeroI32{i32}, NonZeroIsize{isize}, NonZeroI64{i64}
+        }
+
+        real_float_operator_impl! {
+            $real{$float}, $float:
+            Add::add | AddAssign::add_assign,
+            Sub::sub | SubAssign::sub_assign,
+            Mul::mul | MulAssign::mul_assign,
+            Div::div | DivAssign::div_assign,
+            Rem::rem | RemAssign::rem_assign
+        }
+
+        real_float_operator_impl! {
+            $real{$float}, $other_float:
+            Add::add | AddAssign::add_assign,
+            Sub::sub | SubAssign::sub_assign,
+            Mul::mul | MulAssign::mul_assign,
+            Div::div | DivAssign::div_assign,
+            Rem::rem | RemAssign::rem_assign
+        }
+
+        real_real_operator_impl! {
+            $real{$float}, $real{$float}:
+            Add::add | AddAssign::add_assign,
+            Sub::sub | SubAssign::sub_assign,
+            Mul::mul | MulAssign::mul_assign,
+            Div::div | DivAssign::div_assign,
+            Rem::rem | RemAssign::rem_assign
+        }
+
+        real_real_operator_impl! {
+            $real{$float}, $other_real{$other_float}:
+            Add::add | AddAssign::add_assign,
+            Sub::sub | SubAssign::sub_assign,
+            Mul::mul | MulAssign::mul_assign,
+            Div::div | DivAssign::div_assign,
+            Rem::rem | RemAssign::rem_assign
+        }
 
         impl $real {
             pub const INFINITY: $real = $real($float::INFINITY);
@@ -872,56 +940,90 @@ macro_rules! real_impl {
             pub const TAU: $real = $real(std::$float::consts::TAU);
 
             pub const fn new(x: $float) -> Option<Self> {
-                if x.is_nan() {None} else {Some(Self(x))}
+                if x.is_nan() {
+                    None
+                } else {
+                    Some(Self(x))
+                }
             }
 
             /// # Safety
             /// `x` must not be NaN
-            pub const unsafe fn new_unchecked(x: $float) -> Self {Self(x)}
+            pub const unsafe fn new_unchecked(x: $float) -> Self {
+                Self(x)
+            }
 
             pub const fn new_or(default: Self, x: $float) -> Self {
-                if x.is_nan() {default} else {Self(x)}
+                if x.is_nan() {
+                    default
+                } else {
+                    Self(x)
+                }
+            }
+
+            pub const fn get(&self) -> $float {
+                self.0
             }
 
             pub fn rem_euclid(self, rhs: Self) -> Option<Self> {
-                let res = self.0.rem_euclid(rhs.0);
-                if res.is_nan() {return None}
-                Some(Self(res))
+                Self::new(self.0.rem_euclid(rhs.0))
             }
 
             pub fn copysign(self, sign: Self) -> Self {
                 Self(self.0.copysign(*sign))
             }
 
-            pub fn recip(self) -> Self {Self(self.0.recip())}
+            pub fn recip(self) -> Self {
+                Self(self.0.recip())
+            }
 
-            pub fn exp2(self) -> Self {Self(self.0.exp2())}
+            pub fn exp2(self) -> Self {
+                Self(self.0.exp2())
+            }
 
-            pub fn floor(self) -> Self {Self(self.0.floor())}
+            pub fn floor(self) -> Self {
+                Self(self.0.floor())
+            }
 
-            pub fn ceil(self) -> Self {Self(self.0.ceil())}
+            pub fn ceil(self) -> Self {
+                Self(self.0.ceil())
+            }
 
-            pub fn round(self) -> Self {Self(self.0.round())}
+            pub fn round(self) -> Self {
+                Self(self.0.round())
+            }
 
-            pub const fn is_finite(&self) -> bool {self.0.is_finite()}
+            pub const fn is_finite(&self) -> bool {
+                self.0.is_finite()
+            }
 
-            pub fn abs(self) -> Self {Self(self.0.abs())}
+            pub fn abs(self) -> Self {
+                Self(self.0.abs())
+            }
 
-            pub fn sin(self) -> Option<Self> {Self::new(self.0.sin())}
+            pub fn sin(self) -> Option<Self> {
+                Self::new(self.0.sin())
+            }
 
             /// # Safety
             /// `self` must be finite
-            pub unsafe fn sin_unchecked(self) -> Self {Self(self.0.sin())}
+            pub unsafe fn sin_unchecked(self) -> Self {
+                Self(self.0.sin())
+            }
 
             pub fn sin_or(self, default: Self) -> Self {
                 Self::new(self.0.sin()).unwrap_or(default)
             }
 
-            pub fn cos(self) -> Option<Self> {Self::new(self.0.cos())}
+            pub fn cos(self) -> Option<Self> {
+                Self::new(self.0.cos())
+            }
 
             /// # Safety
             /// `self` must be finite
-            pub unsafe fn cos_unchecked(self) -> Self {Self(self.0.cos())}
+            pub unsafe fn cos_unchecked(self) -> Self {
+                Self(self.0.cos())
+            }
 
             pub fn cos_or(self, default: Self) -> Self {
                 Self::new(self.0.cos()).unwrap_or(default)

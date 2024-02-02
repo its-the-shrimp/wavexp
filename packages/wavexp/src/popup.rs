@@ -186,15 +186,30 @@ impl Popup {
     pub fn render(&self, emitter: &Callback<AppEvent>, sequencer: &Sequencer) -> Html {
         match self {
             Self::ChooseInput => html! {
-                <form id="popup-bg" method="dialog" onsubmit={emitter.reform(|_| AppEvent::ClosePopup)}>
-                    <p>{"Choose audio input"}</p>
-                    <Button name="Close the pop-up" class="small red-on-hover" submit=true>
-                        <img::Cross/>
+                <form
+                    id="popup-bg"
+                    method="dialog"
+                    onsubmit={emitter.reform(|_| AppEvent::ClosePopup)}
+                >
+                    <p >{ "Choose audio input" }</p>
+                    <Button
+                        name="Close the pop-up"
+                        class="small red-on-hover"
+                        submit=true
+                    >
+                        <img::Cross />
                     </Button>
-                    <div class="blue-border" data-main-hint="Choose audio input">
-                        <div class="dark-bg horizontal-menu-wrapper full">
-                            <div class="horizontal-menu dark-bg">
-                                {for sequencer.inputs().iter().map(|input| html!{
+                    <div
+                        class="blue-border"
+                        data-main-hint="Choose audio input"
+                    >
+                        <div
+                            class="dark-bg horizontal-menu-wrapper full"
+                        >
+                            <div
+                                class="horizontal-menu dark-bg"
+                            >
+                                { for sequencer.inputs().iter().map(|input| html!{
                                     <AudioInputButton class="extend-inner-button-panel"
                                     bps={sequencer.bps()} {input} {emitter}
                                     onclick={{
@@ -204,10 +219,12 @@ impl Popup {
                                     playing={sequencer.playback_ctx().played_input()
                                         .is_some_and(|cur| cur.eq(input))}
                                     name={input.get().map_or_default(|x| AttrValue::Rc(x.name().clone()))}/>
-                                })}
-                                <Button name="Add audio input"
-                                onclick={emitter.reform(|_| AppEvent::StartInputAdd)}>
-                                    <img::Plus/>
+                                }) }
+                                <Button
+                                    name="Add audio input"
+                                    onclick={emitter.reform(|_| AppEvent::StartInputAdd)}
+                                >
+                                    <img::Plus />
                                 </Button>
                             </div>
                         </div>
@@ -216,45 +233,77 @@ impl Popup {
             },
 
             Self::EditInput(input_outer) => html! {
-                <form id="popup-bg" method="dialog" onsubmit={emitter.reform(|_| AppEvent::ClosePopup)}>
-                    <p>{"Edit audio input"}</p>
-                    <Button name="Close the pop-up" class="small red-on-hover" submit=true>
-                        <img::Cross/>
+                <form
+                    id="popup-bg"
+                    method="dialog"
+                    onsubmit={emitter.reform(|_| AppEvent::ClosePopup)}
+                >
+                    <p >{ "Edit audio input" }</p>
+                    <Button
+                        name="Close the pop-up"
+                        class="small red-on-hover"
+                        submit=true
+                    >
+                        <img::Cross />
                     </Button>
-                    <div class="dark-bg blue-border" data-main-hint="Edit audio input">
-                        <div id="popup-core">
+                    <div
+                        class="dark-bg blue-border"
+                        data-main-hint="Edit audio input"
+                    >
+                        <div
+                            id="popup-core"
+                        >
                             if let Some(input) = input_outer.get().report() {
-                                <div style="display: grid; grid-template-columns: repeat(3, 1fr)">
+                                <div
+                                    style="display: grid; grid-template-columns: repeat(3, 1fr)"
+                                >
                                     if input.changes().reversed {
-                                        <Button name="Playback direction: reverse" class="small"
-                                        help="Click to reverse the audio input"
-                                        onclick={emitter.reform(|_| AppEvent::ReverseInput)}>
-                                            <img::LeftArrow/>
+                                        <Button
+                                            name="Playback direction: reverse"
+                                            class="small"
+                                            help="Click to reverse the audio input"
+                                            onclick={emitter.reform(|_| AppEvent::ReverseInput)}
+                                        >
+                                            <img::LeftArrow />
                                         </Button>
                                     } else {
-                                        <Button name="Playback direction: normal" class="small"
-                                        help="Click to reverse the audio input"
-                                        onclick={emitter.reform(|_| AppEvent::ReverseInput)}>
-                                            <img::RightArrow/>
+                                        <Button
+                                            name="Playback direction: normal"
+                                            class="small"
+                                            help="Click to reverse the audio input"
+                                            onclick={emitter.reform(|_| AppEvent::ReverseInput)}
+                                        >
+                                            <img::RightArrow />
                                         </Button>
                                     }
-                                    <input type="text" value={input.name().clone()}
-                                    placeholder="Enter name..." required=true
-                                    class="dark-bg blue-border" data-main-hint="Audio input name"
-                                    onchange={emitter.reform(AppEvent::SetInputName)}/>
+                                    <input
+                                        type="text"
+                                        value={input.name().clone()}
+                                        placeholder="Enter name..."
+                                        required=true
+                                        class="dark-bg blue-border"
+                                        data-main-hint="Audio input name"
+                                        onchange={emitter.reform(AppEvent::SetInputName)}
+                                    />
                                 </div>
-                                <div style="display: grid; grid-template-columns: repeat(2, 1fr)">
-                                    <Slider name="Start cut-off"
-                                    max={input.raw_duration().secs_to_beats(sequencer.bps())}
-                                    initial={input.changes().cut_start}
-                                    setter={emitter.reform(AppEvent::SetStartCutOff)}/>
-                                    <Slider name="End cut-off"
-                                    max={input.raw_duration().secs_to_beats(sequencer.bps())}
-                                    initial={input.changes().cut_end}
-                                    setter={emitter.reform(AppEvent::SetEndCutOff)}/>
+                                <div
+                                    style="display: grid; grid-template-columns: repeat(2, 1fr)"
+                                >
+                                    <Slider
+                                        name="Start cut-off"
+                                        max={input.raw_duration().secs_to_beats(sequencer.bps())}
+                                        initial={input.changes().cut_start}
+                                        setter={emitter.reform(AppEvent::SetStartCutOff)}
+                                    />
+                                    <Slider
+                                        name="End cut-off"
+                                        max={input.raw_duration().secs_to_beats(sequencer.bps())}
+                                        initial={input.changes().cut_end}
+                                        setter={emitter.reform(AppEvent::SetEndCutOff)}
+                                    />
                                 </div>
                             } else {
-                                <p style="color:red">{"Failed to access the audio input"}</p>
+                                <p style="color:red">{ "Failed to access the audio input" }</p>
                             }
                         </div>
                     </div>
@@ -262,29 +311,51 @@ impl Popup {
             },
 
             Self::Export { filename, err_msg } => html! {
-                <form id="popup-bg" method="dialog" onsubmit={{
+                <form
+                    id="popup-bg"
+                    method="dialog"
+                    onsubmit={{
                     let filename = filename.clone();
                     emitter.reform(move |_| AppEvent::PrepareExport(filename.clone()))
-                }}>
-                    <p>{"Export the project"}</p>
-                    <Button name="Close the pop-up" class="small red-on-hover"
-                    onclick={emitter.reform(|_| AppEvent::ClosePopup)}>
-                        <img::Cross/>
+                }}
+                >
+                    <p >{ "Export the project" }</p>
+                    <Button
+                        name="Close the pop-up"
+                        class="small red-on-hover"
+                        onclick={emitter.reform(|_| AppEvent::ClosePopup)}
+                    >
+                        <img::Cross />
                     </Button>
-                    <div class="dark-bg blue-border" data-main-hint="Export the project">
-                        <div id="popup-core">
-                            <input type="text" value={filename.clone()} pattern=".*\\.wav"
-                            placeholder="Enter file name..." required=true
-                            class="dark-bg blue-border" data-main-hint="Output file name"
-                            oninvalid={emitter.reform(AppEvent::ExplainInvalidExportFileName)}
-                            onchange={emitter.reform(AppEvent::SetOutputFileName)}/>
-                            <Button name="Save" class="wide" submit=true>
-                                <p>{"Save"}</p>
+                    <div
+                        class="dark-bg blue-border"
+                        data-main-hint="Export the project"
+                    >
+                        <div
+                            id="popup-core"
+                        >
+                            <input
+                                type="text"
+                                value={filename.clone()}
+                                pattern=".*\\.wav"
+                                placeholder="Enter file name..."
+                                required=true
+                                class="dark-bg blue-border"
+                                data-main-hint="Output file name"
+                                oninvalid={emitter.reform(AppEvent::ExplainInvalidExportFileName)}
+                                onchange={emitter.reform(AppEvent::SetOutputFileName)}
+                            />
+                            <Button
+                                name="Save"
+                                class="wide"
+                                submit=true
+                            >
+                                <p >{ "Save" }</p>
                             </Button>
                         </div>
                     </div>
                     if !err_msg.is_empty() {
-                        <p class="error">{"Error: "}{err_msg}</p>
+                        <p class="error">{ "Error: " }{ err_msg }</p>
                     }
                 </form>
             },

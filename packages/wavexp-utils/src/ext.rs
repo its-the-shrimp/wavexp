@@ -1,10 +1,7 @@
 use std::{
-    array::from_fn,
+    array::{from_fn, try_from_fn},
     iter::{successors, Sum},
-    ops::{
-        Add, AddAssign, DivAssign, MulAssign, Neg, Range, RangeBounds, RangeInclusive, RemAssign,
-        Residual, Sub, SubAssign, Try,
-    },
+    ops::{Add, Div, Mul, Neg, RangeBounds, Rem, Residual, Sub, Try},
     ptr,
 };
 
@@ -13,57 +10,149 @@ use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, Document, Element, HtmlCanvasElement};
 
 use crate::{
-    app_error, default,
+    bail,
     error::{report_err, Result},
-    fallible, AppError, Point, Rect, RoundTo, SliceRef,
+    fallible,
+    range::RangeBoundsExt,
+    AppError, Point, Rect, RoundTo, SliceRef,
 };
 
 pub trait ArrayExt<T, const N: usize>: Sized {
-    fn zip<O, R>(self, other: [O; N], f: impl FnMut(T, O) -> R) -> [R; N];
-    fn zip_fold<O, R>(self, init: R, other: [O; N], f: impl FnMut(R, T, O) -> R) -> R;
-    fn add<'other, O>(self, other: &'other [O; N]) -> Self
+    fn zip<U, R>(self, other: [U; N], f: impl FnMut(T, U) -> R) -> [R; N];
+
+    fn try_zip<U, R>(
+        self,
+        other: [U; N],
+        f: impl FnMut(T, U) -> R,
+    ) -> <R::Residual as Residual<[R::Output; N]>>::TryType
     where
-        T: AddAssign<&'other O>;
-    fn sub<'other, O>(self, other: &'other [O; N]) -> Self
+        R: Try,
+        R::Residual: Residual<[R::Output; N]>;
+
+    fn zip_fold<U, R>(self, init: R, other: [U; N], f: impl FnMut(R, T, U) -> R) -> R;
+
+    fn sum<R: Sum<T>>(self) -> R;
+
+    fn fits<Range, Bound>(self, ranges: &[Range; N]) -> bool
     where
-        T: SubAssign<&'other O>;
-    fn mul<'other, O>(self, other: &'other [O; N]) -> Self
+        T: PartialOrd<Bound>,
+        Bound: PartialOrd<T>,
+        Range: RangeBounds<Bound>;
+
+    fn array_fit_into<Range, U>(self, ranges: [Range; N]) -> [U; N]
     where
-        T: MulAssign<&'other O>;
-    fn div<'other, O>(self, other: &'other [O; N]) -> Self
+        Range: RangeBoundsExt<U>,
+        U: Ord,
+        T: Into<U>,
+    {
+        self.zip(ranges, |i, r| r.fit(i.into()))
+    }
+
+    fn add<U>(self, other: [U; N]) -> [T; N]
     where
-        T: DivAssign<&'other O>;
-    fn rem<'other, O>(self, other: &'other [O; N]) -> Self
+        T: Add<U, Output = T>,
+    {
+        self.zip(other, add)
+    }
+
+    fn sub<U>(self, other: [U; N]) -> [T; N]
     where
-        T: RemAssign<&'other O>;
-    fn floor_to(self, other: Self) -> Self
+        T: Sub<U, Output = T>,
+    {
+        self.zip(other, sub)
+    }
+
+    fn mul<U>(self, other: [U; N]) -> [T; N]
     where
-        T: RoundTo;
-    fn ceil_to(self, other: Self) -> Self
+        T: Mul<U, Output = T>,
+    {
+        self.zip(other, mul)
+    }
+
+    fn div<U>(self, other: [U; N]) -> [T; N]
     where
-        T: RoundTo;
-    fn sum<R>(self) -> R
+        T: Div<U, Output = T>,
+    {
+        self.zip(other, div)
+    }
+
+    fn rem<U>(self, other: [U; N]) -> [T; N]
     where
-        R: Sum<T>;
-    fn array_check_in<R, O>(self, ranges: &[R; N]) -> Option<Self>
+        T: Rem<U, Output = T>,
+    {
+        self.zip(other, rem)
+    }
+
+    fn floor_to(self, other: [T; N]) -> [T::Output; N]
     where
-        T: PartialOrd<O>,
-        O: PartialOrd<T>,
-        R: RangeBounds<O>;
-    fn fit<R, O>(&self, values: [R; N]) -> [R; N]
+        T: RoundTo,
+    {
+        self.zip(other, T::floor_to)
+    }
+
+    fn ceil_to(self, other: [T; N]) -> [T::Output; N]
     where
-        T: RangeExt<O>,
-        O: Clone + PartialOrd<R>,
-        R: Clone + From<O>;
+        T: RoundTo,
+    {
+        self.zip(other, T::ceil_to)
+    }
+
+    fn try_add<U>(self, other: [U; N]) -> Option<[T; N]>
+    where
+        T: Add<U, Output = Option<T>>,
+    {
+        self.try_zip(other, add)
+    }
+
+    fn try_sub<U>(self, other: [U; N]) -> Option<[T; N]>
+    where
+        T: Sub<U, Output = Option<T>>,
+    {
+        self.try_zip(other, sub)
+    }
+
+    fn try_mul<U>(self, other: [U; N]) -> Option<[T; N]>
+    where
+        T: Mul<U, Output = Option<T>>,
+    {
+        self.try_zip(other, mul)
+    }
+
+    fn try_div<U>(self, other: [U; N]) -> Option<[T; N]>
+    where
+        T: Div<U, Output = Option<T>>,
+    {
+        self.try_zip(other, div)
+    }
+
+    fn try_rem<U>(self, other: [U; N]) -> Option<[T; N]>
+    where
+        T: Rem<U, Output = Option<T>>,
+    {
+        self.try_zip(other, rem)
+    }
 }
 
 impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
-    fn zip<O, R>(self, other: [O; N], mut f: impl FnMut(T, O) -> R) -> [R; N] {
+    fn zip<U, R>(self, other: [U; N], mut f: impl FnMut(T, U) -> R) -> [R; N] {
         let (mut d, mut s) = (self.into_iter(), other.into_iter());
         // Safety:
         // - `d` & `s` are both iterators from `self` & `other` respectively
         // - `self` & `other` are both of length N, as is the return type
         from_fn(|_| unsafe { f(d.next().unwrap_unchecked(), s.next().unwrap_unchecked()) })
+    }
+
+    fn try_zip<U, R>(
+        self,
+        other: [U; N],
+        mut f: impl FnMut(T, U) -> R,
+    ) -> <R::Residual as Residual<[R::Output; N]>>::TryType
+    where
+        R: Try,
+        R::Residual: Residual<[R::Output; N]>,
+    {
+        let (mut d, mut s) = (self.into_iter(), other.into_iter());
+        try_from_fn(|_| unsafe { f(d.next().unwrap_unchecked(), s.next().unwrap_unchecked()) })
     }
 
     fn zip_fold<O, R>(self, init: R, other: [O; N], mut f: impl FnMut(R, T, O) -> R) -> R {
@@ -72,94 +161,20 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
             .fold(init, |r, (x, y)| f(r, x, y))
     }
 
-    fn add<'other, O>(mut self, other: &'other [O; N]) -> Self
-    where
-        T: AddAssign<&'other O>,
-    {
-        for (dst, src) in self.iter_mut().zip(other.iter()) {
-            *dst += src
-        }
-        self
-    }
-
-    fn sub<'other, O>(mut self, other: &'other [O; N]) -> Self
-    where
-        T: SubAssign<&'other O>,
-    {
-        for (dst, src) in self.iter_mut().zip(other.iter()) {
-            *dst -= src
-        }
-        self
-    }
-
-    fn mul<'other, O>(mut self, other: &'other [O; N]) -> Self
-    where
-        T: MulAssign<&'other O>,
-    {
-        for (dst, src) in self.iter_mut().zip(other.iter()) {
-            *dst *= src
-        }
-        self
-    }
-
-    fn div<'other, O>(mut self, other: &'other [O; N]) -> Self
-    where
-        T: DivAssign<&'other O>,
-    {
-        for (d, s) in self.iter_mut().zip(other.iter()) {
-            *d /= s
-        }
-        self
-    }
-
-    fn rem<'other, O>(mut self, other: &'other [O; N]) -> Self
-    where
-        T: RemAssign<&'other O>,
-    {
-        for (d, s) in self.iter_mut().zip(other.iter()) {
-            *d %= s
-        }
-        self
-    }
-
-    fn floor_to(self, other: Self) -> Self
-    where
-        T: RoundTo,
-    {
-        let mut iter = self.into_iter().zip(other).map(|(l, r)| l.floor_to(r));
-        // Safety: both `self` & `other` are of size N, as is the return type
-        from_fn(|_| unsafe { iter.next().unwrap_unchecked() })
-    }
-
-    fn ceil_to(self, other: Self) -> Self
-    where
-        T: RoundTo,
-    {
-        let mut iter = self.into_iter().zip(other).map(|(l, r)| l.ceil_to(r));
-        // Safety: both `self` & `other` are of size N, as is the return type
-        from_fn(|_| unsafe { iter.next().unwrap_unchecked() })
-    }
-
-    fn sum<R>(self) -> R
-    where
-        R: Sum<T>,
-    {
+    fn sum<R: Sum<T>>(self) -> R {
         self.into_iter().sum()
     }
 
-    fn array_check_in<R, O>(self, ranges: &[R; N]) -> Option<Self>
+    fn fits<R, Bound>(self, ranges: &[R; N]) -> bool
     where
-        T: PartialOrd<O>,
-        O: PartialOrd<T>,
-        R: RangeBounds<O>,
+        T: PartialOrd<Bound>,
+        Bound: PartialOrd<T>,
+        R: RangeBounds<Bound>,
     {
-        self.iter()
-            .zip(ranges)
-            .all(|(i, r)| r.contains(i))
-            .then_some(self)
+        self.iter().zip(ranges).all(|(i, r)| r.contains(i))
     }
 
-    fn fit<R, O>(&self, mut values: [R; N]) -> [R; N]
+    /*fn fit<R, O>(&self, mut values: [R; N]) -> [R; N]
     where
         T: RangeExt<O>,
         O: Clone + PartialOrd<R>,
@@ -169,13 +184,13 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
             *i = r.fit(i.clone());
         }
         values
-    }
+    }*/
 }
 
 pub trait BoolExt {
     fn choose<T>(self, on_true: T, on_false: T) -> T;
     fn then_or<T>(self, default: T, f: impl FnOnce() -> T) -> T;
-    fn then_or_else<T>(self, default: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T;
+    fn choose_with<T>(self, default: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T;
     fn then_negate<T: Neg<Output = T>>(self, val: T) -> T;
     fn then_try<T, E>(self, f: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>;
     fn and_then<T>(self, f: impl FnOnce() -> Option<T>) -> Option<T>;
@@ -200,7 +215,7 @@ impl BoolExt for bool {
         }
     }
 
-    fn then_or_else<T>(self, default: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T {
+    fn choose_with<T>(self, default: impl FnOnce() -> T, f: impl FnOnce() -> T) -> T {
         if self {
             f()
         } else {
@@ -279,10 +294,10 @@ impl<T, E> ResultExt<T, E> for Result<T, E> {
 
 pub trait OptionExt<T> {
     //fn to_app_result(self) -> AppResult<T>;
-    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
     fn choose<U>(&self, on_some: U, on_none: U) -> U;
     fn drop(self) -> Option<()>;
     fn get_or_try_insert<E>(&mut self, f: impl FnOnce() -> Result<T, E>) -> Result<&mut T, E>;
+    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U;
     fn try_map<U, R>(self, f: impl FnOnce(T) -> R) -> <R::Residual as Residual<Option<U>>>::TryType
     where
         R: Try<Output = U>,
@@ -296,10 +311,6 @@ impl<T> OptionExt<T> for Option<T> {
             None => Err(AppError::on_none()),
         }
     }*/
-
-    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
-        self.map_or_else(default, f)
-    }
 
     fn choose<U>(&self, on_some: U, on_none: U) -> U {
         if self.is_some() {
@@ -322,6 +333,10 @@ impl<T> OptionExt<T> for Option<T> {
             *self = Some(f()?);
         }
         Ok(unsafe { self.as_mut().unwrap_unchecked() })
+    }
+
+    fn map_or_default<U: Default>(self, f: impl FnOnce(T) -> U) -> U {
+        self.map_or_else(default, f)
     }
 
     fn try_map<U, R>(self, f: impl FnOnce(T) -> R) -> <R::Residual as Residual<Option<U>>>::TryType
@@ -531,19 +546,20 @@ impl<T> VecExt<T> for Vec<T> {
     fn try_remove(&mut self, index: usize) -> T {
         let len = self.len();
         if index >= len {
-            return Err(app_error!(
-                "removal index (is {index}) should be < len (is {len})"
-            ));
+            // `len - index - 1` won't underflow if this passes
+            bail!("removal index (is {index}) should be < len (is {len})")
         }
         unsafe {
             let ptr = self.as_mut_ptr().add(index);
             let ret = ptr::read(ptr);
-            ptr::copy(ptr.add(1), ptr, len - index - 1);
-            self.set_len(len - 1);
+            let new_len = len.unchecked_sub(1);
+            ptr::copy(ptr.add(1), ptr, new_len.unchecked_sub(index));
+            self.set_len(new_len);
             ret
         }
     }
 
+    #[allow(clippy::arithmetic_side_effects)]
     unsafe fn remove_unchecked(&mut self, index: usize) -> T {
         let len = self.len();
         let ptr = self.as_mut_ptr().add(index);
@@ -557,15 +573,15 @@ impl<T> VecExt<T> for Vec<T> {
     fn try_swap_remove(&mut self, index: usize) -> T {
         let len = self.len();
         if index >= len {
-            return Err(app_error!(
-                "removal index (is {index}) should be < len (is {len})"
-            ));
+            // `len > 0` is guaranteed if this passes
+            bail!("removal index (is {index}) should be < len (is {len})")
         }
         unsafe {
-            let value = ptr::read(self.as_ptr().add(index));
-            let base_ptr = self.as_mut_ptr();
-            ptr::copy(base_ptr.add(len - 1), base_ptr.add(index), 1);
-            self.set_len(len - 1);
+            let base = self.as_mut_ptr();
+            let new_len = len.unchecked_sub(1);
+            let value = ptr::read(base.add(index));
+            ptr::copy(base.add(new_len), base.add(index), 1);
+            self.set_len(new_len);
             value
         }
     }
@@ -574,18 +590,20 @@ impl<T> VecExt<T> for Vec<T> {
     fn try_insert(&mut self, index: usize, element: T) -> &mut T {
         let len = self.len();
         if index > len {
-            return Err(app_error!(
-                "insertion index (is {index}) should be <= len (is {len})"
-            ));
+            // `len - index` won't undeflow if this check passes
+            bail!("insertion index (is {index}) should be <= len (is {len})")
         }
         if len == self.capacity() {
-            self.try_reserve(1)?;
+            // `len + 1` won't overflow if this falls through or passes
+            self.try_reserve(1)?
         }
         unsafe {
             let p = self.as_mut_ptr().add(index);
-            ptr::copy(p, p.add(1), len - index);
+            // Safety: `len - index` won't underflow because `index <= len`
+            ptr::copy(p, p.add(1), len.unchecked_sub(index));
             ptr::write(p, element);
-            self.set_len(len + 1);
+            // Safety: `len + 1` won't overflow because if it did, `try_reserve` above would fail
+            self.set_len(len.unchecked_add(1));
             &mut *p
         }
     }
@@ -599,163 +617,32 @@ impl<T> VecExt<T> for Vec<T> {
     }
 }
 
-pub trait RangeExt<T> {
-    type RangeTy<R>;
+// Shortcut functions for common traits
 
-    fn ordered(self) -> Self
-    where
-        T: Ord;
-    fn overlap<O>(&self, other: &Self::RangeTy<O>) -> bool
-    where
-        O: PartialOrd<T>,
-        T: PartialOrd<O>;
-    fn loose_contain<O, I>(&self, item: I, offset: O) -> bool
-    where
-        O: Copy,
-        I: PartialOrd<T> + Add<O, Output = I> + Sub<O, Output = I> + Copy,
-        T: PartialOrd<I>;
-    fn fit<R>(&self, item: R) -> R
-    where
-        T: Clone + Into<R> + PartialOrd<R>;
-    /// if `value` is outside of `self`, extend `self` just enough for `value` to be inside it
-    fn extend<R>(self, value: R) -> Self
-    where
-        T: PartialOrd<R> + From<R>;
-    /// turns `x .. y` into `f(x) .. f(y)`
-    fn map_bounds<R>(self, f: impl FnMut(T) -> R) -> Self::RangeTy<R>;
-    fn to_pair(self) -> [T; 2];
+pub fn default<T: Default>() -> T {
+    T::default()
 }
 
-impl<T> RangeExt<T> for Range<T> {
-    type RangeTy<R> = Range<R>;
-
-    fn ordered(self) -> Self
-    where
-        T: Ord,
-    {
-        if self.start > self.end {
-            self.end..self.start
-        } else {
-            self
-        }
-    }
-
-    fn overlap<O>(&self, other: &Self::RangeTy<O>) -> bool
-    where
-        O: PartialOrd<T>,
-        T: PartialOrd<O>,
-    {
-        self.contains(&other.start) || self.contains(&other.end) || other.contains(&self.start)
-    }
-
-    fn loose_contain<O, I>(&self, item: I, offset: O) -> bool
-    where
-        O: Copy,
-        I: PartialOrd<T> + Add<O, Output = I> + Sub<O, Output = I> + Copy,
-        T: PartialOrd<I>,
-    {
-        self.overlap(&(item - offset..item + offset))
-    }
-
-    fn fit<R>(&self, item: R) -> R
-    where
-        T: Clone + Into<R> + PartialOrd<R>,
-    {
-        if self.end < item {
-            self.end.clone().into()
-        } else if self.start > item {
-            self.start.clone().into()
-        } else {
-            item
-        }
-    }
-
-    fn extend<R>(self, value: R) -> Self
-    where
-        T: PartialOrd<R> + From<R>,
-    {
-        if self.start > value {
-            value.into()..self.end
-        } else if self.end <= value {
-            self.start..value.into()
-        } else {
-            self
-        }
-    }
-
-    fn map_bounds<R>(self, mut f: impl FnMut(T) -> R) -> Self::RangeTy<R> {
-        f(self.start)..f(self.end)
-    }
-
-    fn to_pair(self) -> [T; 2] {
-        [self.start, self.end]
-    }
+pub fn add<T: Add<U>, U>(x: T, y: U) -> T::Output {
+    x.add(y)
 }
 
-impl<T> RangeExt<T> for RangeInclusive<T> {
-    type RangeTy<R> = RangeInclusive<R>;
+pub fn sub<T: Sub<U>, U>(x: T, y: U) -> T::Output {
+    x.sub(y)
+}
 
-    fn ordered(self) -> Self
-    where
-        T: Ord,
-    {
-        if self.start() > self.end() {
-            let (start, end) = self.into_inner();
-            end..=start
-        } else {
-            self
-        }
-    }
+pub fn mul<T: Mul<U>, U>(x: T, y: U) -> T::Output {
+    x.mul(y)
+}
 
-    fn overlap<O>(&self, other: &Self::RangeTy<O>) -> bool
-    where
-        O: PartialOrd<T>,
-        T: PartialOrd<O>,
-    {
-        self.contains(other.start()) || self.contains(other.end()) || other.contains(self.start())
-    }
+pub fn div<T: Div<U>, U>(x: T, y: U) -> T::Output {
+    x.div(y)
+}
 
-    fn loose_contain<O, I>(&self, item: I, offset: O) -> bool
-    where
-        O: Copy,
-        I: PartialOrd<T> + Add<O, Output = I> + Sub<O, Output = I> + Copy,
-        T: PartialOrd<I>,
-    {
-        self.overlap(&(item - offset..=item + offset))
-    }
+pub fn rem<T: Rem<U>, U>(x: T, y: U) -> T::Output {
+    x.rem(y)
+}
 
-    fn fit<R>(&self, item: R) -> R
-    where
-        T: Clone + Into<R> + PartialOrd<R>,
-    {
-        if self.end() < &item {
-            self.end().clone().into()
-        } else if self.start() > &item {
-            self.start().clone().into()
-        } else {
-            item
-        }
-    }
-
-    fn extend<R>(self, value: R) -> Self
-    where
-        T: PartialOrd<R> + From<R>,
-    {
-        if self.start() > &value {
-            value.into()..=self.into_inner().1
-        } else if self.end() < &value {
-            self.into_inner().0..=value.into()
-        } else {
-            self
-        }
-    }
-
-    fn map_bounds<R>(self, mut f: impl FnMut(T) -> R) -> Self::RangeTy<R> {
-        let (start, end) = self.into_inner();
-        f(start)..=f(end)
-    }
-
-    fn to_pair(self) -> [T; 2] {
-        self.into_inner().into()
-    }
+pub fn neg<T: Neg>(x: T) -> T::Output {
+    x.neg()
 }

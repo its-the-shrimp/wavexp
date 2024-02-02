@@ -14,15 +14,18 @@ use std::{
     fmt::{self, Display, Formatter},
     io::Cursor,
     iter::zip,
-    ops::{Add, Deref, DerefMut, Mul, Range, RangeInclusive},
+    ops::{Add, Deref, DerefMut, Mul, RangeBounds},
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use wavexp_utils::{
     cell::Shared,
-    const_assert, default, document,
-    ext::{ArrayExt, RangeExt, ResultExt, SliceExt},
-    fallible, js_function, now, r64, ArrayFrom, R32, R64,
+    const_assert, document,
+    ext::default,
+    ext::{ArrayExt, ResultExt, SliceExt},
+    fallible, js_function, now, r64,
+    range::{RangeBoundsExt, RangeInclusiveV2, RangeV2},
+    ArrayFrom, R32, R64,
 };
 use web_sys::{
     AnalyserNode, AudioContext, BaseAudioContext, Blob, GainNode, HtmlAnchorElement,
@@ -73,10 +76,19 @@ impl Ord for SoundBlock {
 
 impl GraphPoint for SoundBlock {
     const EDITOR_NAME: &'static str = "Editor plane";
-    const Y_BOUND: Range<R64> = r64![0]..R64::INFINITY;
-    const SCALE_Y_BOUND: Range<R64> = r64![5]..r64![30];
-    const OFFSET_Y_BOUND: Range<R64> = r64![-1]..R64::INFINITY;
-    const Y_SNAP: R64 = r64![1];
+    const Y_BOUND: RangeV2<R64> = RangeV2 {
+        start: r64!(0),
+        end: R64::INFINITY,
+    };
+    const SCALE_Y_BOUND: RangeV2<R64> = RangeV2 {
+        start: r64!(5),
+        end: r64![30],
+    };
+    const OFFSET_Y_BOUND: RangeV2<R64> = RangeV2 {
+        start: r64!(-1),
+        end: R64::INFINITY,
+    };
+    const Y_SNAP: R64 = r64!(1);
     type Inner = Sound;
     type Y = i32;
     type VisualContext = ();
@@ -107,26 +119,27 @@ impl GraphPoint for SoundBlock {
         [self.offset, self.layer.into()]
     }
 
+    #[apply(fallible!)]
     fn r#move(&mut self, delta: [R64; 2], _: bool) {
-        self.offset = r64![0].max(self.offset + delta[0]);
+        self.offset = r64!(0).max(self.offset + delta[0]);
         self.layer += i32::from(delta[1]);
     }
 
     fn move_point(point: &mut [R64; 2], delta: [R64; 2], _: bool) {
-        point[0] = r64![0].max(point[0] + delta[0]);
-        point[1] += delta[1];
+        point[0] = r64!(0).max(point[0] + delta[0]);
+        point[1] += delta[1]
     }
 
     #[apply(fallible!)]
     fn in_hitbox(
         &self,
-        area: &[RangeInclusive<R64>; 2],
+        area: &[RangeInclusiveV2<R64>; 2],
         _: ContextRef,
         sequencer: &Sequencer,
         _: Self::VisualContext,
     ) -> bool {
-        area[1].clone().map_bounds(i32::from).contains(&self.layer)
-            && (self.offset..=self.offset + self.sound.len(sequencer.bps())?.max(r64![0.1]))
+        area[1].map_bounds(i32::from).contains(&self.layer)
+            && (self.offset..=self.sound.len(sequencer.bps())?.max(r64!(0.1)) + self.offset)
                 .overlap(&area[0])
     }
 
@@ -151,8 +164,8 @@ impl GraphPoint for SoundBlock {
         dotted: &Path2d,
         _: Self::VisualContext,
     ) {
-        let step = &canvas_size.div(&editor.scale());
-        let offset = &R64::array_from(editor.offset());
+        let step = canvas_size.div(editor.scale());
+        let offset = R64::array_from(editor.offset());
         let bps = sequencer.bps();
         for block in editor.data() {
             let [mut x, y] = block.loc().mul(step).sub(offset).map(|x| *x);
@@ -192,17 +205,32 @@ impl SoundBlock {
     pub fn tabs(&self, ctx: ContextRef) -> Html {
         let desc = &AttrValue::from(self.to_string() + ": Settings");
         match self.sound {
-            Sound::None => html! {
-                <Tab name="Choose Sound Type" {desc} selected=true/>
-            },
+            Sound::None => html! { <Tab name="Choose Sound Type" {desc} selected=true /> },
             Sound::Note { .. } | Sound::Noise { .. } | Sound::Custom { .. } => {
                 let setter = ctx.event_emitter().reform(AppEvent::SetTab);
                 let id = ctx.selected_tab();
-                html! {<>
-                    <Tab name="General"  {desc} setter={setter.reform(|_| 0)} selected={id == 0}/>
-                    <Tab name="Envelope" {desc} setter={setter.reform(|_| 1)} selected={id == 1}/>
-                    <Tab name="Pattern"  {desc} setter={setter.reform(|_| 2)} selected={id == 2}/>
-                </>}
+                html! {
+                    <>
+                        <Tab
+                            name="General"
+                            {desc}
+                            setter={setter.reform(|_| 0)}
+                            selected={id == 0}
+                        />
+                        <Tab
+                            name="Envelope"
+                            {desc}
+                            setter={setter.reform(|_| 1)}
+                            selected={id == 1}
+                        />
+                        <Tab
+                            name="Pattern"
+                            {desc}
+                            setter={setter.reform(|_| 2)}
+                            selected={id == 2}
+                        />
+                    </>
+                }
             }
         }
     }
@@ -319,44 +347,59 @@ impl Sequencer {
         let emitter = ctx.event_emitter();
         match ctx.selected_tab() {
             0 /* General */ => html! {
-                <div id="inputs">
-                    <Slider key="tmp" name="Tempo"
-                    setter={emitter.reform(AppEvent::Bpm)}
-                    min={r64![30]} max={r64![240]}
-                    postfix="BPM"
-                    initial={self.bps * 60}/>
-                    <Slider key="gain" name="Master volume"
-                    setter={emitter.reform(|x| AppEvent::MasterVolume(R32::from(x)))}
-                    initial={self.volume()}/>
-                    <Button name="Export the project" class="wide"
-                    help="Save the whole project as an audio file"
-                    onclick={emitter.reform(|_| {
+                <div
+                    id="inputs"
+                >
+                    <Slider
+                        key="tmp"
+                        name="Tempo"
+                        setter={emitter.reform(AppEvent::Bpm)}
+                        min={r64![30]}
+                        max={r64![240]}
+                        postfix="BPM"
+                        initial={self.bps * 60}
+                    />
+                    <Slider
+                        key="gain"
+                        name="Master volume"
+                        setter={emitter.reform(|x| AppEvent::MasterVolume(R32::from(x)))}
+                        initial={self.volume()}
+                    />
+                    <Button
+                        name="Export the project"
+                        class="wide"
+                        help="Save the whole project as an audio file"
+                        onclick={emitter.reform(|_| {
                         AppEvent::OpenPopup(
                             Popup::Export { filename: "project.wav".into(), err_msg: default() }
                         )
-                    })}>
-                        <span>{"Export the project"}</span>
+                    })}
+                    >
+                        <span >{ "Export the project" }</span>
                     </Button>
                 </div>
             },
 
             1 /* Inputs */ => html!{
-                <div class="horizontal-menu dark-bg">
-                    {for self.inputs.iter().map(|input| html!{
+                <div
+                    class="horizontal-menu dark-bg"
+                >
+                    { for self.inputs.iter().map(|input| html!{
                         <AudioInputButton
                         playing={self.playback_ctx.played_input().is_some_and(|i| i.eq(input))}
                         name={input.get().map_or_default(|x| AttrValue::from(x.name().clone()))}
                         {input} {emitter} bps={self.bps} class="extend-inner-button-panel"/>
-                    })}
-                    <Button name="Add audio input" onclick={emitter.reform(|_| AppEvent::StartInputAdd)}>
-                        <img::Plus/>
+                    }) }
+                    <Button
+                        name="Add audio input"
+                        onclick={emitter.reform(|_| AppEvent::StartInputAdd)}
+                    >
+                        <img::Plus />
                     </Button>
                 </div>
             },
 
-            tab_id => html!{
-                <p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>
-            }
+            tab_id => html!{ <p style="color:red">{ format!("Invalid tab ID: {tab_id}") }</p> }
         }
     }
 
@@ -394,7 +437,7 @@ impl Sequencer {
                     let player = self.audio_ctx.create_buffer_source()?;
                     {
                         let input = input.get()?;
-                        player.set_buffer(input.baked()?.into());
+                        player.set_buffer(Some(input.baked()?));
                         player.connect_with_audio_node(&self.gain)?;
                     }
                     self.playback_ctx =

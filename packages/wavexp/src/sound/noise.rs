@@ -8,18 +8,16 @@ use crate::{
 };
 use js_sys::Math::random;
 use macro_rules_attribute::apply;
-use std::{
-    mem::replace,
-    num::NonZeroUsize,
-    ops::{Range, RangeInclusive},
-};
+use std::{mem::replace, num::NonZeroUsize, ops::RangeBounds};
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
     cell::Shared,
-    default,
-    error::AppError,
-    ext::{ArrayExt, OptionExt, RangeExt, ResultExt},
-    fallible, js_function, r32, r64, ArrayFrom, Pipe, R32, R64,
+    error::{AppError, Result},
+    ext::default,
+    ext::{ArrayExt, OptionExt, ResultExt},
+    fallible, js_function, r32, r64,
+    range::{RangeBoundsExt, RangeInclusiveV2, RangeV2},
+    ArrayFrom, Pipe, R32, R64,
 };
 use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, Path2d};
 use yew::{html, Html};
@@ -33,9 +31,9 @@ pub struct NoiseBlock {
 
 impl GraphPoint for NoiseBlock {
     const EDITOR_NAME: &'static str = CustomBlock::EDITOR_NAME;
-    const Y_BOUND: Range<R64> = CustomBlock::Y_BOUND;
-    const SCALE_Y_BOUND: Range<R64> = CustomBlock::SCALE_Y_BOUND;
-    const OFFSET_Y_BOUND: Range<R64> = CustomBlock::OFFSET_Y_BOUND;
+    const Y_BOUND: RangeV2<R64> = CustomBlock::Y_BOUND;
+    const SCALE_Y_BOUND: RangeV2<R64> = CustomBlock::SCALE_Y_BOUND;
+    const OFFSET_Y_BOUND: RangeV2<R64> = CustomBlock::OFFSET_Y_BOUND;
     const Y_SNAP: R64 = CustomBlock::Y_SNAP;
 
     type Inner = Beats;
@@ -46,7 +44,7 @@ impl GraphPoint for NoiseBlock {
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
         Self {
             offset,
-            pitch: Note::from_index(y.into()).recip(),
+            pitch: Note::saturated(y.into()).recip(),
             len: r64![1],
         }
     }
@@ -67,6 +65,7 @@ impl GraphPoint for NoiseBlock {
         [self.offset, self.pitch.recip().index().into()]
     }
 
+    #[apply(fallible!)]
     fn r#move(&mut self, delta: [R64; 2], meta: bool) {
         if meta {
             self.len += delta[0];
@@ -74,26 +73,25 @@ impl GraphPoint for NoiseBlock {
             self.offset += delta[0];
             self.offset = R64::ZERO.max(self.offset);
         }
-        self.pitch -= delta[1].into();
+        self.pitch = (self.pitch - isize::from(delta[1]))?;
     }
 
     fn move_point(point: &mut [R64; 2], delta: [R64; 2], meta: bool) {
         if !meta {
             point[0] += delta[0];
         }
-        point[1] += delta[1];
+        point[1] += delta[1]
     }
 
     #[apply(fallible!)]
     fn in_hitbox(
         &self,
-        area: &[RangeInclusive<R64>; 2],
+        area: &[RangeInclusiveV2<R64>; 2],
         _: ContextRef,
         _: &Sequencer,
         _: Self::VisualContext,
     ) -> bool {
         area[1]
-            .clone()
             .map_bounds(usize::from)
             .contains(&self.pitch.recip().index())
             && (self.offset..=self.offset + self.len).overlap(&area[0])
@@ -110,8 +108,8 @@ impl GraphPoint for NoiseBlock {
         (sb_offset, n_reps): Self::VisualContext,
     ) {
         let bps = sequencer.bps();
-        let step = &canvas_size.div(&editor.scale());
-        let offset = &R64::array_from(editor.offset());
+        let step = canvas_size.div(editor.scale());
+        let offset = R64::array_from(editor.offset());
         for block in editor.data() {
             let [x, y] = block.loc().mul(step).sub(offset);
             solid.rect(*x, *y, *block.len * *step[0], *step[1]);
@@ -200,7 +198,7 @@ impl NoiseSound {
                 block_core.set_buffer(Some(&self.src));
                 block_core
                     .playback_rate()
-                    .set_value(*pitch.pitch_coef() as f32);
+                    .set_value(*pitch.pitch_coef()? as f32);
                 block_core.set_loop(true);
                 block_core
                     .connect_with_audio_node(&block)?
@@ -231,43 +229,66 @@ impl NoiseSound {
     pub fn params(&self, ctx: ContextRef) -> Html {
         let emitter = ctx.event_emitter();
         match ctx.selected_tab() {
-            0 /* General */ => html!{<div id="inputs">
-                <Slider key="noise-vol"
-                setter={emitter.reform(|x| AppEvent::Volume(R32::from(x)))}
-                name="Noise Volume"
-                initial={self.volume}/>
-                <Counter key="noise-repcnt"
-                setter={emitter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
-                fmt={|x| format!("{x:.0}")}
-                name="Number Of Pattern Repetitions"
-                min={r64![1]}
-                initial={self.rep_count}/>
-            </div>},
-
-            1 /* Envelope */ => html!{<div id="inputs">
-                <Counter key="noise-att"
-                setter={emitter.reform(AppEvent::Attack)}
-                name="Noise Attack Time" postfix="Beats"
-                initial={self.attack}/>
-                <Counter key="noise-dec"
-                setter={emitter.reform(AppEvent::Decay)}
-                name="Noise Decay Time" postfix="Beats"
-                initial={self.decay}/>
-                <Slider key="noise-sus"
-                setter={emitter.reform(|x| AppEvent::Sustain(R32::from(x)))}
-                name="Noise Sustain Level"
-                initial={self.sustain}/>
-                <Counter key="noise-rel"
-                setter={emitter.reform(AppEvent::Release)}
-                name="Noise Release Time" postfix="Beats"
-                initial={self.release}/>
-            </div>},
-
-            2 /* Pattern */ => html!{
-                <GraphEditorCanvas<NoiseBlock> editor={&self.pattern} {emitter}/>
+            0 /* General */ => html!{
+                <div
+                    id="inputs"
+                >
+                    <Slider
+                        key="noise-vol"
+                        setter={emitter.reform(|x| AppEvent::Volume(R32::from(x)))}
+                        name="Noise Volume"
+                        initial={self.volume}
+                    />
+                    <Counter
+                        key="noise-repcnt"
+                        setter={emitter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
+                        fmt={|x| format!("{x:.0}")}
+                        name="Number Of Pattern Repetitions"
+                        min={r64![1]}
+                        initial={self.rep_count}
+                    />
+                </div>
             },
 
-            tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
+            1 /* Envelope */ => html!{
+                <div
+                    id="inputs"
+                >
+                    <Counter
+                        key="noise-att"
+                        setter={emitter.reform(AppEvent::Attack)}
+                        name="Noise Attack Time"
+                        postfix="Beats"
+                        initial={self.attack}
+                    />
+                    <Counter
+                        key="noise-dec"
+                        setter={emitter.reform(AppEvent::Decay)}
+                        name="Noise Decay Time"
+                        postfix="Beats"
+                        initial={self.decay}
+                    />
+                    <Slider
+                        key="noise-sus"
+                        setter={emitter.reform(|x| AppEvent::Sustain(R32::from(x)))}
+                        name="Noise Sustain Level"
+                        initial={self.sustain}
+                    />
+                    <Counter
+                        key="noise-rel"
+                        setter={emitter.reform(AppEvent::Release)}
+                        name="Noise Release Time"
+                        postfix="Beats"
+                        initial={self.release}
+                    />
+                </div>
+            },
+
+            2 /* Pattern */ => html!{
+                <GraphEditorCanvas<NoiseBlock> editor={&self.pattern} {emitter} />
+            },
+
+            tab_id => html!{ <p style="color:red">{ format!("Invalid tab ID: {tab_id}") }</p> }
         }
     }
 

@@ -12,8 +12,8 @@ use std::{
 };
 use wavexp_utils::{
     cell::Shared,
-    default,
     error::AppError,
+    ext::default,
     ext::{BoolExt, HtmlCanvasExt, HtmlElementExt, ResultExt},
     fallible, r64, Pipe, Point, R64,
 };
@@ -68,7 +68,7 @@ impl TryFrom<&MouseEvent> for Cursor {
             x: value.offset_x(),
             y: value.offset_y(),
         }
-        .normalise(canvas.client_rect(), canvas.rect());
+        .normalise(canvas.client_rect(), canvas.rect())?;
         Self {
             point,
             buttons: Buttons {
@@ -90,7 +90,7 @@ impl TryFrom<&PointerEvent> for Cursor {
             x: value.offset_x(),
             y: value.offset_y(),
         }
-        .normalise(canvas.client_rect(), canvas.rect());
+        .normalise(canvas.client_rect(), canvas.rect())?;
         Self {
             point,
             buttons: Buttons {
@@ -146,13 +146,7 @@ impl Component for Slider {
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         fallible! {
-            let SliderProps {
-                setter,
-                min,
-                max,
-                signed,
-                ..
-            } = ctx.props();
+            let SliderProps { setter, min, max, signed, .. } = ctx.props();
             match &msg {
                 Cmd::Drag(e) => {
                     self.value = R64::from(e.movement_y())
@@ -180,10 +174,10 @@ impl Component for Slider {
                     self.old_value = f64::NAN;
                 }
             }
-            true
+            return true
         }
-        .report()
-        .unwrap_or(false)
+        .report();
+        false
     }
 
     fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
@@ -206,6 +200,18 @@ impl Component for Slider {
             ..
         } = ctx.props();
         let scope = ctx.link();
+        let selected: AttrValue = if self.value.abs() == *max {
+            "M 50 12 A 38 38 0 0 0 50 88 A 38 38 0 1 0 50 12".into()
+        } else {
+            let p = ((self.value - min) / (max - min) - 0.5f32) * R64::TAU;
+            format!(
+                "M 50 12 A 38 38 0 {} 0 {} {}",
+                (p > 0) as u8,
+                p.sin_or(r64!(0)) * 38u8 + 50,
+                p.cos_or(r64!(0)) * 38u8 + 50
+            )
+            .into()
+        };
         html! {
             <svg
                 ref={self.target.clone()}
@@ -217,15 +223,7 @@ impl Component for Slider {
                 onpointermove={(!self.old_value.is_nan()).then(|| scope.callback(Cmd::Drag))}
             >
                 <circle class="outer" cx="50" cy="50" r="40" />
-                <path
-                    d={if self.value.abs() == *max {
-                    AttrValue::from("M 50 12 A 38 38 0 0 0 50 88 A 38 38 0 1 0 50 12")
-                } else {
-                    let p = ((self.value - min) / (max - min) - 0.5f32) * R64::TAU;
-                    format!("M 50 12 A 38 38 0 {} 0 {} {}",
-                        (p > 0) as u8, p.sin_or(r64![0]) * 38 + 50, p.cos_or(r64![0]) * 38 + 50).into()
-                }}
-                />
+                <path d={selected} />
                 <circle class="inner" cx="50" cy="50" r="38" />
                 <text x="50" y="50">{ fmt.emit(self.value) }</text>
                 <text x="50" y="65">{ postfix }</text>
@@ -296,10 +294,10 @@ impl Component for Switch {
                     self.focused = false;
                 }
             }
-            true
+            return true
         }
-        .report()
-        .unwrap_or(false)
+        .report();
+        false
     }
 
     fn changed(&mut self, ctx: &Context<Self>, old_props: &Self::Properties) -> bool {
@@ -315,6 +313,19 @@ impl Component for Switch {
     fn view(&self, ctx: &Context<Self>) -> Html {
         let SwitchProps { name, options, .. } = ctx.props();
         let scope = ctx.link();
+        let selected = {
+            let v = self.value.floor();
+            let n_opts = options.len();
+            let src = (v / n_opts - 0.5f32) * R64::TAU;
+            let dst = ((v + 1u8) / n_opts - 0.5f32) * R64::TAU;
+            format!(
+                "M {} {} A 38 38 0 0 0 {} {}",
+                src.sin_or(r64!(0)) * 38 + 50,
+                src.cos_or(r64!(0)) * 38 + 50,
+                dst.sin_or(r64!(0)) * 38 + 50,
+                dst.cos_or(r64!(0)) * 38 + 50
+            )
+        };
         html! {
             <svg
                 ref={self.target.clone()}
@@ -326,19 +337,14 @@ impl Component for Switch {
                 onpointermove={self.focused.then(|| scope.callback(Cmd::Drag))}
             >
                 <circle class="outer" cx="50" cy="50" r="40" />
-                <path
-                    d={{
-                    let v = self.value.floor();
-                    let n_opts = options.len();
-                    let src = (v / n_opts - 0.5f32) * R64::TAU;
-                    let dst = ((v + 1u8) / n_opts - 0.5f32) * R64::TAU;
-                    format!("M {} {} A 38 38 0 0 0 {} {}",
-                        src.sin_or(r64![0]) * 38 + 50, src.cos_or(r64![0]) * 38 + 50,
-                        dst.sin_or(r64![0]) * 38 + 50, dst.cos_or(r64![0]) * 38 + 50)
-                }}
-                />
+                <path d={selected} />
                 <circle class="inner" cx="50" cy="50" r="38" />
-                <text x="50" y="50">{ unsafe{options.get_unchecked(usize::from(self.value))} }</text>
+                <text
+                    x="50"
+                    y="50"
+                >
+                    { unsafe { options.get_unchecked(usize::from(self.value)) } }
+                </text>
             </svg>
         }
     }
@@ -387,18 +393,25 @@ impl Component for Button {
         class.push("input button");
         if *svg {
             html! {
-                <g {class}
-                data-main-hint={name} data-aux-hint={help}
-                onpointerup={onclick}>
-                    {children.clone()}
+                <g
+                    {class}
+                    data-main-hint={name}
+                    data-aux-hint={help}
+                    onpointerup={onclick}
+                >
+                    { children.clone() }
                 </g>
             }
         } else {
             html! {
-                <button {class} type={submit.choose("submit", "button")}
-                data-main-hint={name} data-aux-hint={help}
-                onpointerup={onclick}>
-                    {children.clone()}
+                <button
+                    {class}
+                    type={submit.choose("submit", "button")}
+                    data-main-hint={name}
+                    data-aux-hint={help}
+                    onpointerup={onclick}
+                >
+                    { children.clone() }
                 </button>
             }
         }
@@ -434,14 +447,19 @@ impl<T: GraphPoint> Component for GraphEditorCanvas<T> {
                 // pass them to this component's props by obsoleting `GraphEditor::id` thus only
                 // having to pass the underlying `NodeRef`
                 let (canvas_id, id) = (*id, editor.id());
-                html! {<canvas ref={editor.canvas().clone()} id={canvas_id}
-                onpointerdown={emitter.reform(move  |e| AppEvent::Focus(id, e))}
-                onpointerup={emitter.reform(move    |e| AppEvent::Hover(id, MouseEvent::from(e)))}
-                onpointermove={emitter.reform(move  |e| AppEvent::Hover(id, MouseEvent::from(e)))}
-                onpointerenter={emitter.reform(move |e| AppEvent::Enter(id, MouseEvent::from(e)))}
-                onpointerout={emitter.reform(move   |_| AppEvent::Leave(id))}/>}
+                html! {
+                    <canvas
+                        ref={editor.canvas().clone()}
+                        id={canvas_id}
+                        onpointerdown={emitter.reform(move  |e| AppEvent::Focus(id, e))}
+                        onpointerup={emitter.reform(move    |e| AppEvent::Hover(id, MouseEvent::from(e)))}
+                        onpointermove={emitter.reform(move  |e| AppEvent::Hover(id, MouseEvent::from(e)))}
+                        onpointerenter={emitter.reform(move |e| AppEvent::Enter(id, MouseEvent::from(e)))}
+                        onpointerout={emitter.reform(move   |_| AppEvent::Leave(id))}
+                    />
+                }
             }
-            None => html! {"Error"},
+            None => html! { "Error" },
         }
     }
 
@@ -520,10 +538,10 @@ impl Component for Counter {
                     self.old_value = f64::NAN;
                 }
             }
-            true
+            return true
         }
-        .report()
-        .unwrap_or(false)
+        .report();
+        false
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
@@ -547,7 +565,9 @@ impl Component for Counter {
             >
                 <polygon class="upper" points="6,16 40,16 50,6 60,16 94,16" />
                 <text x="50" y="50">{ fmt.emit(self.value) }</text>
-                if !postfix.is_empty() { <text x="50" y="70">{ postfix }</text> }
+                if !postfix.is_empty() {
+                    <text x="50" y="70">{ postfix }</text>
+                }
                 if self.value != *min {
                     <polygon class="lower" points="6,84 40,84 50,94 60,84 94,84" />
                 }
@@ -579,7 +599,9 @@ pub fn Tab(props: &TabProps) -> Html {
             onpointerup={setter.reform(|_| ())}
             data-main-hint={name}
             data-aux-hint={desc}
-        ><p>{ name }</p></div>
+        >
+            <p >{ name }</p>
+        </div>
     }
 }
 
@@ -613,65 +635,96 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
     } = props;
     match input.as_ref().map(|x| x.get_aware().report()) {
         Some(Some(input)) => html! {
-            <Button {name} {help} class={classes!(class.clone(), "wide")}
-            onclick={onclick}>
-                <div class="inner-button-panel">
+            <Button
+                {name}
+                {help}
+                class={classes!(class.clone(), "wide")}
+                onclick={onclick}
+            >
+                <div
+                    class="inner-button-panel"
+                >
                     if *playing {
-                        <Button name="Stop playing" help="Click to stop the playback"
-                        onclick={emitter.reform(move |e: PointerEvent| {
+                        <Button
+                            name="Stop playing"
+                            help="Click to stop the playback"
+                            onclick={emitter.reform(move |e: PointerEvent| {
                             e.stop_propagation();
                             AppEvent::StopPlay
-                        })}>
-                            <img::Stop/>
+                        })}
+                        >
+                            <img::Stop />
                         </Button>
                     } else {
-                        <Button name="Play audio input" help="Click to hear how the input sounds"
-                        onclick={{
+                        <Button
+                            name="Play audio input"
+                            help="Click to hear how the input sounds"
+                            onclick={{
                             let s = input.outer();
                             emitter.reform(move |e: PointerEvent| {
                                 e.stop_propagation();
                                 AppEvent::PreparePlay(Some(s.clone()))
                             })
-                        }}>
-                            <img::Play/>
+                        }}
+                        >
+                            <img::Play />
                         </Button>
                     }
-                    <p>{input.desc(*bps)}</p>
-                    <Button name="Edit audio input" help="Click to edit the audio input"
-                    onclick={{
+                    <p >{ input.desc(*bps) }</p>
+                    <Button
+                        name="Edit audio input"
+                        help="Click to edit the audio input"
+                        onclick={{
                         let s = input.outer();
                         emitter.reform(move |e: PointerEvent| {
                             e.stop_propagation();
                             AppEvent::OpenPopup(Popup::EditInput(s.clone()))
                         })
-                    }}>
-                        <img::Settings/>
+                    }}
+                    >
+                        <img::Settings />
                     </Button>
                 </div>
             </Button>
         },
 
         Some(None) => html! {
-            <Button {name} {help} class={classes!(class.clone(), "wide")}>
-                <p style="color:red">{"Failed to access the audio input"}</p>
+            <Button
+                {name}
+                {help}
+                class={classes!(class.clone(), "wide")}
+            >
+                <p style="color:red">{ "Failed to access the audio input" }</p>
             </Button>
         },
 
         None => html! {
-            <Button {name} {help} class={classes!(class.clone(), "wide")}
-            onclick={onclick}>
-                <div class="inner-button-panel">
-                    <Button class="unavailable" name="Play audio input (not chosen)"
-                    help="Choose the audio input for the sound block to play it here"
-                    onclick={|e: PointerEvent| e.stop_propagation()}>
-                        <img::Play/>
+            <Button
+                {name}
+                {help}
+                class={classes!(class.clone(), "wide")}
+                onclick={onclick}
+            >
+                <div
+                    class="inner-button-panel"
+                >
+                    <Button
+                        class="unavailable"
+                        name="Play audio input (not chosen)"
+                        help="Choose the audio input for the sound block to play it here"
+                        onclick={|e: PointerEvent| e.stop_propagation()}
+                    >
+                        <img::Play />
                     </Button>
-                    <p>{"Not chosen"}</p>
-                    <Button class="unavailable" name="Edit audio input (not chosen)"
-                    help="Choose the audio input for the sound block to edit it \
+                    <p >{ "Not chosen" }</p>
+                    <Button
+                        class="unavailable"
+                        name="Edit audio input (not chosen)"
+                        help="Choose the audio input for the sound block to edit it \
                           by clicking here"
-                    onclick={|e: PointerEvent| e.stop_propagation()}>
-                        <img::Settings/>
+                        onclick={|e: PointerEvent| e.stop_propagation()}
+                    >
+                        <img::Settings />
                     </Button>
                 </div>
             </Button>

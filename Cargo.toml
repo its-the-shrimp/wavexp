@@ -3,13 +3,9 @@ members = ["packages/*"]
 resolver = "2"
 
 [workspace.lints.clippy]
-unit_arg = "allow"
-option_map_unit_fn = "allow"
-comparison_chain = "allow"
-
 missing_const_for_fn = "warn"
 single_char_lifetime_names = "warn"
-# arithmetic_side_effects = "warn"
+#arithmetic_side_effects = "warn"
 cloned_instead_of_copied = "warn"
 collection_is_never_read = "warn"
 deref_by_slicing = "warn"

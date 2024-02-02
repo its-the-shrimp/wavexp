@@ -11,8 +11,8 @@ use std::{cmp::Ordering, iter::once, mem::take, slice::from_ref};
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
     cell::Shared,
-    default,
-    ext::{BoolExt, OptionExt, SliceExt},
+    error::Result,
+    ext::{default, BoolExt, OptionExt, SliceExt},
     fallible, js_function, r64, window, ToAttrValue, R64,
 };
 use yew::{html, AttrValue, Callback, Html};
@@ -38,8 +38,7 @@ impl EditorContext {
         }
     }
 
-    #[apply(fallible!)]
-    pub fn register_action(&mut self, app: &mut AppContext, action: EditorAction) {
+    pub fn register_action(&mut self, app: &mut AppContext, action: EditorAction) -> Result {
         app.force_rerender();
         self.actions
             .drain(self.actions.len() - take(&mut self.undid_actions)..);
@@ -54,6 +53,7 @@ impl EditorContext {
                 }
             };
         }
+        Ok(())
     }
 }
 
@@ -287,7 +287,9 @@ impl Editor {
 
         html! {
             <>
-                <div id="main-panel">
+                <div
+                    id="main-panel"
+                >
                     <div
                         id="ctrl-panel"
                         class="dark-bg"
@@ -307,16 +309,23 @@ impl Editor {
                         if let Some(block) = block {
                             <div id="tab-list">{ block.tabs(ctx) }</div>
                             { block.sound.params(ctx, &sequencer) }
-                            <div id="general-ctrl" class="dark-bg">
+                            <div
+                                id="general-ctrl"
+                                class="dark-bg"
+                            >
                                 <Button
                                     name="Back to project-wide settings"
                                     onclick={emitter.reform(|_| AppEvent::Select(None))}
-                                ><img::House /></Button>
+                                >
+                                    <img::House />
+                                </Button>
                                 <Button
                                     name="Remove sound block"
                                     class="red-on-hover"
                                     onclick={emitter.reform(|_| AppEvent::Remove)}
-                                ><img::Cross /></Button>
+                                >
+                                    <img::Cross />
+                                </Button>
                             </div>
                         } else {
                             <div id="tab-list">{ sequencer.tabs(ctx) }</div>
@@ -328,8 +337,14 @@ impl Editor {
                         emitter={emitter.clone()}
                     />
                 </div>
-                <div id="io-panel" data-main-hint="Editor plane settings">
-                    <div class="horizontal-menu" id="actions">
+                <div
+                    id="io-panel"
+                    data-main-hint="Editor plane settings"
+                >
+                    <div
+                        class="horizontal-menu"
+                        id="actions"
+                    >
                         { for ctx
                             .actions()
                             .iter()
@@ -337,30 +352,41 @@ impl Editor {
                             .enumerate()
                             .map(|(i, a)| self.render_action(a, i, emitter)) }
                     </div>
-                    <div id="special-actions">
+                    <div
+                        id="special-actions"
+                    >
                         <Button
                             name="Special Action: Select"
                             class={(special_action == SpecialAction::Select).choose("small selected", "small")}
                             help="Click to select points when pressing Meta in an editor space"
                             onclick={emitter
                                 .reform(|_| AppEvent::SetSpecialAction(SpecialAction::Select))}
-                        ><img::Selection /></Button>
+                        >
+                            <img::Selection />
+                        </Button>
                         <Button
                             name="Special Action: Add"
                             class={(special_action == SpecialAction::Add).choose("small selected", "small")}
                             help="Click to add points when pressing Meta in an editor space"
                             onclick={emitter
                                 .reform(|_| AppEvent::SetSpecialAction(SpecialAction::Add))}
-                        ><img::Plus /></Button>
+                        >
+                            <img::Plus />
+                        </Button>
                         <Button
                             name="Special Action: Remove"
                             class={(special_action == SpecialAction::Remove).choose("small selected", "small")}
                             help="Click to remove points when pressing Meta in an editor space"
                             onclick={emitter
                                 .reform(|_| AppEvent::SetSpecialAction(SpecialAction::Remove))}
-                        ><img::Minus /></Button>
+                        >
+                            <img::Minus />
+                        </Button>
                     </div>
-                    <div id="editor-settings" data-main-hint="Editor settings">
+                    <div
+                        id="editor-settings"
+                        data-main-hint="Editor settings"
+                    >
                         <Switch
                             key="snap"
                             name="Interval for blocks to snap to"
@@ -381,14 +407,19 @@ impl Editor {
                         />
                     </div>
                     if sequencer.playback_ctx().all_playing() {
-                        <Button name="Stop" onclick={emitter.reform(|_| AppEvent::StopPlay)}>
+                        <Button
+                            name="Stop"
+                            onclick={emitter.reform(|_| AppEvent::StopPlay)}
+                        >
                             <img::Stop />
                         </Button>
                     } else {
                         <Button
                             name="Play"
                             onclick={emitter.reform(|_| AppEvent::PreparePlay(None))}
-                        ><img::Play /></Button>
+                        >
+                            <img::Play />
+                        </Button>
                     }
                     <canvas
                         id="sound-visualiser"
@@ -433,36 +464,39 @@ impl Editor {
             Ordering::Less if let Some(name) = action.name() => {
                 let index = self.ctx.undid_actions - index;
                 html! {
-                    <Button {name} class="undone"
-                    help={match index {
+                    <Button
+                        {name}
+                        class="undone"
+                        help={match index {
                         1 => AttrValue::Static("Click to redo this action"),
                         2 => AttrValue::Static("Click to redo this and the previous action"),
                         _ => format!("Click to redo this and {index} previous actions").into()
                     }}
-                    onclick={emitter.reform(move |_| AppEvent::Rewind(index))}>
-                        <s>{name}</s>
+                        onclick={emitter.reform(move |_| AppEvent::Rewind(index))}
+                    >
+                        <s >{ name }</s>
                     </Button>
                 }
             },
 
             Ordering::Equal => html! {
                 if let Some(name) = action.name() {
-                    <Button {name} class="selected" help="Last action">
-                        <p>{name}</p>
-                    </Button>
+                    <Button {name} class="selected" help="Last action"><p >{ name }</p></Button>
                 }
             },
 
             Ordering::Greater if let Some(name) = action.name() => {
                 let index = index - self.ctx.undid_actions;
                 html! {
-                    <Button {name}
-                    help={match index {
+                    <Button
+                        {name}
+                        help={match index {
                         1 => AttrValue::Static("Click to undo the next action"),
                         _ => format!("Click to undo {index} subsequent actions").into()
                     }}
-                    onclick={emitter.reform(move |_| AppEvent::Unwind(index))}>
-                        <p>{name}</p>
+                        onclick={emitter.reform(move |_| AppEvent::Unwind(index))}
+                    >
+                        <p >{ name }</p>
                     </Button>
                 }
             }

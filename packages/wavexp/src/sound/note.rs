@@ -6,19 +6,16 @@ use crate::{
     visual::{GraphEditor, GraphPoint},
 };
 use macro_rules_attribute::apply;
-use std::{
-    cmp::Ordering,
-    mem::replace,
-    num::NonZeroUsize,
-    ops::{Range, RangeInclusive},
-};
+use std::{cmp::Ordering, mem::replace, num::NonZeroUsize, ops::RangeBounds};
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
     cell::Shared,
-    default,
     error::{AppError, Result},
-    ext::{ArrayExt, OptionExt, RangeExt, ResultExt},
-    fallible, js_function, r32, r64, ArrayFrom, R32, R64,
+    ext::default,
+    ext::{ArrayExt, OptionExt, ResultExt},
+    fallible, js_function, r32, r64,
+    range::{RangeBoundsExt, RangeInclusiveV2, RangeV2},
+    ArrayFrom, R32, R64,
 };
 use web_sys::{AudioNode, Path2d};
 use yew::{html, Html};
@@ -44,16 +41,16 @@ impl Ord for NoteBlock {
 
 impl GraphPoint for NoteBlock {
     const EDITOR_NAME: &'static str = "Note Editor";
-    const Y_BOUND: Range<R64> = r64![0]..r64![Note::N_NOTES];
-    const SCALE_Y_BOUND: Range<R64> = {
-        let x = r64![10 - (Note::N_NOTES - 1) % 10 + Note::N_NOTES - 1];
-        x..x
+    const Y_BOUND: RangeV2<R64> = RangeV2 {
+        start: r64!(0),
+        end: r64!(Note::N_NOTES),
     };
-    const OFFSET_Y_BOUND: Range<R64> = {
-        let x = r64![(10 - Note::N_NOTES as i8 % 10) / -2];
-        x..x
-    };
-    const Y_SNAP: R64 = r64![1];
+    // // I wish...
+    // const SCALE_Y_BOUND: RangeV2<R64> = RangeV2::unit(Note::N_NOTES.ceil_to(10).into());
+    const SCALE_Y_BOUND: RangeV2<R64> =
+        RangeV2::unit(r64!(10 - (Note::N_NOTES - 1) % 10 + Note::N_NOTES - 1));
+    const OFFSET_Y_BOUND: RangeV2<R64> = RangeV2::unit(r64!((10 - Note::N_NOTES as i8 % 10) / -2));
+    const Y_SNAP: R64 = r64!(1);
 
     type Inner = Beats;
     type Y = Note;
@@ -63,7 +60,7 @@ impl GraphPoint for NoteBlock {
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
         Self {
             offset,
-            value: Note::from_index(y.into()).recip(),
+            value: Note::saturated(y.into()).recip(),
             len: r64![1],
         }
     }
@@ -86,6 +83,7 @@ impl GraphPoint for NoteBlock {
         [self.offset, self.value.recip().index().into()]
     }
 
+    #[apply(fallible!)]
     fn r#move(&mut self, delta: [R64; 2], meta: bool) {
         if meta {
             self.len += delta[0];
@@ -93,33 +91,32 @@ impl GraphPoint for NoteBlock {
             self.offset += delta[0];
             self.offset = R64::ZERO.max(self.offset);
         }
-        self.value -= delta[1].into();
+        self.value = (self.value - isize::from(delta[1]))?;
     }
 
     fn move_point(point: &mut [R64; 2], delta: [R64; 2], meta: bool) {
         if !meta {
             point[0] += delta[0];
         }
-        point[1] += delta[1];
+        point[1] += delta[1]
     }
 
     #[apply(fallible!)]
     fn in_hitbox(
         &self,
-        area: &[RangeInclusive<R64>; 2],
+        area: &[RangeInclusiveV2<R64>; 2],
         _: ContextRef,
         _: &Sequencer,
         _: Self::VisualContext,
     ) -> bool {
         area[1]
-            .clone()
             .map_bounds(usize::from)
             .contains(&self.value.recip().index())
             && (self.offset..=self.offset + self.len).overlap(&area[0])
     }
 
     fn fmt_loc(loc: [R64; 2]) -> String {
-        format!("{:.3}, {}", loc[0], Note::from_index(loc[1].into()).recip())
+        format!("{:.3}, {}", loc[0], Note::saturated(loc[1].into()).recip())
     }
 
     #[apply(fallible!)]
@@ -149,8 +146,8 @@ impl GraphPoint for NoteBlock {
         _: &Path2d,
         (sb_offset, n_reps): Self::VisualContext,
     ) {
-        let step = &canvas_size.div(&editor.scale());
-        let offset = &R64::array_from(editor.offset());
+        let step = canvas_size.div(editor.scale());
+        let offset = R64::array_from(editor.offset());
         for block in editor.data() {
             let [x, y] = block.loc().mul(step).sub(offset);
             solid.rect(*x, *y, *block.len * *step[0], *step[1]);
@@ -197,7 +194,8 @@ impl Default for NoteSound {
 impl NoteSound {
     pub const NAME: &'static str = "Simple Wave";
 
-    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> Result<()> {
+    #[apply(fallible!)]
+    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) {
         let pat = self.pattern.get()?;
         let Some(last) = pat.data().last() else {
             return Ok(());
@@ -205,7 +203,7 @@ impl NoteSound {
         let pat_len = (last.offset + last.len).to_secs(bps);
         let ctx = plug.context();
 
-        Ok(for rep in 0..self.rep_count.get() {
+        for rep in 0..self.rep_count.get() {
             for NoteBlock { offset, value, len } in pat.data() {
                 let block = ctx.create_gain()?;
                 let gain = block.gain();
@@ -233,16 +231,16 @@ impl NoteSound {
                     block_core.disconnect().map_err(AppError::from).report();
                 })));
             }
-        })
+        }
     }
 
-    pub fn len(&self) -> Result<Beats> {
-        Ok(self
-            .pattern
+    #[apply(fallible!)]
+    pub fn len(&self) -> Beats {
+        self.pattern
             .get()?
             .data()
             .last()
-            .map_or_default(|x| x.offset + x.len))
+            .map_or_default(|x| x.offset + x.len)
     }
 
     pub const fn rep_count(&self) -> NonZeroUsize {
@@ -252,48 +250,72 @@ impl NoteSound {
     pub fn params(&self, ctx: ContextRef) -> Html {
         let emitter = ctx.event_emitter();
         match ctx.selected_tab() {
-            0 /* General */ => html!{<div id="inputs">
-                <Slider key="note-vol"
-                setter={emitter.reform(|x| AppEvent::Volume(R32::from(x)))}
-                name="Note Volume"
-                initial={self.volume}/>
-                <Counter key="note-repcnt"
-                setter={emitter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
-                fmt={|x| format!("{x:.0}")}
-                name="Number Of Pattern Repetitions"
-                min={r64![1]}
-                initial={self.rep_count}/>
-            </div>},
-
-            1 /* Envelope */ => html!{<div id="inputs">
-                <Counter key="note-att"
-                setter={emitter.reform(AppEvent::Attack)}
-                name="Note Attack Time" postfix="Beats"
-                initial={self.attack}/>
-                <Counter key="note-dec"
-                setter={emitter.reform(AppEvent::Decay)}
-                name="Note Decay Time" postfix="Beats"
-                initial={self.decay}/>
-                <Slider key="note-sus"
-                setter={emitter.reform(|x| AppEvent::Sustain(R32::from(x)))}
-                name="Note Sustain Level"
-                initial={self.sustain}/>
-                <Counter key="note-rel"
-                setter={emitter.reform(AppEvent::Release)}
-                name="Note Release Time" postfix="Beats"
-                initial={self.release}/>
-            </div>},
-
-            2 /* Pattern */ => html!{
-                <GraphEditorCanvas<NoteBlock> editor={&self.pattern} {emitter}/>
+            0 /* General */ => html!{
+                <div
+                    id="inputs"
+                >
+                    <Slider
+                        key="note-vol"
+                        setter={emitter.reform(|x| AppEvent::Volume(R32::from(x)))}
+                        name="Note Volume"
+                        initial={self.volume}
+                    />
+                    <Counter
+                        key="note-repcnt"
+                        setter={emitter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
+                        fmt={|x: R64| (*x as usize).to_string()}
+                        name="Number Of Pattern Repetitions"
+                        min={r64![1]}
+                        initial={self.rep_count}
+                    />
+                </div>
             },
 
-            tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
+            1 /* Envelope */ => html!{
+                <div
+                    id="inputs"
+                >
+                    <Counter
+                        key="note-att"
+                        setter={emitter.reform(AppEvent::Attack)}
+                        name="Note Attack Time"
+                        postfix="Beats"
+                        initial={self.attack}
+                    />
+                    <Counter
+                        key="note-dec"
+                        setter={emitter.reform(AppEvent::Decay)}
+                        name="Note Decay Time"
+                        postfix="Beats"
+                        initial={self.decay}
+                    />
+                    <Slider
+                        key="note-sus"
+                        setter={emitter.reform(|x| AppEvent::Sustain(R32::from(x)))}
+                        name="Note Sustain Level"
+                        initial={self.sustain}
+                    />
+                    <Counter
+                        key="note-rel"
+                        setter={emitter.reform(AppEvent::Release)}
+                        name="Note Release Time"
+                        postfix="Beats"
+                        initial={self.release}
+                    />
+                </div>
+            },
+
+            2 /* Pattern */ => html!{
+                <GraphEditorCanvas<NoteBlock> editor={&self.pattern} {emitter} />
+            },
+
+            tab_id => html!{ <p style="color:red">{ format!("Invalid tab ID: {tab_id}") }</p> }
         }
     }
 
     /// `reset_sound` is set to `false` initially,
     /// if set to true, resets the sound block to an `Undefined` type
+    #[apply(fallible!)]
     pub fn handle_event(
         &mut self,
         event: &AppEvent,
@@ -301,8 +323,8 @@ impl NoteSound {
         sequencer: &Sequencer,
         reset_sound: &mut bool,
         offset: Beats,
-    ) -> Result<()> {
-        Ok(match *event {
+    ) {
+        match *event {
             AppEvent::Volume(to) => ctx.register_action(EditorAction::SetVolume {
                 from: replace(&mut self.volume, to),
                 to,
@@ -404,6 +426,6 @@ impl NoteSound {
                         .handle_event(event, ctx, sequencer, || (offset, self.rep_count))?;
                 }
             }
-        })
+        }
     }
 }

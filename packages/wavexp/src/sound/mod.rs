@@ -1,4 +1,5 @@
 mod note;
+use macro_rules_attribute::apply;
 use note::*;
 mod noise;
 use noise::*;
@@ -15,17 +16,12 @@ use std::{
     future::Future,
     mem::{replace, variant_count},
     num::NonZeroUsize,
-    ops::{Add, AddAssign, Div, Sub, SubAssign},
+    ops::{Add, Div, Sub},
     rc::Rc,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use wavexp_utils::{
-    default,
-    error::{AppError, Result},
-    ext::ResultExt,
-    r32, r64, R32, R64,
-};
+use wavexp_utils::{error::Result, ext::default, fallible, r32, r64, R32, R64};
 use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, BaseAudioContext, File};
 use yew::{html, Html};
 
@@ -52,56 +48,58 @@ impl FromBeats for Beats {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord)]
-// Safety invariant: `self.0 <= Self::MAX.0`
+// Invariant: `self.0 <= Self::MAX.0`
 pub struct Note(u8);
 
 impl Display for Note {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        Display::fmt(unsafe { Self::NAMES.get_unchecked(self.0 as usize) }, f)
+        self.name().fmt(f)
     }
 }
 
-impl Add<isize> for Note {
-    type Output = Note;
-    fn add(self, rhs: isize) -> Self::Output {
-        self.checked_add(rhs)
-            .ok_or_else(AppError::on_none)
-            .report()
-            .unwrap_or(self)
-    }
+macro_rules! convert_rhs {
+    (id $rhs:ident) => {
+        $rhs
+    };
+    (try_from $rhs:ident) => {
+        $rhs.try_into().ok()?
+    };
+    (try_neg $rhs:ident) => {
+        $rhs.checked_neg()?
+    };
+    (try_neg_from $rhs:ident) => {
+        $rhs.checked_neg()?.try_into().ok()?
+    };
 }
 
-impl AddAssign<isize> for Note {
-    fn add_assign(&mut self, rhs: isize) {
-        self.checked_add_assign(rhs);
-    }
+macro_rules! impl_arith {
+    ($trait:ident :: $method:ident as $impl:path, $mode:ident: $($int:ty),+) => {
+        $(
+            impl $trait<$int> for Note {
+                type Output = Option<Note>;
+
+                fn $method(self, rhs: $int) -> Self::Output {
+                    Self::new($impl(self.0, convert_rhs!($mode rhs))?)
+                }
+            }
+        )+
+    };
 }
 
-impl Sub<isize> for Note {
-    type Output = Note;
-    fn sub(self, rhs: isize) -> Self::Output {
-        self.checked_sub(rhs)
-            .ok_or_else(AppError::on_none)
-            .report()
-            .unwrap_or(self)
-    }
-}
+impl_arith!(Add::add as u8::checked_add_signed, id:           i8);
+impl_arith!(Add::add as u8::checked_add_signed, try_from:     i16, i32, isize, i64);
+impl_arith!(Add::add as u8::checked_add, id:                  u8);
+impl_arith!(Add::add as u8::checked_add, try_from:            u16, u32, usize, u64);
+impl_arith!(Sub::sub as u8::checked_add_signed, try_neg:      i8);
+impl_arith!(Sub::sub as u8::checked_add_signed, try_neg_from: i16, i32, isize, i64);
+impl_arith!(Sub::sub as u8::checked_sub, id:                  u8);
+impl_arith!(Sub::sub as u8::checked_sub, try_from:            u16, u32, usize, u64);
 
-// TODO: remove the side effects by introducing `Try{Add/Sub/Mul/Div}` traits
 impl Sub for Note {
-    type Output = isize;
-    fn sub(self, rhs: Self) -> Self::Output {
-        let x = self.0 as isize;
-        x.checked_sub(rhs.0 as isize)
-            .ok_or_else(AppError::on_none)
-            .report()
-            .unwrap_or(x)
-    }
-}
+    type Output = Option<u8>;
 
-impl SubAssign<isize> for Note {
-    fn sub_assign(&mut self, rhs: isize) {
-        self.checked_sub_assign(rhs);
+    fn sub(self, rhs: Self) -> Self::Output {
+        self.0.checked_sub(rhs.0)
     }
 }
 
@@ -154,47 +152,19 @@ impl Note {
         "E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4",
     ];
 
-    pub const fn checked_add(self, rhs: isize) -> Option<Self> {
-        let new = self.0 as isize + rhs;
-        if new >= 0 && new < Self::N_NOTES as isize {
-            Some(Self(new as u8))
+    #[inline]
+    pub const fn new(index: u8) -> Option<Self> {
+        if index <= Self::MAX.0 {
+            Some(Self(index))
         } else {
             None
         }
     }
 
-    pub fn checked_add_assign(&mut self, rhs: isize) -> bool {
-        if let Some(x) = self.checked_add(rhs) {
-            *self = x;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub const fn checked_sub(self, rhs: isize) -> Option<Self> {
-        let new = self.0 as isize - rhs;
-        if new >= 0 && new < Self::N_NOTES as isize {
-            Some(Self(new as u8))
-        } else {
-            None
-        }
-    }
-
-    pub fn checked_sub_assign(&mut self, rhs: isize) -> bool {
-        if let Some(x) = self.checked_sub(rhs) {
-            *self = x;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub const fn from_index(value: usize) -> Self {
-        if value >= Self::FREQS.len() {
-            Self::MAX
-        } else {
-            Self(value as u8)
+    pub const fn saturated(index: u8) -> Self {
+        match Self::new(index) {
+            Some(res) => res,
+            None => Self::MAX,
         }
     }
 
@@ -206,12 +176,16 @@ impl Note {
         unsafe { *Self::FREQS.get_unchecked(self.0 as usize) }
     }
 
+    pub fn name(&self) -> &'static str {
+        unsafe { Self::NAMES.get_unchecked(self.0 as usize) }
+    }
+
     pub const fn recip(self) -> Self {
         Self(Self::MAX.0 - self.0)
     }
 
-    pub fn pitch_coef(&self) -> R64 {
-        r64! {*self - Self::MID}.div(12u8).exp2()
+    pub fn pitch_coef(&self) -> Option<R64> {
+        Some(r64!(self.sub(Self::MID)?).div(12u8).exp2())
     }
 }
 
@@ -301,7 +275,8 @@ impl AudioInput {
 
     /// Bake all of the changes into a buffer that will be accessible through `.baked()` method.
     /// If an error occurs, the input will appear unbaked.
-    pub fn bake(&mut self, bps: Beats) -> Result<()> {
+    #[apply(fallible!)]
+    pub fn bake(&mut self, bps: Beats) {
         if self.pending_changes == self.baked_changes {
             return Ok(());
         };
@@ -325,7 +300,7 @@ impl AudioInput {
             self.baked.copy_to_channel(&data[cut_start..], i as i32)?;
         }
 
-        Ok(self.baked_changes = self.pending_changes)
+        self.baked_changes = self.pending_changes
     }
 
     /// Buffer with all the requested changes baked in.
@@ -376,12 +351,13 @@ impl Sound {
         SoundType::Custom
     ];
 
-    pub fn new(sound_type: SoundType) -> Result<Self> {
-        Ok(match sound_type {
+    #[apply(fallible!)]
+    pub fn new(sound_type: SoundType) -> Self {
+        match sound_type {
             SoundType::Note => Self::Note(default()),
             SoundType::Noise => Self::Noise(NoiseSound::new()?),
             SoundType::Custom => Self::Custom(default()),
-        })
+        }
     }
 
     pub const fn name(&self) -> &'static str {
@@ -431,14 +407,18 @@ impl Sound {
         match self {
             Self::None => {
                 let emitter = ctx.event_emitter();
-                html! {<div class="horizontal-menu">
-                    {for Sound::TYPES.iter().map(|x| html!{
+                html! {
+                    <div
+                        class="horizontal-menu"
+                    >
+                        { for Sound::TYPES.iter().map(|x| html!{
                         <Button name={x.name()}
                             onclick={emitter.reform(|_| AppEvent::SetBlockType(*x))}>
                             <p>{x.name()}</p>
                         </Button>
-                    })}
-                </div>}
+                    }) }
+                    </div>
+                }
             }
 
             Self::Note(inner) => inner.params(ctx),
@@ -447,13 +427,14 @@ impl Sound {
         }
     }
 
+    #[apply(fallible!)]
     pub fn handle_event(
         &mut self,
         event: &AppEvent,
         mut ctx: ContextMut,
         sequencer: &Sequencer,
         offset: Beats,
-    ) -> Result<()> {
+    ) {
         let r = &mut false;
         match self {
             Sound::None => match event {
@@ -482,6 +463,5 @@ impl Sound {
         if *r {
             *self = Self::None
         }
-        Ok(())
     }
 }

@@ -11,6 +11,9 @@
 #![feature(if_let_guard)]
 #![feature(try_find)]
 #![feature(iterator_try_collect)]
+#![feature(inline_const)]
+#![feature(array_try_map)]
+#![feature(const_trait_impl)]
 
 mod app;
 mod ctx;

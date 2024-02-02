@@ -14,6 +14,7 @@ use web_sys::{
 use crate::{document, ext::HtmlDocumentExt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// TODO: optimise by using an enum to delay conversion to a JsValue
 pub struct AppError(js_sys::Error);
 
 impl From<JsValue> for AppError {
@@ -52,8 +53,30 @@ impl_into_app_error! {
 #[macro_export]
 macro_rules! app_error {
     ($x:literal $(,)? $($arg:tt)*) => {
-        $crate::AppError::new(&format!($x, $($arg)*))
+        ::wavexp_utils::error::AppError::new(&format!($x, $($arg)*))
     };
+}
+
+/// a copy of `anyhow`'s `bail!` macro
+#[macro_export]
+macro_rules! bail {
+    ($($arg:tt)*) => {
+        return Err(::wavexp_utils::app_error!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! ensure {
+    ($cond:expr, $($msg:tt)*) => {
+        if !$cond {
+            ::wavexp_utils::bail!($($msg)*)
+        }
+    };
+    (let $p:pat = $e:expr, $($msg:tt)*) => {
+        let $p = $e else {
+            ::wavexp_utils::bail!($($msg)*)
+        };
+    }
 }
 
 impl AppError {
@@ -84,7 +107,7 @@ pub enum ResultV2<T, E> {
     Err(E),
 }
 
-pub type Result<T, E = AppError> = std::result::Result<T, E>;
+pub type Result<T = (), E = AppError> = std::result::Result<T, E>;
 
 impl<T, F, E: Into<F>> FromResidual<Result<Infallible, E>> for ResultV2<T, F> {
     fn from_residual(residual: Result<Infallible, E>) -> Self {
@@ -129,34 +152,12 @@ macro_rules! type_or {
 }
 
 #[macro_export]
-macro_rules! err_type {
-    () => { ::wavexp_utils::error::AppError };
-    (#[error = $t:ty]) => { $t };
-    (#[$_:meta] $($t:tt)*) => { ::wavexp_utils::err_type!($($t)*) }
-}
-
-#[macro_export]
-macro_rules! remove_err_type {
-    (error = $($t:tt)*) => { doc = "" };
-    ($($t:tt)*) => { $($t)* };
-}
-
-#[macro_export]
-macro_rules! reconstruct_arg {
-    (self) => { self };
-    (&self) => { self };
-    (&mut self) => { self };
-    (($($t:tt),+): $_t:ty) => { ($(::wavexp_utils::reconstruct_arg!($t)),+) };
-    ($name:ident: $_t:ty) => { $name }
-}
-
-#[macro_export]
 macro_rules! fallible {
     (
         $(#[$meta:meta])* $v:vis fn $name:ident($($arg:tt)*) $(-> $ret:ty)? $body:block
     ) => {
         $(#[$meta])*
-        $v fn $name($($arg)*) -> Result<::wavexp_utils::type_or!($($ret)?), ::wavexp_utils::error::AppError> {
+        $v fn $name($($arg)*) -> ::wavexp_utils::error::Result<::wavexp_utils::type_or!($($ret)?)> {
             let res: ::wavexp_utils::error::ResultV2<_, _> = try $body;
             match res {
                 ::wavexp_utils::error::ResultV2::Ok(x) => Result::Ok(x),

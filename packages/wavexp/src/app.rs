@@ -155,10 +155,10 @@ impl Component for App {
                     },
                 )?;
             }
-            take(&mut self.ctx.rerender_needed)
+            return take(&mut self.ctx.rerender_needed)
         }
-        .report()
-        .unwrap_or(false)
+        .report();
+        false
     }
 
     fn view(&self, _: &Context<Self>) -> Html {

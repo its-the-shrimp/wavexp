@@ -12,14 +12,17 @@ use std::{
     cmp::Ordering,
     mem::{replace, transmute},
     num::NonZeroUsize,
-    ops::{Range, RangeInclusive},
+    ops::RangeBounds,
 };
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
     cell::Shared,
     error::{AppError, Result},
-    ext::{ArrayExt, OptionExt, RangeExt, ResultExt},
-    fallible, js_function, r32, r64, ArrayFrom, R32, R64,
+    ext::default,
+    ext::{ArrayExt, OptionExt, ResultExt},
+    fallible, js_function, r32, r64,
+    range::{RangeBoundsExt, RangeInclusiveV2, RangeV2},
+    ArrayFrom, R32, R64,
 };
 use web_sys::{AudioNode, Path2d};
 use yew::{html, Html};
@@ -44,9 +47,9 @@ impl Ord for CustomBlock {
 
 impl GraphPoint for CustomBlock {
     const EDITOR_NAME: &'static str = NoteBlock::EDITOR_NAME;
-    const Y_BOUND: Range<R64> = NoteBlock::Y_BOUND;
-    const SCALE_Y_BOUND: Range<R64> = NoteBlock::SCALE_Y_BOUND;
-    const OFFSET_Y_BOUND: Range<R64> = NoteBlock::OFFSET_Y_BOUND;
+    const Y_BOUND: RangeV2<R64> = NoteBlock::Y_BOUND;
+    const SCALE_Y_BOUND: RangeV2<R64> = NoteBlock::SCALE_Y_BOUND;
+    const OFFSET_Y_BOUND: RangeV2<R64> = NoteBlock::OFFSET_Y_BOUND;
     const Y_SNAP: R64 = NoteBlock::Y_SNAP;
 
     type Inner = ();
@@ -57,7 +60,7 @@ impl GraphPoint for CustomBlock {
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
         Self {
             offset,
-            pitch: Note::from_index(y.into()).recip(),
+            pitch: Note::saturated(y.into()).recip(),
         }
     }
 
@@ -79,49 +82,49 @@ impl GraphPoint for CustomBlock {
         [self.offset, self.pitch.recip().index().into()]
     }
 
+    #[apply(fallible!)]
     fn r#move(&mut self, delta: [R64; 2], _: bool) {
         self.offset += delta[0];
-        self.pitch -= delta[1].into();
+        self.pitch = (self.pitch - isize::from(delta[1]))?;
     }
 
     fn move_point(point: &mut [R64; 2], delta: [R64; 2], _: bool) {
         point[0] += delta[0];
-        point[1] += delta[1];
+        point[1] += delta[1]
     }
 
     #[apply(fallible!)]
     fn in_hitbox(
         &self,
-        area: &[RangeInclusive<R64>; 2],
+        area: &[RangeInclusiveV2<R64>; 2],
         _: ContextRef,
         _: &Sequencer,
         (.., len): Self::VisualContext,
     ) -> bool {
         area[1]
-            .clone()
             .map_bounds(usize::from)
             .contains(&self.pitch.recip().index())
-            && (self.offset..=self.offset + len / self.pitch.pitch_coef()).overlap(&area[0])
+            && (self.offset..=self.offset + len / self.pitch.pitch_coef()?).overlap(&area[0])
     }
 
     fn fmt_loc(loc: [R64; 2]) -> String {
-        format!("{:.3}, {}", loc[0], Note::from_index(loc[1].into()).recip())
+        format!("{:.3}, {}", loc[0], Note::saturated(loc[1].into()).recip())
     }
 
-    #[apply(fallible!)]
     fn on_move(
         editor: &mut GraphEditor<Self>,
         ctx: ContextMut,
         _: Cursor,
         _: [R64; 2],
         point: Option<usize>,
-    ) {
+    ) -> Result {
         let Some(last) = editor.data().len().checked_sub(1) else {
             return Ok(());
         };
         if point.map_or_else(|| editor.selection().contains(&last), |x| x == last) {
             ctx.emit_event(AppEvent::RedrawEditorPlane)
         }
+        Ok(())
     }
 
     #[apply(fallible!)]
@@ -136,8 +139,8 @@ impl GraphPoint for CustomBlock {
     ) {
         let bps = sequencer.bps();
         let len = len.secs_to_beats(bps);
-        let step = &canvas_size.div(&editor.scale());
-        let offset = &R64::array_from(editor.offset());
+        let step = canvas_size.div(editor.scale());
+        let offset = R64::array_from(editor.offset());
         dotted.rect(
             -10.0,
             Note::MID.index() as f64 * *step[1] - *offset[1],
@@ -149,15 +152,16 @@ impl GraphPoint for CustomBlock {
             solid.rect(
                 *x,
                 *y,
-                *len / *block.pitch.pitch_coef() * *step[0],
+                *len / *block.pitch.pitch_coef()? * *step[0],
                 *step[1],
             );
         }
 
-        let total_len = editor
-            .data()
-            .last()
-            .map_or_default(|x| x.offset + len / x.pitch.pitch_coef());
+        let total_len = if let Some(last) = editor.data().last() {
+            last.offset + len / last.pitch.pitch_coef()?
+        } else {
+            default()
+        };
         if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
             let progress = (ctx.frame() - start).secs_to_beats(bps) - sb_offset;
             if progress < total_len * n_reps {
@@ -223,12 +227,12 @@ impl CustomSound {
             return Ok(());
         };
         let len = src.baked_duration() / self.speed;
-        let pat_len = last.offset.to_secs(bps) + len / last.pitch.pitch_coef();
+        let pat_len = last.offset.to_secs(bps) + len / last.pitch.pitch_coef()?;
         let ctx = plug.context();
 
         for rep in 0..self.rep_count.get() {
             for CustomBlock { offset, pitch } in pat.data() {
-                let coef = pitch.pitch_coef();
+                let coef = pitch.pitch_coef()?;
                 let block = ctx.create_gain()?;
                 let gain = block.gain();
                 let start = now + self_offset + pat_len * rep + offset.to_secs(bps);
@@ -244,7 +248,7 @@ impl CustomSound {
                 gain.linear_ramp_to_value_at_time(0.0, *at)?;
 
                 let block_core = ctx.create_buffer_source()?;
-                block_core.set_buffer(src.baked()?.into());
+                block_core.set_buffer(Some(src.baked()?));
                 block_core.playback_rate().set_value(*(self.speed * coef));
                 block_core
                     .connect_with_audio_node(&block)?
@@ -258,12 +262,15 @@ impl CustomSound {
         }
     }
 
-    pub fn len(&self, bps: Beats) -> Result<Beats> {
-        Ok(if let Some(block) = self.pattern.get()?.data().last() && let Some(src) = &self.src {
+    #[apply(fallible!)]
+    pub fn len(&self, bps: Beats) -> Beats {
+        if let Some(block) = self.pattern.get()?.data().last() && let Some(src) = &self.src {
             src.get()?.baked_duration().secs_to_beats(bps)
-                / self.speed / block.pitch.pitch_coef()
+                / self.speed / block.pitch.pitch_coef()?
                 + block.offset
-        } else {r64![0]})
+        } else {
+            r64![0]
+        }
     }
 
     pub const fn rep_count(&self) -> NonZeroUsize {
@@ -273,52 +280,82 @@ impl CustomSound {
     pub fn params(&self, ctx: ContextRef, sequencer: &Sequencer) -> Html {
         let emitter = ctx.event_emitter();
         match ctx.selected_tab() {
-            0 /* General */ => html!{<div id="inputs">
-                <Slider key="custom-vol"
-                setter={emitter.reform(|x| AppEvent::Volume(R32::from(x)))}
-                name="Custom Audio Volume"
-                initial={self.volume}/>
-                <Counter key="custom-repcnt"
-                setter={emitter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
-                fmt={|x| format!("{x:.0}")}
-                name="Number Of Pattern Repetitions"
-                min={r64![1]}
-                initial={self.rep_count}/>
-                <Counter key="note-speed"
-                setter={emitter.reform(|x| AppEvent::Speed(R32::from(x)))}
-                fmt={|x| format!("{x:.2}x")}
-                name="Playback speed"
-                initial={self.speed}/>
-                <AudioInputButton name="Audio input" help="Click to change"
-                onclick={emitter.reform(|_| AppEvent::OpenPopup(Popup::ChooseInput))}
-                playing={sequencer.playback_ctx().played_input().is_some()}
-                bps={sequencer.bps()} {emitter} input={&self.src}/>
-            </div>},
-
-            1 /* Envelope */ => html!{<div id="inputs">
-                <Counter key="custom-att"
-                setter={emitter.reform(AppEvent::Attack)}
-                name="Audio Attack Time" postfix="Beats"
-                initial={self.attack}/>
-                <Counter key="custom-dec"
-                setter={emitter.reform(AppEvent::Decay)}
-                name="Audio Decay Time" postfix="Beats"
-                initial={self.decay}/>
-                <Slider key="custom-sus"
-                setter={emitter.reform(|x| AppEvent::Sustain(R32::from(x)))}
-                name="Audio Sustain Level"
-                initial={self.sustain}/>
-                <Counter key="custom-rel"
-                setter={emitter.reform(AppEvent::Release)}
-                name="Audio Release Time" postfix="Beats"
-                initial={self.release}/>
-            </div>},
-
-            2 /* Pattern */ => html!{
-                <GraphEditorCanvas<CustomBlock> editor={&self.pattern} {emitter}/>
+            0 /* General */ => html!{
+                <div
+                    id="inputs"
+                >
+                    <Slider
+                        key="custom-vol"
+                        setter={emitter.reform(|x| AppEvent::Volume(R32::from(x)))}
+                        name="Custom Audio Volume"
+                        initial={self.volume}
+                    />
+                    <Counter
+                        key="custom-repcnt"
+                        setter={emitter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
+                        fmt={|x| format!("{x:.0}")}
+                        name="Number Of Pattern Repetitions"
+                        min={r64![1]}
+                        initial={self.rep_count}
+                    />
+                    <Counter
+                        key="note-speed"
+                        setter={emitter.reform(|x| AppEvent::Speed(R32::from(x)))}
+                        fmt={|x| format!("{x:.2}x")}
+                        name="Playback speed"
+                        initial={self.speed}
+                    />
+                    <AudioInputButton
+                        name="Audio input"
+                        help="Click to change"
+                        onclick={emitter.reform(|_| AppEvent::OpenPopup(Popup::ChooseInput))}
+                        playing={sequencer.playback_ctx().played_input().is_some()}
+                        bps={sequencer.bps()}
+                        {emitter}
+                        input={&self.src}
+                    />
+                </div>
             },
 
-            tab_id => html!{<p style="color:red">{format!("Invalid tab ID: {tab_id}")}</p>}
+            1 /* Envelope */ => html!{
+                <div
+                    id="inputs"
+                >
+                    <Counter
+                        key="custom-att"
+                        setter={emitter.reform(AppEvent::Attack)}
+                        name="Audio Attack Time"
+                        postfix="Beats"
+                        initial={self.attack}
+                    />
+                    <Counter
+                        key="custom-dec"
+                        setter={emitter.reform(AppEvent::Decay)}
+                        name="Audio Decay Time"
+                        postfix="Beats"
+                        initial={self.decay}
+                    />
+                    <Slider
+                        key="custom-sus"
+                        setter={emitter.reform(|x| AppEvent::Sustain(R32::from(x)))}
+                        name="Audio Sustain Level"
+                        initial={self.sustain}
+                    />
+                    <Counter
+                        key="custom-rel"
+                        setter={emitter.reform(AppEvent::Release)}
+                        name="Audio Release Time"
+                        postfix="Beats"
+                        initial={self.release}
+                    />
+                </div>
+            },
+
+            2 /* Pattern */ => html! {
+                <GraphEditorCanvas<CustomBlock> editor={&self.pattern} {emitter} />
+            },
+
+            tab_id => html!{ <p style="color:red">{ format!("Invalid tab ID: {tab_id}") }</p> }
         }
     }
 
@@ -331,8 +368,8 @@ impl CustomSound {
         sequencer: &Sequencer,
         reset_sound: &mut bool,
         offset: Beats,
-    ) -> Result<()> {
-        Ok(match *event {
+    ) -> Result {
+        match *event {
             AppEvent::Volume(to) => ctx.register_action(EditorAction::SetVolume {
                 from: replace(&mut self.volume, to),
                 to,
@@ -496,6 +533,7 @@ impl CustomSound {
                         })?;
                 }
             }
-        })
+        }
+        Ok(())
     }
 }

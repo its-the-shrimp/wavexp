@@ -9,7 +9,7 @@ use std::{
 
 use yew::html::ImplicitClone;
 
-use crate::{app_error, default, AppError, Result};
+use crate::{app_error, bail, ensure, ext::default, AppError, Result};
 
 /// this exists to circumvent a limiatation on static variables that Rust imposes, which prevents
 /// them from containing types that don't implement `Sync`. On any other architecture this
@@ -40,6 +40,7 @@ impl<'src, T> Deref for SharedRef<'src, T> {
 }
 
 impl<'src, T> Clone for SharedRef<'src, T> {
+    #[allow(clippy::arithmetic_side_effects)]
     fn clone(&self) -> Self {
         let &Self {
             value,
@@ -57,7 +58,11 @@ impl<'src, T> Clone for SharedRef<'src, T> {
 
 impl<'src, T> Drop for SharedRef<'src, T> {
     fn drop(&mut self) {
-        unsafe { *self.count.as_mut() -= 1 }
+        unsafe {
+            let cnt = self.count.as_mut();
+            // Safety: the counter was incremented when the ref was created
+            *cnt = cnt.unchecked_sub(1)
+        }
     }
 }
 
@@ -187,13 +192,21 @@ impl<'src, T> Clone for SharedAwareRef<'src, T> {
 
 impl<'src, T> Drop for SharedAwareRef<'src, T> {
     fn drop(&mut self) {
-        unsafe { (*self.outer.0.get()).1 -= 1 }
+        // Safety: `cnt` was incremented when the ref was created so this will never underflow
+        unsafe {
+            let cnt = &mut (*self.outer.0.get()).1;
+            *cnt = cnt.unchecked_sub(1)
+        }
     }
 }
 
 impl<'src, T> From<SharedAwareRefMut<'src, T>> for SharedAwareRef<'src, T> {
     fn from(SharedAwareRefMut { value, outer, .. }: SharedAwareRefMut<'src, T>) -> Self {
-        unsafe { (*outer.0.get()).1 -= 2 }
+        // Safety: `cnt` is guaranteed to be -1
+        unsafe {
+            let cnt = &mut (*outer.0.get()).1;
+            *cnt = 1;
+        }
         Self { value, outer }
     }
 }
@@ -312,10 +325,9 @@ impl<T> From<T> for Shared<T> {
 impl<T> Shared<T> {
     pub fn get(&self) -> Result<SharedRef<'_, T>> {
         let (value, count) = unsafe { self.0.get().as_mut().unwrap_unchecked() };
-        if *count < 0 {
-            return Err(app_error!("already mutably borrowed"));
-        }
-        *count += 1;
+        ensure!(*count >= 0, "already mutably borrowed");
+        ensure!(let Some(new_count) = count.checked_add(1), "too many aliases");
+        *count = new_count;
         Ok(SharedRef {
             value: value.into(),
             count: count.into(),
@@ -326,7 +338,7 @@ impl<T> Shared<T> {
     pub fn get_mut(&self) -> Result<SharedRefMut<'_, T>> {
         let (value, count) = unsafe { self.0.get().as_mut().unwrap_unchecked() };
         match count.cmp(&&mut 0) {
-            Ordering::Less => Err(app_error!("already mutably borrowed")),
+            Ordering::Less => bail!("already mutably borrowed"),
             Ordering::Equal => {
                 *count = -1;
                 Ok(SharedRefMut {
@@ -335,16 +347,17 @@ impl<T> Shared<T> {
                     marker: default(),
                 })
             }
-            Ordering::Greater => Err(app_error!("already borrowed")),
+            Ordering::Greater => bail!("already borrowed"),
         }
     }
 
     pub fn get_aware(&self) -> Result<SharedAwareRef<'_, T>> {
         let (value, count) = unsafe { self.0.get().as_mut().unwrap_unchecked() };
-        if *count < 0 {
-            return Err(app_error!("already mutably borrowed"));
-        }
-        *count += 1;
+        ensure!(*count >= 0, "already mutably borrowed");
+        let Some(new_count) = count.checked_add(1) else {
+            bail!("too many aliases")
+        };
+        *count = new_count;
         Ok(SharedAwareRef {
             value: value.into(),
             outer: self,
@@ -354,7 +367,7 @@ impl<T> Shared<T> {
     pub fn get_aware_mut(&self) -> Result<SharedAwareRefMut<'_, T>> {
         let (value, count) = unsafe { self.0.get().as_mut().unwrap_unchecked() };
         match count.cmp(&&mut 0) {
-            Ordering::Less => Err(app_error!("already mutably borrowed")),
+            Ordering::Less => bail!("already mutably borrowed"),
             Ordering::Equal => {
                 *count = -1;
                 Ok(SharedAwareRefMut {
@@ -363,7 +376,7 @@ impl<T> Shared<T> {
                     marker: default(),
                 })
             }
-            Ordering::Greater => Err(app_error!("already borrowed")),
+            Ordering::Greater => bail!("already borrowed"),
         }
     }
 }

@@ -355,7 +355,7 @@ impl EditorAction {
                     editor_id: eid_1,
                     offset_delta: (off_1 + off_2)
                         .ok_or_else(|| (a.clone(), b.clone(), AppError::on_none()))?,
-                    scale_delta: s_1.zip(s_2, |d1, d2| d1 * d2),
+                    scale_delta: s_1.mul(s_2),
                 },
                 None,
             )),
@@ -388,7 +388,7 @@ impl<'app, 'editor> Deref for ContextRef<'app, 'editor> {
 }
 
 impl<'app, 'editor> ContextMut<'app, 'editor> {
-    pub fn register_action(&mut self, action: EditorAction) -> Result<()> {
+    pub fn register_action(&mut self, action: EditorAction) -> Result {
         self.editor.register_action(self.app, action)
     }
 
