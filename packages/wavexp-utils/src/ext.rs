@@ -433,6 +433,7 @@ pub trait SliceExt<T> {
     /// # Safety
     /// `index` must be a valid index into `self`
     unsafe fn get_unchecked_aware(&self, index: usize) -> SliceRef<'_, T>;
+    fn try_split_at(&self, mid: usize) -> Option<(&[T], &[T])>;
 }
 
 impl<T> SliceExt<T> for [T] {
@@ -509,6 +510,15 @@ impl<T> SliceExt<T> for [T] {
 
     unsafe fn get_unchecked_aware(&self, index: usize) -> SliceRef<'_, T> {
         SliceRef::raw(self.get_unchecked(index), index)
+    }
+
+    fn try_split_at(&self, mid: usize) -> Option<(&[T], &[T])> {
+        if mid > self.len() {
+            return None;
+        }
+        // SAFETY: `[ptr; mid]` and `[mid; len]` are inside `self`, which
+        // fulfills the requirements of `split_at_unchecked`.
+        Some(unsafe { self.split_at_unchecked(mid) })
     }
 }
 

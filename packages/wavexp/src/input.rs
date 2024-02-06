@@ -15,7 +15,9 @@ use wavexp_utils::{
     error::AppError,
     ext::default,
     ext::{BoolExt, HtmlCanvasExt, HtmlElementExt, ResultExt},
-    fallible, r64, Pipe, Point, R64,
+    fallible, r64,
+    real::R64,
+    Pipe, Point,
 };
 use web_sys::{Element, HtmlCanvasElement, KeyboardEvent, MouseEvent, PointerEvent};
 use yew::{

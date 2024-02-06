@@ -27,7 +27,8 @@ use wavexp_utils::{
     iter::ToEveryNth,
     js_array, r64,
     range::{IntoRange, RangeBoundsExt, RangeInclusiveV2, RangeV2},
-    ArrayFrom, IntoArray, Point, RoundTo, SliceRef, TransposedArray, R64,
+    real::R64,
+    ArrayFrom, IntoArray, Point, RoundTo, SliceRef, TransposedArray,
 };
 use web_sys::{Element, HtmlCanvasElement, HtmlElement, ImageData, Path2d, SvgElement};
 use yew::{NodeRef, TargetCast};
@@ -259,7 +260,7 @@ pub trait GraphPoint: Sized + Clone + Ord + 'static {
     /// type of the Y coordinate, used to allow modifying points' Y axis without unsafe code or
     /// additional checks, which would be needed to modify the points' X axis
     type Y;
-    /// Type of the context passed to all the trait's functions related to visuals through `GraphEditor::handle_event()`.
+    /// Type of the context passed to all the trait's functions relayed to visuals through `GraphEditor::handle_event()`.
     /// Such functions are `in_hitbox` and `on_redraw`.
     type VisualContext: Copy;
 
@@ -278,7 +279,7 @@ pub trait GraphPoint: Sized + Clone + Ord + 'static {
     fn loc(&self) -> [R64; 2];
     /// change the location of `self` in user coordinates when moved in the UI
     /// `meta` signifies whether the meta key was held while moving the point
-    fn r#move(&mut self, delta: [R64; 2], meta: bool) -> Result<()>;
+    fn móve(&mut self, delta: [R64; 2], meta: bool) -> Result<()>;
     /// change the location of the point in user coordinates when moved in the UI
     /// `meta` signifies whether the meta key was held while moving the point
     fn move_point(point: &mut [R64; 2], delta: [R64; 2], meta: bool);
@@ -510,7 +511,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         res
     }
 
-    pub fn data(&self) -> &[T] {
+    pub const fn data(&self) -> &Vec<T> {
         &self.data
     }
 
@@ -719,7 +720,7 @@ impl<T: GraphPoint> GraphEditor<T> {
             }
 
             Focus::Point { id, .. } => {
-                let main = || Cow::from(T::fmt_loc(unsafe { self.data.get_unchecked(id) }.loc()));
+                let main = || unsafe { T::fmt_loc(self.data.get_unchecked(id).loc()).into() };
                 match *cursor {
                     Buttons {
                         left: false,
@@ -891,7 +892,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         _ctx: ContextMut,
         _sequencer: &Sequencer,
         _cur_loc: [R64; 2],
-    ) -> Result<()> {
+    ) -> Result {
         Ok(())
     }
 
@@ -1153,7 +1154,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         };
                         if delta.any(|x| *x != 0) {
                             let id = *id;
-                            T::r#move(self.data.get_mut(id)?, delta, false)?;
+                            T::móve(self.data.get_mut(id)?, delta, false)?;
                             self.redraw = true;
                             T::on_move(self, ctx.as_mut(), cursor, delta, Some(id))?
                         }
@@ -1205,7 +1206,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     if delta.any(|x| *x != 0) {
                         self.inner.redraw = true;
                         for &id in &self.inner.selection {
-                            T::r#move(self.data.get_mut(id)?, delta, *meta)?;
+                            T::móve(self.data.get_mut(id)?, delta, *meta)?;
                         }
                         T::move_point(&mut self.inner.selection_src, delta, *meta);
                         T::on_move(self, ctx.as_mut(), cursor, delta, None)?
@@ -1360,7 +1361,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                             if editor_id == self.id {
                                 self.redraw = true;
                                 delta = delta.map(|x| -x);
-                                T::r#move(self.data.get_mut(point_id)?, delta, false)?
+                                T::móve(self.data.get_mut(point_id)?, delta, false)?
                             }
                         }
 
@@ -1372,7 +1373,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                                 self.redraw = true;
                                 delta = delta.map(neg);
                                 for &id in &self.inner.selection {
-                                    T::r#move(self.data.get_mut(id)?, delta, false)?;
+                                    T::móve(self.data.get_mut(id)?, delta, false)?;
                                 }
                                 T::move_point(&mut self.selection_src, delta, false)
                             }
@@ -1442,7 +1443,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         } => {
                             if editor_id == self.id {
                                 self.redraw = true;
-                                T::r#move(self.data.get_mut(point_id)?, delta, false)?
+                                T::móve(self.data.get_mut(point_id)?, delta, false)?
                             }
                         }
 
@@ -1450,7 +1451,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                             if editor_id == self.id {
                                 self.redraw = true;
                                 for &id in &self.inner.selection {
-                                    T::r#move(self.data.get_mut(id)?, delta, false)?;
+                                    T::móve(self.data.get_mut(id)?, delta, false)?;
                                 }
                                 T::move_point(&mut self.selection_src, delta, false)
                             }

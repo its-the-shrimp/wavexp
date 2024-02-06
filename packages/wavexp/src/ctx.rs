@@ -1,6 +1,6 @@
 //! This module contains the types used for communication between components of the app
 
-use std::{any::Any, borrow::Cow, mem::transmute, num::NonZeroUsize, ops::Deref, rc::Rc};
+use std::{any::Any, borrow::Cow, mem::transmute, num::NonZeroU32, ops::Deref, rc::Rc};
 
 use crate::{
     app::AppContext,
@@ -13,7 +13,9 @@ use wavexp_utils::{
     cell::Shared,
     error::{AppError, Result},
     ext::ArrayExt,
-    Point, R32, R64,
+    real::R32,
+    real::R64,
+    Point,
 };
 use web_sys::{AudioBuffer, Event, KeyboardEvent, MouseEvent, PointerEvent, UiEvent};
 
@@ -96,7 +98,7 @@ pub enum AppEvent {
     /// The contained number is the number of actions to redo.
     Rewind(usize),
     /// set the repetition count of a sound block
-    RepCount(NonZeroUsize),
+    RepCount(NonZeroU32),
     /// file was selected to be a new audio input to be added
     AudioUploaded(Event),
     /// audio source was decoded and is ready to be used
@@ -195,10 +197,7 @@ pub enum EditorAction {
     /// set master gain level for the composition
     SetMasterVolume { from: R32, to: R32 },
     /// set repetition count of a sound block
-    SetRepCount {
-        from: NonZeroUsize,
-        to: NonZeroUsize,
-    },
+    SetRepCount { from: NonZeroU32, to: NonZeroU32 },
     /// set playback speed of the audio source of a Custom Audio sound block
     SetSpeed { from: R32, to: R32 },
     /// register a new audio input

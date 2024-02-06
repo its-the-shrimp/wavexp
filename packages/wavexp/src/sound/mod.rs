@@ -1,27 +1,27 @@
-mod note;
-use macro_rules_attribute::apply;
-use note::*;
-mod noise;
-use noise::*;
 mod custom;
-use custom::*;
+mod noise;
+mod note;
 
 use crate::{
     ctx::{AppEvent, ContextMut, ContextRef, EditorAction},
     input::Button,
     sequencer::Sequencer,
 };
+pub use custom::*;
+use macro_rules_attribute::apply;
+pub use noise::*;
+pub use note::*;
 use std::{
     fmt::{self, Display, Formatter},
     future::Future,
     mem::{replace, variant_count},
-    num::NonZeroUsize,
-    ops::{Add, Div, Sub},
+    num::NonZeroU32,
+    ops::{Add, Deref, Div, Sub},
     rc::Rc,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use wavexp_utils::{error::Result, ext::default, fallible, r32, r64, R32, R64};
+use wavexp_utils::{error::Result, ext::default, fallible, r32, r64, real::R32, real::R64};
 use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, BaseAudioContext, File};
 use yew::{html, Html};
 
@@ -50,6 +50,14 @@ impl FromBeats for Beats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord)]
 // Invariant: `self.0 <= Self::MAX.0`
 pub struct Note(u8);
+
+impl Deref for Note {
+    type Target = u8;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 impl Display for Note {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -108,42 +116,42 @@ impl Note {
     pub const MID: Note = Note(Self::N_NOTES as u8 / 2);
     pub const N_NOTES: usize = Self::FREQS.len();
     pub const FREQS: [R32; 36] = [
-        r32![65.410], /*C2*/
-        r32![69.300], /*C#2*/
-        r32![73.420], /*D2*/
-        r32![77.780], /*D#2*/
-        r32![82.410], /*E2*/
-        r32![87.310], /*F2*/
-        r32![92.500], /*F#2*/
-        r32![98.000], /*G2*/
-        r32![103.83], /*G#2*/
-        r32![110.00], /*A2*/
-        r32![116.54], /*A#2*/
-        r32![123.47], /*B2*/
-        r32![130.81], /*C3*/
-        r32![138.59], /*C#3*/
-        r32![146.83], /*D3*/
-        r32![155.56], /*D#3*/
-        r32![164.81], /*E3*/
-        r32![174.61], /*F3*/
-        r32![185.00], /*F#3*/
-        r32![196.00], /*G3*/
-        r32![207.65], /*G#3*/
-        r32![220.00], /*A3*/
-        r32![233.08], /*A#3*/
-        r32![246.94], /*B3*/
-        r32![261.63], /*C4*/
-        r32![277.18], /*C#4*/
-        r32![293.66], /*D4*/
-        r32![311.13], /*D#4*/
-        r32![329.63], /*E4*/
-        r32![349.23], /*F4*/
-        r32![369.99], /*F#4*/
-        r32![392.00], /*G4*/
-        r32![415.30], /*G#4*/
-        r32![440.00], /*A4*/
-        r32![466.16], /*A#4*/
-        r32![493.88], /*B4*/
+        r32!(65.410), // C2
+        r32!(69.300), // C#2
+        r32!(73.420), // D2
+        r32!(77.780), // D#2
+        r32!(82.410), // E2
+        r32!(87.310), // F2
+        r32!(92.500), // F#2
+        r32!(98.000), // G2
+        r32!(103.83), // G#2
+        r32!(110.00), // A2
+        r32!(116.54), // A#2
+        r32!(123.47), // B2
+        r32!(130.81), // C3
+        r32!(138.59), // C#3
+        r32!(146.83), // D3
+        r32!(155.56), // D#3
+        r32!(164.81), // E3
+        r32!(174.61), // F3
+        r32!(185.00), // F#3
+        r32!(196.00), // G3
+        r32!(207.65), // G#3
+        r32!(220.00), // A3
+        r32!(233.08), // A#3
+        r32!(246.94), // B3
+        r32!(261.63), // C4
+        r32!(277.18), // C#4
+        r32!(293.66), // D4
+        r32!(311.13), // D#4
+        r32!(329.63), // E4
+        r32!(349.23), // F4
+        r32!(369.99), // F#4
+        r32!(392.00), // G4
+        r32!(415.30), // G#4
+        r32!(440.00), // A4
+        r32!(466.16), // A#4
+        r32!(493.88), // B4
     ];
 
     pub const NAMES: [&'static str; 36] = [
@@ -184,8 +192,8 @@ impl Note {
         Self(Self::MAX.0 - self.0)
     }
 
-    pub fn pitch_coef(&self) -> Option<R64> {
-        Some(r64!(self.sub(Self::MID)?).div(12u8).exp2())
+    pub fn pitch_coef(&self) -> R64 {
+        r64!(self.0 as i8 - Self::MID.0 as i8).div(12u8).exp2()
     }
 }
 
@@ -211,37 +219,40 @@ pub struct AudioInput {
 }
 
 impl AudioInput {
-    pub fn new_file(file: File, sequencer: &Sequencer) -> impl Future<Output = Result<Self>> {
-        Self::new_file_base(file, sequencer.audio_ctx().clone())
-    }
-
-    async fn new_file_base(file: File, audio_ctx: BaseAudioContext) -> Result<Self> {
-        let raw = JsFuture::from(file.array_buffer()).await?.dyn_into()?;
-        let mut raw: AudioBuffer = JsFuture::from(audio_ctx.decode_audio_data(&raw)?)
-            .await?
-            .dyn_into()?;
-        if raw.number_of_channels() < Sequencer::CHANNEL_COUNT {
-            let new_raw = AudioBuffer::new(
-                AudioBufferOptions::new(raw.length(), Sequencer::SAMPLE_RATE as f32)
+    pub fn new(name: Rc<str>, mut buffer: AudioBuffer) -> Result<Self> {
+        if buffer.number_of_channels() != Sequencer::CHANNEL_COUNT {
+            let new_buffer = AudioBuffer::new(
+                AudioBufferOptions::new(buffer.length(), Sequencer::SAMPLE_RATE as f32)
                     .number_of_channels(Sequencer::CHANNEL_COUNT),
             )?;
-            let data = raw.get_channel_data(0)?;
-            for i in 0..Sequencer::CHANNEL_COUNT as i32 {
-                new_raw.copy_to_channel(&data, i)?;
+            let main_ch = buffer.get_channel_data(0)?;
+            for ch_id in 0..Sequencer::CHANNEL_COUNT as i32 {
+                new_buffer.copy_to_channel(&main_ch, ch_id)?;
             }
-            raw = new_raw;
+            buffer = new_buffer;
         }
-        let name = format!("File {:?}", file.name()).into();
-        let duration = R64::try_from(raw.duration())?;
+        let duration = buffer.duration().try_into()?;
         Ok(Self {
             name,
-            baked: raw.clone(),
-            raw,
             duration,
+            baked: buffer.clone(),
+            raw: buffer,
             raw_duration: duration,
             pending_changes: default(),
             baked_changes: default(),
         })
+    }
+
+    pub fn from_file(file: File, sequencer: &Sequencer) -> impl Future<Output = Result<Self>> {
+        Self::from_file_base(file, sequencer.audio_ctx().clone())
+    }
+
+    async fn from_file_base(file: File, audio_ctx: BaseAudioContext) -> Result<Self> {
+        let raw = JsFuture::from(file.array_buffer()).await?.dyn_into()?;
+        let buffer: AudioBuffer = JsFuture::from(audio_ctx.decode_audio_data(&raw)?)
+            .await?
+            .dyn_into()?;
+        Self::new(format!("File {:?}", file.name()).into(), buffer)
     }
 
     /// Name of the input, exists solely for the user's convenience.
@@ -261,8 +272,10 @@ impl AudioInput {
         self.duration
     }
 
-    // /// Raw buffer, unchanged since the moment the input was created.
-    // pub fn raw(&self) -> &AudioBuffer {&self.raw}
+    // Raw buffer, unchanged since the moment the input was created.
+    pub const fn raw(&self) -> &AudioBuffer {
+        &self.raw
+    }
 
     /// Get a struct holding all the changes yet to be baked into the input.
     pub const fn changes(&self) -> AudioInputChanges {
@@ -275,8 +288,7 @@ impl AudioInput {
 
     /// Bake all of the changes into a buffer that will be accessible through `.baked()` method.
     /// If an error occurs, the input will appear unbaked.
-    #[apply(fallible!)]
-    pub fn bake(&mut self, bps: Beats) {
+    pub fn bake(&mut self, bps: Beats) -> Result {
         if self.pending_changes == self.baked_changes {
             return Ok(());
         };
@@ -300,7 +312,7 @@ impl AudioInput {
             self.baked.copy_to_channel(&data[cut_start..], i as i32)?;
         }
 
-        self.baked_changes = self.pending_changes
+        Ok(self.baked_changes = self.pending_changes)
     }
 
     /// Buffer with all the requested changes baked in.
@@ -351,11 +363,10 @@ impl Sound {
         SoundType::Custom
     ];
 
-    #[apply(fallible!)]
     pub fn new(sound_type: SoundType) -> Self {
         match sound_type {
             SoundType::Note => Self::Note(default()),
-            SoundType::Noise => Self::Noise(NoiseSound::new()?),
+            SoundType::Noise => Self::Noise(default()),
             SoundType::Custom => Self::Custom(default()),
         }
     }
@@ -369,14 +380,14 @@ impl Sound {
         }
     }
 
-    pub fn prepare(&mut self, bps: Beats) -> Result<()> {
+    pub fn prepare(&mut self, bps: Beats) -> Result {
         match self {
             Sound::Custom(inner) => inner.prepare(bps),
             _ => Ok(()),
         }
     }
 
-    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> Result<()> {
+    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> Result {
         match self {
             Self::None => Ok(()),
             Self::Note(inner) => inner.play(plug, now, self_offset, bps),
@@ -387,16 +398,16 @@ impl Sound {
 
     pub fn len(&self, bps: Beats) -> Result<Beats> {
         match self {
-            Self::None => Ok(r64![1]),
+            Self::None => Ok(r64!(1)),
             Self::Note(inner) => inner.len(),
             Self::Noise(inner) => inner.len(),
             Self::Custom(inner) => inner.len(bps),
         }
     }
 
-    pub const fn rep_count(&self) -> NonZeroUsize {
+    pub const fn rep_count(&self) -> NonZeroU32 {
         match self {
-            Self::None => NonZeroUsize::MIN,
+            Self::None => NonZeroU32::MIN,
             Self::Note(inner) => inner.rep_count(),
             Self::Noise(inner) => inner.rep_count(),
             Self::Custom(inner) => inner.rep_count(),
@@ -439,7 +450,7 @@ impl Sound {
         match self {
             Sound::None => match event {
                 &AppEvent::SetBlockType(ty) => {
-                    *self = Self::new(ty)?;
+                    *self = Self::new(ty);
                     ctx.register_action(EditorAction::SetBlockType(ty))?;
                     ctx.emit_event(AppEvent::RedrawEditorPlane);
                 }
@@ -447,7 +458,7 @@ impl Sound {
                 AppEvent::Redo(actions) => {
                     for action in actions.iter() {
                         if let &EditorAction::SetBlockType(ty) = action {
-                            *self = Self::new(ty)?;
+                            *self = Self::new(ty);
                             ctx.emit_event(AppEvent::RedrawEditorPlane);
                         }
                     }

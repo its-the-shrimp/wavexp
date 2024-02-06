@@ -11,26 +11,27 @@ use macro_rules_attribute::apply;
 use std::{
     cmp::Ordering,
     mem::{replace, transmute},
-    num::NonZeroUsize,
+    num::NonZeroU32,
     ops::RangeBounds,
 };
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
     cell::Shared,
     error::{AppError, Result},
-    ext::default,
     ext::{ArrayExt, OptionExt, ResultExt},
     fallible, js_function, r32, r64,
     range::{RangeBoundsExt, RangeInclusiveV2, RangeV2},
-    ArrayFrom, R32, R64,
+    real::R32,
+    real::R64,
+    ArrayFrom,
 };
 use web_sys::{AudioNode, Path2d};
 use yew::{html, Html};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CustomBlock {
-    offset: R64,
-    pitch: Note,
+    pub offset: R64,
+    pub pitch: Note,
 }
 
 impl PartialOrd for CustomBlock {
@@ -55,7 +56,7 @@ impl GraphPoint for CustomBlock {
     type Inner = ();
     type Y = Note;
     /// (sound block offset, number of repetitions of the pattern, audio duration)
-    type VisualContext = (Beats, NonZeroUsize, Beats);
+    type VisualContext = (Beats, NonZeroU32, Beats);
 
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
         Self {
@@ -83,7 +84,7 @@ impl GraphPoint for CustomBlock {
     }
 
     #[apply(fallible!)]
-    fn r#move(&mut self, delta: [R64; 2], _: bool) {
+    fn móve(&mut self, delta: [R64; 2], _: bool) {
         self.offset += delta[0];
         self.pitch = (self.pitch - isize::from(delta[1]))?;
     }
@@ -93,18 +94,17 @@ impl GraphPoint for CustomBlock {
         point[1] += delta[1]
     }
 
-    #[apply(fallible!)]
     fn in_hitbox(
         &self,
         area: &[RangeInclusiveV2<R64>; 2],
         _: ContextRef,
         _: &Sequencer,
         (.., len): Self::VisualContext,
-    ) -> bool {
-        area[1]
+    ) -> Result<bool> {
+        Ok(area[1]
             .map_bounds(usize::from)
             .contains(&self.pitch.recip().index())
-            && (self.offset..=self.offset + len / self.pitch.pitch_coef()?).overlap(&area[0])
+            && (self.offset..=self.offset + len / self.pitch.pitch_coef()).overlap(&area[0]))
     }
 
     fn fmt_loc(loc: [R64; 2]) -> String {
@@ -127,7 +127,6 @@ impl GraphPoint for CustomBlock {
         Ok(())
     }
 
-    #[apply(fallible!)]
     fn on_redraw(
         editor: &mut GraphEditor<Self>,
         ctx: ContextRef,
@@ -136,7 +135,7 @@ impl GraphPoint for CustomBlock {
         solid: &Path2d,
         dotted: &Path2d,
         (sb_offset, n_reps, len): Self::VisualContext,
-    ) {
+    ) -> Result {
         let bps = sequencer.bps();
         let len = len.secs_to_beats(bps);
         let step = canvas_size.div(editor.scale());
@@ -152,16 +151,15 @@ impl GraphPoint for CustomBlock {
             solid.rect(
                 *x,
                 *y,
-                *len / *block.pitch.pitch_coef()? * *step[0],
+                *len / *block.pitch.pitch_coef() * *step[0],
                 *step[1],
             );
         }
 
-        let total_len = if let Some(last) = editor.data().last() {
-            last.offset + len / last.pitch.pitch_coef()?
-        } else {
-            default()
-        };
+        let total_len = editor
+            .data()
+            .last()
+            .map_or_default(|last| last.offset + len / last.pitch.pitch_coef());
         if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
             let progress = (ctx.frame() - start).secs_to_beats(bps) - sb_offset;
             if progress < total_len * n_reps {
@@ -171,38 +169,39 @@ impl GraphPoint for CustomBlock {
                 solid.line_to(*x, *canvas_size[1]);
             }
         }
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct CustomSound {
-    pattern: Shared<GraphEditor<CustomBlock>>,
-    src: Option<Shared<AudioInput>>,
-    volume: R32,
-    attack: Beats,
-    decay: Beats,
-    sustain: R32,
-    release: Beats,
-    rep_count: NonZeroUsize,
-    speed: R32,
+    pub pattern: Shared<GraphEditor<CustomBlock>>,
+    pub src: Option<Shared<AudioInput>>,
+    pub volume: R32,
+    pub attack: Beats,
+    pub decay: Beats,
+    pub sustain: R32,
+    pub release: Beats,
+    pub rep_count: NonZeroU32,
+    pub speed: R32,
 }
 
 impl Default for CustomSound {
     fn default() -> Self {
         Self {
             pattern: GraphEditor::new(vec![CustomBlock {
-                offset: r64![0],
+                offset: r64!(0),
                 pitch: Note::MID,
             }])
             .into(),
             src: None,
-            volume: r32![1],
-            attack: r64![0],
-            decay: r64![0],
-            sustain: r32![1],
-            release: r64![0],
-            rep_count: NonZeroUsize::MIN,
-            speed: r32![1],
+            volume: r32!(1),
+            attack: r64!(0),
+            decay: r64!(0),
+            sustain: r32!(1),
+            release: r64!(0),
+            rep_count: NonZeroU32::MIN,
+            speed: r32!(1),
         }
     }
 }
@@ -210,12 +209,11 @@ impl Default for CustomSound {
 impl CustomSound {
     pub const NAME: &'static str = "Custom Audio";
 
-    pub fn prepare(&mut self, bps: Beats) -> Result<()> {
+    pub fn prepare(&mut self, bps: Beats) -> Result {
         if let Some(src) = &self.src {
-            src.get_mut()?.bake(bps)
-        } else {
-            Ok(())
+            src.get_mut()?.bake(bps)?
         }
+        Ok(())
     }
 
     #[apply(fallible!)]
@@ -227,12 +225,12 @@ impl CustomSound {
             return Ok(());
         };
         let len = src.baked_duration() / self.speed;
-        let pat_len = last.offset.to_secs(bps) + len / last.pitch.pitch_coef()?;
+        let pat_len = last.offset.to_secs(bps) + len / last.pitch.pitch_coef();
         let ctx = plug.context();
 
         for rep in 0..self.rep_count.get() {
             for CustomBlock { offset, pitch } in pat.data() {
-                let coef = pitch.pitch_coef()?;
+                let coef = pitch.pitch_coef();
                 let block = ctx.create_gain()?;
                 let gain = block.gain();
                 let start = now + self_offset + pat_len * rep + offset.to_secs(bps);
@@ -262,18 +260,17 @@ impl CustomSound {
         }
     }
 
-    #[apply(fallible!)]
-    pub fn len(&self, bps: Beats) -> Beats {
-        if let Some(block) = self.pattern.get()?.data().last() && let Some(src) = &self.src {
+    pub fn len(&self, bps: Beats) -> Result<Beats> {
+        Ok(if let Some(block) = self.pattern.get()?.data().last() && let Some(src) = &self.src {
             src.get()?.baked_duration().secs_to_beats(bps)
-                / self.speed / block.pitch.pitch_coef()?
+                / self.speed / block.pitch.pitch_coef()
                 + block.offset
         } else {
-            r64![0]
-        }
+            R64::ZERO
+        })
     }
 
-    pub const fn rep_count(&self) -> NonZeroUsize {
+    pub const fn rep_count(&self) -> NonZeroU32 {
         self.rep_count
     }
 
@@ -292,10 +289,10 @@ impl CustomSound {
                     />
                     <Counter
                         key="custom-repcnt"
-                        setter={emitter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
+                        setter={emitter.reform(|x| AppEvent::RepCount(NonZeroU32::from(x)))}
                         fmt={|x| format!("{x:.0}")}
                         name="Number Of Pattern Repetitions"
-                        min={r64![1]}
+                        min=1
                         initial={self.rep_count}
                     />
                     <Counter

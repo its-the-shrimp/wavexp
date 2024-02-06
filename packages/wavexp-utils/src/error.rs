@@ -2,7 +2,9 @@ use std::{
     collections::TryReserveError,
     convert::Infallible,
     hint::unreachable_unchecked,
+    num::TryFromIntError,
     ops::{ControlFlow, FromResidual, Try},
+    str::Utf8Error,
 };
 
 use wasm_bindgen::{JsCast, JsValue};
@@ -16,6 +18,12 @@ use crate::{document, ext::HtmlDocumentExt};
 #[derive(Debug, Clone, PartialEq, Eq)]
 // TODO: optimise by using an enum to delay conversion to a JsValue
 pub struct AppError(js_sys::Error);
+
+impl From<Infallible> for AppError {
+    fn from(value: Infallible) -> Self {
+        match value {}
+    }
+}
 
 impl From<JsValue> for AppError {
     fn from(value: JsValue) -> Self {
@@ -47,13 +55,15 @@ macro_rules! impl_into_app_error {
 impl_into_app_error! {
     hound::Error,
     TryReserveError,
+    Utf8Error,
+    TryFromIntError,
 }
 
 /// `format!`-like macro to create an `AppError`
 #[macro_export]
 macro_rules! app_error {
-    ($x:literal $(,)? $($arg:tt)*) => {
-        ::wavexp_utils::error::AppError::new(&format!($x, $($arg)*))
+    ($($arg:tt)*) => {
+        ::wavexp_utils::error::AppError::new(&format!($($arg)*))
     };
 }
 

@@ -8,25 +8,27 @@ use crate::{
 };
 use js_sys::Math::random;
 use macro_rules_attribute::apply;
-use std::{mem::replace, num::NonZeroUsize, ops::RangeBounds};
+use std::{array::from_fn, cell::LazyCell, mem::replace, num::NonZeroU32, ops::RangeBounds};
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
-    cell::Shared,
+    cell::{Shared, WasmCell},
     error::{AppError, Result},
     ext::default,
     ext::{ArrayExt, OptionExt, ResultExt},
     fallible, js_function, r32, r64,
     range::{RangeBoundsExt, RangeInclusiveV2, RangeV2},
-    ArrayFrom, Pipe, R32, R64,
+    real::R32,
+    real::R64,
+    ArrayFrom,
 };
 use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, Path2d};
 use yew::{html, Html};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NoiseBlock {
-    offset: Beats,
-    pitch: Note,
-    len: Beats,
+    pub offset: Beats,
+    pub pitch: Note,
+    pub len: Beats,
 }
 
 impl GraphPoint for NoiseBlock {
@@ -39,13 +41,13 @@ impl GraphPoint for NoiseBlock {
     type Inner = Beats;
     type Y = Note;
     /// (sound block offset, number of repetitions of the pattern)
-    type VisualContext = (Beats, NonZeroUsize);
+    type VisualContext = (Beats, NonZeroU32);
 
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
         Self {
             offset,
             pitch: Note::saturated(y.into()).recip(),
-            len: r64![1],
+            len: r64!(1),
         }
     }
 
@@ -66,7 +68,7 @@ impl GraphPoint for NoiseBlock {
     }
 
     #[apply(fallible!)]
-    fn r#move(&mut self, delta: [R64; 2], meta: bool) {
+    fn móve(&mut self, delta: [R64; 2], meta: bool) {
         if meta {
             self.len += delta[0];
         } else {
@@ -134,43 +136,48 @@ impl GraphPoint for NoiseBlock {
 
 #[derive(Debug, Clone)]
 pub struct NoiseSound {
-    pattern: Shared<GraphEditor<NoiseBlock>>,
-    src: AudioBuffer,
-    volume: R32,
-    attack: Beats,
-    decay: Beats,
-    sustain: R32,
-    release: Beats,
-    rep_count: NonZeroUsize,
+    pub pattern: Shared<GraphEditor<NoiseBlock>>,
+    pub volume: R32,
+    pub attack: Beats,
+    pub decay: Beats,
+    pub sustain: R32,
+    pub release: Beats,
+    pub rep_count: NonZeroU32,
 }
+
+impl Default for NoiseSound {
+    fn default() -> Self {
+        Self {
+            pattern: default(),
+            volume: r32!(0.2),
+            attack: r64!(0),
+            decay: r64!(0),
+            sustain: r32!(1),
+            release: r64!(0.2),
+            rep_count: NonZeroU32::MIN,
+        }
+    }
+}
+
+static NOISE: WasmCell<LazyCell<Option<AudioBuffer>>> = WasmCell(LazyCell::new(|| {
+    let res: Result<AudioBuffer> = try {
+        let buf: [f32; Sequencer::SAMPLE_RATE as usize] = from_fn(|_| random() as f32 * 2.0 - 1.0);
+        let res = AudioBuffer::new(
+            AudioBufferOptions::new(Sequencer::SAMPLE_RATE, Sequencer::SAMPLE_RATE as f32)
+                .number_of_channels(Sequencer::CHANNEL_COUNT),
+        )?;
+        for i in 0..Sequencer::CHANNEL_COUNT as i32 {
+            res.copy_to_channel(&buf, i)?;
+        }
+        res
+    };
+    res.report()
+}));
 
 impl NoiseSound {
     pub const NAME: &'static str = "White Noise";
 
-    #[apply(fallible!)]
-    pub fn new() -> Self {
-        let mut buf = vec![0.0; Sequencer::SAMPLE_RATE as usize]; // 1 second of noise
-        buf.fill_with(|| random() as f32 * 2.0 - 1.0);
-        let src = AudioBufferOptions::new(Sequencer::SAMPLE_RATE, Sequencer::SAMPLE_RATE as f32)
-            .number_of_channels(Sequencer::CHANNEL_COUNT)
-            .pipe(|x| AudioBuffer::new(x))?;
-        for i in 0..Sequencer::CHANNEL_COUNT as i32 {
-            src.copy_to_channel(&buf, i)?;
-        }
-        Self {
-            pattern: default(),
-            src,
-            volume: r32![0.2],
-            attack: r64![0],
-            decay: r64![0],
-            sustain: r32![1],
-            release: r64![0.2],
-            rep_count: NonZeroUsize::MIN,
-        }
-    }
-
-    #[apply(fallible!)]
-    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) {
+    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> Result {
         let pat = self.pattern.get()?;
         let Some(last) = pat.data().last() else {
             return Ok(());
@@ -195,10 +202,10 @@ impl NoiseSound {
                 gain.linear_ramp_to_value_at_time(0.0, *at)?;
 
                 let block_core = ctx.create_buffer_source()?;
-                block_core.set_buffer(Some(&self.src));
+                block_core.set_buffer(NOISE.as_ref());
                 block_core
                     .playback_rate()
-                    .set_value(*pitch.pitch_coef()? as f32);
+                    .set_value(*pitch.pitch_coef() as f32);
                 block_core.set_loop(true);
                 block_core
                     .connect_with_audio_node(&block)?
@@ -211,18 +218,19 @@ impl NoiseSound {
                 })));
             }
         }
+        Ok(())
     }
 
-    #[apply(fallible!)]
-    pub fn len(&self) -> Beats {
-        self.pattern
+    pub fn len(&self) -> Result<Beats> {
+        Ok(self
+            .pattern
             .get()?
             .data()
             .last()
-            .map_or_default(|x| x.offset + x.len)
+            .map_or_default(|x| x.offset + x.len))
     }
 
-    pub const fn rep_count(&self) -> NonZeroUsize {
+    pub const fn rep_count(&self) -> NonZeroU32 {
         self.rep_count
     }
 
@@ -241,10 +249,10 @@ impl NoiseSound {
                     />
                     <Counter
                         key="noise-repcnt"
-                        setter={emitter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
+                        setter={emitter.reform(|x| AppEvent::RepCount(NonZeroU32::from(x)))}
                         fmt={|x| format!("{x:.0}")}
                         name="Number Of Pattern Repetitions"
-                        min={r64![1]}
+                        min=1
                         initial={self.rep_count}
                     />
                 </div>

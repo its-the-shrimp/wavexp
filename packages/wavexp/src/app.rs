@@ -3,7 +3,7 @@ use std::mem::take;
 use js_sys::Function;
 use macro_rules_attribute::apply;
 use wasm_bindgen::JsCast;
-use wavexp_utils::{ext::ResultExt, fallible, js_function, now, r64, window, R64};
+use wavexp_utils::{ext::ResultExt, fallible, js_function, now, r64, real::R64, window};
 use yew::{html, html::Context, Callback, Component, Html};
 
 use crate::{
@@ -76,7 +76,7 @@ impl Component for App {
             projects: vec![Editor::new().unwrap()],
             selected_proj: 0,
             ctx: AppContext::new(ctx.link().callback(|x| x)).unwrap(),
-            frame_emitter: js_function!(|x| cb.emit(R64::new_or(r64![0], x))),
+            frame_emitter: js_function!(|x| cb.emit(R64::new_or(r64!(0), x))),
             popups: vec![],
         };
         window()
@@ -164,11 +164,10 @@ impl Component for App {
     fn view(&self, _: &Context<Self>) -> Html {
         fallible! {
             let project = self.projects.get(self.selected_proj)?;
-            let sequencer = project.sequencer.get()?;
             return html! {
                 <>
                     if let Some(popup) = self.popups.last() {
-                        { popup.render(&self.ctx.event_emitter, &sequencer) }
+                        { popup.render(&self.ctx.event_emitter, &project.sequencer) }
                     }
                     { project.render(&self.ctx)? }
                     // TODO: add a loading/auto-save indicator

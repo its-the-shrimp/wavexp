@@ -3,6 +3,7 @@ use crate::{
     img,
     input::{AudioInputButton, Button, Slider, Tab},
     popup::Popup,
+    project::Project,
     sound::{AudioInput, Beats, FromBeats, Secs, Sound},
     visual::{GraphEditor, GraphPoint},
 };
@@ -21,11 +22,14 @@ use wasm_bindgen_futures::spawn_local;
 use wavexp_utils::{
     cell::Shared,
     const_assert, document,
+    error::Result,
     ext::default,
     ext::{ArrayExt, ResultExt, SliceExt},
     fallible, js_function, now, r64,
     range::{RangeBoundsExt, RangeInclusiveV2, RangeV2},
-    ArrayFrom, R32, R64,
+    real::R32,
+    real::R64,
+    ArrayFrom,
 };
 use web_sys::{
     AnalyserNode, AudioContext, BaseAudioContext, Blob, GainNode, HtmlAnchorElement,
@@ -37,7 +41,7 @@ use yew::{html, AttrValue, Html, TargetCast};
 #[derive(Debug, Clone)]
 pub struct SoundBlock {
     pub sound: Sound,
-    pub layer: i32,
+    pub layer: u32,
     pub offset: Beats,
 }
 
@@ -82,7 +86,7 @@ impl GraphPoint for SoundBlock {
     };
     const SCALE_Y_BOUND: RangeV2<R64> = RangeV2 {
         start: r64!(5),
-        end: r64![30],
+        end: r64!(30),
     };
     const OFFSET_Y_BOUND: RangeV2<R64> = RangeV2 {
         start: r64!(-1),
@@ -90,7 +94,7 @@ impl GraphPoint for SoundBlock {
     };
     const Y_SNAP: R64 = r64!(1);
     type Inner = Sound;
-    type Y = i32;
+    type Y = u32;
     type VisualContext = ();
 
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
@@ -119,10 +123,10 @@ impl GraphPoint for SoundBlock {
         [self.offset, self.layer.into()]
     }
 
-    #[apply(fallible!)]
-    fn r#move(&mut self, delta: [R64; 2], _: bool) {
+    fn móve(&mut self, delta: [R64; 2], _: bool) -> Result {
         self.offset = r64!(0).max(self.offset + delta[0]);
-        self.layer += i32::from(delta[1]);
+        self.layer += u32::from(delta[1]);
+        Ok(())
     }
 
     fn move_point(point: &mut [R64; 2], delta: [R64; 2], _: bool) {
@@ -138,7 +142,7 @@ impl GraphPoint for SoundBlock {
         sequencer: &Sequencer,
         _: Self::VisualContext,
     ) -> bool {
-        area[1].map_bounds(i32::from).contains(&self.layer)
+        area[1].map_bounds(u32::from).contains(&self.layer)
             && (self.offset..=self.sound.len(sequencer.bps())?.max(r64!(0.1)) + self.offset)
                 .overlap(&area[0])
     }
@@ -147,14 +151,12 @@ impl GraphPoint for SoundBlock {
         format!("{:.3}, layer {}", loc[0], loc[1].floor())
     }
 
-    #[apply(fallible!)]
-    fn on_selection_change(editor: &mut GraphEditor<Self>, ctx: ContextMut) {
-        ctx.emit_event(AppEvent::Select(
+    fn on_selection_change(editor: &mut GraphEditor<Self>, ctx: ContextMut) -> Result {
+        Ok(ctx.emit_event(AppEvent::Select(
             editor.selection().not_empty().then_some(0),
-        ))
+        )))
     }
 
-    #[apply(fallible!)]
     fn on_redraw(
         editor: &mut GraphEditor<Self>,
         ctx: ContextRef,
@@ -163,7 +165,7 @@ impl GraphPoint for SoundBlock {
         solid: &Path2d,
         dotted: &Path2d,
         _: Self::VisualContext,
-    ) {
+    ) -> Result {
         let step = canvas_size.div(editor.scale());
         let offset = R64::array_from(editor.offset());
         let bps = sequencer.bps();
@@ -184,6 +186,7 @@ impl GraphPoint for SoundBlock {
             solid.move_to(*x, 0.0);
             solid.line_to(*x, *canvas_size[1]);
         }
+        Ok(())
     }
 
     #[apply(fallible!)]
@@ -262,13 +265,11 @@ impl PlaybackContext {
 }
 
 pub struct Sequencer {
-    pattern: Shared<GraphEditor<SoundBlock>>,
-    inputs: Vec<Shared<AudioInput>>,
+    project: Project,
     audio_ctx: BaseAudioContext,
     analyser: AnalyserNode,
     gain: GainNode,
     ctx_created_at: Secs,
-    bps: Beats,
     playback_ctx: PlaybackContext,
 }
 
@@ -287,22 +288,24 @@ impl Sequencer {
         let gain = audio_ctx.create_gain()?;
         gain.gain().set_value(0.2);
         Self {
-            pattern: default(),
-            inputs: vec![],
+            project: Project {
+                bps: r64!(2),
+                pattern: default(),
+                inputs: vec![],
+            },
             analyser: audio_ctx.create_analyser()?,
             gain,
             audio_ctx: audio_ctx.into(),
             ctx_created_at: now()? / 1000,
-            bps: r64![2],
             playback_ctx: PlaybackContext::None,
         }
     }
 
     pub const fn bps(&self) -> Beats {
-        self.bps
+        self.project.bps
     }
     pub const fn pattern(&self) -> &Shared<GraphEditor<SoundBlock>> {
-        &self.pattern
+        &self.project.pattern
     }
     pub const fn audio_ctx(&self) -> &BaseAudioContext {
         &self.audio_ctx
@@ -319,7 +322,7 @@ impl Sequencer {
     }
 
     pub fn inputs(&self) -> &[Shared<AudioInput>] {
-        &self.inputs
+        &self.project.inputs
     }
 
     pub fn tabs(&self, ctx: ContextRef) -> Html {
@@ -354,10 +357,10 @@ impl Sequencer {
                         key="tmp"
                         name="Tempo"
                         setter={emitter.reform(AppEvent::Bpm)}
-                        min={r64![30]}
-                        max={r64![240]}
+                        min=30
+                        max=240
                         postfix="BPM"
-                        initial={self.bps * 60}
+                        initial={self.project.bps * 60}
                     />
                     <Slider
                         key="gain"
@@ -370,10 +373,10 @@ impl Sequencer {
                         class="wide"
                         help="Save the whole project as an audio file"
                         onclick={emitter.reform(|_| {
-                        AppEvent::OpenPopup(
-                            Popup::Export { filename: "project.wav".into(), err_msg: default() }
-                        )
-                    })}
+                            AppEvent::OpenPopup(
+                                Popup::Export { filename: "project.wav".into(), err_msg: default() }
+                            )
+                        })}
                     >
                         <span >{ "Export the project" }</span>
                     </Button>
@@ -384,11 +387,15 @@ impl Sequencer {
                 <div
                     class="horizontal-menu dark-bg"
                 >
-                    { for self.inputs.iter().map(|input| html!{
+                    { for self.project.inputs.iter().map(|input| html! {
                         <AudioInputButton
-                        playing={self.playback_ctx.played_input().is_some_and(|i| i.eq(input))}
-                        name={input.get().map_or_default(|x| AttrValue::from(x.name().clone()))}
-                        {input} {emitter} bps={self.bps} class="extend-inner-button-panel"/>
+                            playing={self.playback_ctx.played_input().is_some_and(|i| i.eq(input))}
+                            name={input.get().map_or_default(|x| AttrValue::from(x.name().clone()))}
+                            {input}
+                            {emitter}
+                            bps={self.project.bps}
+                            class="extend-inner-button-panel"
+                        />
                     }) }
                     <Button
                         name="Add audio input"
@@ -399,7 +406,7 @@ impl Sequencer {
                 </div>
             },
 
-            tab_id => html!{ <p style="color:red">{ format!("Invalid tab ID: {tab_id}") }</p> }
+            tab_id => html!(<p style="color:red">{ format!("Invalid tab ID: {tab_id}") }</p>)
         }
     }
 
@@ -418,10 +425,10 @@ impl Sequencer {
                     self.ctx_created_at = now()?;
                 }
                 if let Some(input) = input {
-                    input.get_mut()?.bake(self.bps)?;
+                    input.get_mut()?.bake(self.project.bps)?;
                 } else {
-                    for mut block in self.pattern.get_mut()?.iter_data_mut() {
-                        block.inner().prepare(self.bps)?;
+                    for mut block in self.project.pattern.get_mut()?.iter_data_mut() {
+                        block.inner().prepare(self.project.bps)?;
                     }
                 }
                 let volume = self.volume();
@@ -447,10 +454,12 @@ impl Sequencer {
                     player.start()?;
                 } else {
                     self.playback_ctx = PlaybackContext::All(now + self.ctx_created_at);
-                    let mut pattern = self.pattern.get_mut()?;
+                    let mut pattern = self.project.pattern.get_mut()?;
                     for mut block in pattern.iter_data_mut() {
-                        let offset = block.offset.to_secs(self.bps);
-                        block.inner().play(&self.gain, now, offset, self.bps)?;
+                        let offset = block.offset.to_secs(self.project.bps);
+                        block
+                            .inner()
+                            .play(&self.gain, now, offset, self.project.bps)?;
                     }
                 }
             }
@@ -473,7 +482,7 @@ impl Sequencer {
             }
 
             AppEvent::PrepareExport(ref filename) => {
-                let mut pat = self.pattern.get_mut()?;
+                let mut pat = self.project.pattern.get_mut()?;
                 let renderer =
                     OfflineAudioContext::new_with_number_of_channels_and_length_and_sample_rate(
                         Self::CHANNEL_COUNT,
@@ -481,10 +490,10 @@ impl Sequencer {
                             let Some(last) = pat.data().last() else {
                                 break 'len 1;
                             };
-                            last.len(self.bps)?
+                            last.len(self.project.bps)?
                                 .add(last.offset)
                                 .mul(Self::SAMPLE_RATE)
-                                .max(r64![1])
+                                .max(r64!(1))
                                 .into()
                         },
                         Self::SAMPLE_RATE as f32,
@@ -493,11 +502,13 @@ impl Sequencer {
                 gain.gain().set_value(*self.volume());
                 gain.connect_with_audio_node(&renderer.destination())?;
                 for mut block in pat.iter_data_mut() {
-                    block.inner().prepare(self.bps)?;
+                    block.inner().prepare(self.project.bps)?;
                 }
                 for mut block in pat.iter_data_mut() {
-                    let offset = block.offset.to_secs(self.bps);
-                    block.inner().play(&gain, r64![0], offset, self.bps)?;
+                    let offset = block.offset.to_secs(self.project.bps);
+                    block
+                        .inner()
+                        .play(&gain, R64::ZERO, offset, self.project.bps)?;
                 }
                 let emitter = ctx.event_emitter().clone();
                 let filename = filename.clone();
@@ -508,7 +519,7 @@ impl Sequencer {
             }
 
             AppEvent::Export(ref filename, ref data) => {
-                let mut wav = Cursor::new(vec![]);
+                let mut wav: Cursor<Vec<u8>> = default();
                 let mut wav_writer = WavWriter::new(
                     &mut wav,
                     WavSpec {
@@ -548,7 +559,7 @@ impl Sequencer {
                 let emitter = ctx.event_emitter().clone();
 
                 let file = target.files().and_then(|x| x.get(0))?;
-                let future_file = AudioInput::new_file(file, self);
+                let future_file = AudioInput::from_file(file, self);
                 spawn_local(async move {
                     if let Some(input) = future_file.await.report() {
                         emitter.emit(AppEvent::AddInput(input.into()))
@@ -558,7 +569,7 @@ impl Sequencer {
 
             AppEvent::AddInput(ref input) => {
                 ctx.register_action(EditorAction::AddInput(input.clone()))?;
-                self.inputs.push(input.clone());
+                self.project.inputs.push(input.clone());
             }
 
             AppEvent::MasterVolume(to) => {
@@ -572,27 +583,31 @@ impl Sequencer {
 
             AppEvent::Bpm(mut to) => {
                 to /= 60;
-                ctx.register_action(EditorAction::SetTempo { from: self.bps, to })?;
-                self.bps = to
+                ctx.register_action(EditorAction::SetTempo {
+                    from: self.project.bps,
+                    to,
+                })?;
+                self.project.bps = to
             }
 
-            AppEvent::RedrawEditorPlane => self.pattern.get_mut()?.force_redraw(),
+            AppEvent::RedrawEditorPlane => self.project.pattern.get_mut()?.force_redraw(),
 
             AppEvent::Undo(ref actions) => {
                 for action in actions.iter() {
                     match *action {
-                        EditorAction::SetTempo { from, .. } => self.bps = from,
+                        EditorAction::SetTempo { from, .. } => self.project.bps = from,
 
                         EditorAction::SetMasterVolume { from, .. } => {
                             self.gain.gain().set_value(*from)
                         }
 
-                        EditorAction::AddInput(_) => _ = self.inputs.pop(),
+                        EditorAction::AddInput(_) => _ = self.project.inputs.pop(),
 
                         _ => (),
                     }
                 }
-                self.pattern
+                self.project
+                    .pattern
                     .get_mut()?
                     .handle_event(event, ctx, self, || ())?
             }
@@ -600,21 +615,25 @@ impl Sequencer {
             AppEvent::Redo(ref actions) => {
                 for action in actions.iter() {
                     match *action {
-                        EditorAction::SetTempo { to, .. } => self.bps = to,
+                        EditorAction::SetTempo { to, .. } => self.project.bps = to,
 
                         EditorAction::SetMasterVolume { to, .. } => self.gain.gain().set_value(*to),
 
-                        EditorAction::AddInput(ref input) => self.inputs.push(input.clone()),
+                        EditorAction::AddInput(ref input) => {
+                            self.project.inputs.push(input.clone())
+                        }
 
                         _ => (),
                     }
                 }
-                self.pattern
+                self.project
+                    .pattern
                     .get_mut()?
                     .handle_event(event, ctx, self, || ())?
             }
 
             _ => self
+                .project
                 .pattern
                 .get_mut()?
                 .handle_event(event, ctx, self, || ())?,

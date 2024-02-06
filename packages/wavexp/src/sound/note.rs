@@ -6,7 +6,7 @@ use crate::{
     visual::{GraphEditor, GraphPoint},
 };
 use macro_rules_attribute::apply;
-use std::{cmp::Ordering, mem::replace, num::NonZeroUsize, ops::RangeBounds};
+use std::{cmp::Ordering, mem::replace, num::NonZeroU32, ops::RangeBounds};
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
     cell::Shared,
@@ -15,7 +15,9 @@ use wavexp_utils::{
     ext::{ArrayExt, OptionExt, ResultExt},
     fallible, js_function, r32, r64,
     range::{RangeBoundsExt, RangeInclusiveV2, RangeV2},
-    ArrayFrom, R32, R64,
+    real::R32,
+    real::R64,
+    ArrayFrom,
 };
 use web_sys::{AudioNode, Path2d};
 use yew::{html, Html};
@@ -55,13 +57,13 @@ impl GraphPoint for NoteBlock {
     type Inner = Beats;
     type Y = Note;
     /// (sound block offset, number of repetitions of the pattern)
-    type VisualContext = (Beats, NonZeroUsize);
+    type VisualContext = (Beats, NonZeroU32);
 
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
         Self {
             offset,
             value: Note::saturated(y.into()).recip(),
-            len: r64![1],
+            len: r64!(1),
         }
     }
 
@@ -84,7 +86,7 @@ impl GraphPoint for NoteBlock {
     }
 
     #[apply(fallible!)]
-    fn r#move(&mut self, delta: [R64; 2], meta: bool) {
+    fn móve(&mut self, delta: [R64; 2], meta: bool) {
         if meta {
             self.len += delta[0];
         } else {
@@ -168,25 +170,25 @@ impl GraphPoint for NoteBlock {
 
 #[derive(Debug, Clone)]
 pub struct NoteSound {
-    pattern: Shared<GraphEditor<NoteBlock>>,
-    volume: R32,
-    attack: Beats,
-    decay: Beats,
-    sustain: R32,
-    release: Beats,
-    rep_count: NonZeroUsize,
+    pub pattern: Shared<GraphEditor<NoteBlock>>,
+    pub volume: R32,
+    pub attack: Beats,
+    pub decay: Beats,
+    pub sustain: R32,
+    pub release: Beats,
+    pub rep_count: NonZeroU32,
 }
 
 impl Default for NoteSound {
     fn default() -> Self {
         Self {
             pattern: default(),
-            volume: r32![1],
-            attack: r64![0],
-            decay: r64![0],
-            sustain: r32![1],
-            release: r64![0],
-            rep_count: NonZeroUsize::MIN,
+            volume: r32!(1),
+            attack: r64!(0),
+            decay: r64!(0),
+            sustain: r32!(1),
+            release: r64!(0),
+            rep_count: NonZeroU32::MIN,
         }
     }
 }
@@ -194,8 +196,7 @@ impl Default for NoteSound {
 impl NoteSound {
     pub const NAME: &'static str = "Simple Wave";
 
-    #[apply(fallible!)]
-    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) {
+    pub fn play(&self, plug: &AudioNode, now: Secs, self_offset: Secs, bps: Beats) -> Result {
         let pat = self.pattern.get()?;
         let Some(last) = pat.data().last() else {
             return Ok(());
@@ -232,6 +233,7 @@ impl NoteSound {
                 })));
             }
         }
+        Ok(())
     }
 
     #[apply(fallible!)]
@@ -243,7 +245,7 @@ impl NoteSound {
             .map_or_default(|x| x.offset + x.len)
     }
 
-    pub const fn rep_count(&self) -> NonZeroUsize {
+    pub const fn rep_count(&self) -> NonZeroU32 {
         self.rep_count
     }
 
@@ -262,10 +264,10 @@ impl NoteSound {
                     />
                     <Counter
                         key="note-repcnt"
-                        setter={emitter.reform(|x| AppEvent::RepCount(NonZeroUsize::from(x)))}
+                        setter={emitter.reform(|x| AppEvent::RepCount(NonZeroU32::from(x)))}
                         fmt={|x: R64| (*x as usize).to_string()}
                         name="Number Of Pattern Repetitions"
-                        min={r64![1]}
+                        min=1
                         initial={self.rep_count}
                     />
                 </div>

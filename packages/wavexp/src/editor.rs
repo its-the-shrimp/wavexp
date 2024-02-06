@@ -10,10 +10,11 @@ use macro_rules_attribute::apply;
 use std::{cmp::Ordering, iter::once, mem::take, slice::from_ref};
 use wasm_bindgen::JsCast;
 use wavexp_utils::{
-    cell::Shared,
     error::Result,
     ext::{default, BoolExt, OptionExt, SliceExt},
-    fallible, js_function, r64, window, ToAttrValue, R64,
+    fallible, js_function, r64,
+    real::R64,
+    window, ToAttrValue,
 };
 use yew::{html, AttrValue, Callback, Html};
 
@@ -32,7 +33,7 @@ impl EditorContext {
             actions: vec![EditorAction::Start],
             undid_actions: 0,
             selected_tab: 0,
-            snap_step: r64![1],
+            snap_step: r64!(1),
             special_action: default(),
             selected_block: None,
         }
@@ -81,20 +82,19 @@ impl ContextMut<'_, '_> {
 
 pub struct Editor {
     sound_visualiser: SoundVisualiser,
-    pub sequencer: Shared<Sequencer>,
+    pub sequencer: Sequencer,
     pub ctx: EditorContext,
     hint_handler: HintHandler,
 }
 
 impl Editor {
-    #[apply(fallible!)]
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
             hint_handler: default(),
-            sequencer: Sequencer::new()?.into(),
+            sequencer: Sequencer::new()?,
             sound_visualiser: SoundVisualiser::new(),
             ctx: EditorContext::new(),
-        }
+        })
     }
 
     #[apply(fallible!)]
@@ -198,8 +198,7 @@ impl Editor {
             }
 
             AppEvent::Remove => {
-                let sequencer = self.sequencer.get()?;
-                let mut pattern = sequencer.pattern().get_mut()?;
+                let mut pattern = self.sequencer.pattern().get_mut()?;
                 let id = ctx.selected_block()?;
                 let block_id = *pattern.selection().get(id)?;
                 let action = pattern.remove_points(once(block_id))?;
@@ -271,8 +270,7 @@ impl Editor {
     #[apply(fallible!)]
     pub fn render(&self, app: &AppContext) -> Html {
         // TODO: add switching between selected blocks
-        let sequencer = self.sequencer.get()?;
-        let pattern = sequencer.pattern().get()?;
+        let pattern = self.sequencer.pattern().get()?;
         let block = self
             .ctx
             .selected_block
@@ -308,7 +306,7 @@ impl Editor {
                         </div>
                         if let Some(block) = block {
                             <div id="tab-list">{ block.tabs(ctx) }</div>
-                            { block.sound.params(ctx, &sequencer) }
+                            { block.sound.params(ctx, &self.sequencer) }
                             <div
                                 id="general-ctrl"
                                 class="dark-bg"
@@ -328,12 +326,12 @@ impl Editor {
                                 </Button>
                             </div>
                         } else {
-                            <div id="tab-list">{ sequencer.tabs(ctx) }</div>
-                            { sequencer.params(ctx) }
+                            <div id="tab-list">{ self.sequencer.tabs(ctx) }</div>
+                            { self.sequencer.params(ctx) }
                         }
                     </div>
                     <GraphEditorCanvas<SoundBlock>
-                        editor={sequencer.pattern()}
+                        editor={self.sequencer.pattern()}
                         emitter={emitter.clone()}
                     />
                 </div>
@@ -392,7 +390,7 @@ impl Editor {
                             name="Interval for blocks to snap to"
                             setter={emitter.reform(|x: usize| {
                                 AppEvent::SnapStep(
-                                    *[r64![0], r64![1], r64![0.5], r64![0.25], r64![0.125]]
+                                    *[r64!(0), r64!(1), r64!(0.5), r64!(0.25), r64!(0.125)]
                                         .get_wrapping(x)
                                 )
                             })}
@@ -406,7 +404,7 @@ impl Editor {
                             }}
                         />
                     </div>
-                    if sequencer.playback_ctx().all_playing() {
+                    if self.sequencer.playback_ctx().all_playing() {
                         <Button
                             name="Stop"
                             onclick={emitter.reform(|_| AppEvent::StopPlay)}
@@ -441,16 +439,15 @@ impl Editor {
             app,
         };
         self.hint_handler.handle_event(event)?;
-        let mut sequencer = self.sequencer.get_aware_mut()?;
-        self.sound_visualiser.handle_event(event, &sequencer)?;
-        sequencer.handle_event(event, ctx.as_mut())?;
-        let mut pattern = sequencer.pattern().get_mut()?;
+        self.sound_visualiser.handle_event(event, &self.sequencer)?;
+        self.sequencer.handle_event(event, ctx.as_mut())?;
+        let mut pattern = self.sequencer.pattern().get_mut()?;
         if let Some(&id) = pattern.selection().first() {
             let mut block = pattern.get_mut(id)?;
             let offset = block.offset;
             block
                 .inner()
-                .handle_event(event, ctx.as_mut(), &sequencer, offset)?;
+                .handle_event(event, ctx.as_mut(), &self.sequencer, offset)?;
         }
     }
 

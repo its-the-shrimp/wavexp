@@ -13,7 +13,7 @@
 #![feature(iterator_try_collect)]
 #![feature(inline_const)]
 #![feature(array_try_map)]
-#![feature(const_trait_impl)]
+#![feature(slice_first_last_chunk)]
 
 mod app;
 mod ctx;
@@ -21,16 +21,10 @@ mod editor;
 mod img;
 mod input;
 mod popup;
+mod project;
 mod sequencer;
 mod sound;
 mod visual;
-
-pub use js_sys;
-pub use wasm_bindgen;
-pub use wasm_bindgen_futures;
-pub use wavexp_utils;
-pub use web_sys;
-pub use yew;
 
 fn main() {
     yew::Renderer::<app::App>::new().render();
