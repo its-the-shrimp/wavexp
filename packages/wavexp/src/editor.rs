@@ -12,9 +12,11 @@ use wasm_bindgen::JsCast;
 use wavexp_utils::{
     error::Result,
     ext::{default, BoolExt, OptionExt, SliceExt},
-    fallible, js_function, r64,
+    fallible,
+    js::window,
+    js_function, r64,
     real::R64,
-    window, ToAttrValue,
+    ToAttrValue,
 };
 use yew::{html, AttrValue, Callback, Html};
 

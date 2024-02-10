@@ -3,7 +3,13 @@ use std::mem::take;
 use js_sys::Function;
 use macro_rules_attribute::apply;
 use wasm_bindgen::JsCast;
-use wavexp_utils::{ext::ResultExt, fallible, js_function, now, r64, real::R64, window};
+use wavexp_utils::{
+    ext::ResultExt,
+    fallible,
+    js::{now, window},
+    js_function, r64,
+    real::R64,
+};
 use yew::{html, html::Context, Callback, Component, Html};
 
 use crate::{

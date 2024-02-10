@@ -21,14 +21,16 @@ use wavexp_utils::{
     ensure,
     error::Result,
     eval_once,
-    ext::default,
-    ext::{neg, ArrayExt, BoolExt, HtmlCanvasExt, HtmlElementExt, OptionExt, SliceExt, VecExt},
+    ext::{
+        default, neg, ArrayExt, BoolExt, HtmlCanvasExt, HtmlElementExt, OptionExt, SliceExt,
+        TransposedArray, VecExt,
+    },
     fallible,
     iter::ToEveryNth,
     js_array, r64,
     range::{IntoRange, RangeBoundsExt, RangeInclusiveV2, RangeV2},
     real::R64,
-    ArrayFrom, IntoArray, Point, RoundTo, SliceRef, TransposedArray,
+    ArrayFrom, IntoArray, Point, RoundTo, SliceRef,
 };
 use web_sys::{Element, HtmlCanvasElement, HtmlElement, ImageData, Path2d, SvgElement};
 use yew::{NodeRef, TargetCast};
@@ -1513,7 +1515,7 @@ impl<T: GraphPoint> GraphEditor<T> {
 
                 let offset = R64::array_from(self.offset);
                 let to_user = |loc| Some(R64::array_from(loc).add(offset).div(step));
-                let to_aligned_canvas = |loc: Point| Some(loc.floor_to(snap_step.mul(step).into()));
+                let to_aligned_canvas = |loc: Point| loc.floor_to(snap_step.mul(step).into());
                 let confine = |x: [R64; 2]| x.array_fit_into([T::X_BOUND, T::Y_BOUND]);
 
                 canvas_ctx.set_fill_style(&AnyGraphEditor::BG_STYLE.into());

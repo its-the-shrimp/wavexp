@@ -75,7 +75,7 @@ input:focus-visible {
 	display: grid;
 	grid-template-columns: repeat(2, 1fr);
 }
-#inputs > .wide {
+#inputs > .export-options {
 	grid-column: 1 / span 2;
 }
 #popup-core > .wide {
@@ -174,13 +174,12 @@ input:focus-visible {
 	fill: #E10000;
 	stroke: #E10000;
 }
-#wave-options {
+.export-options {
 	display: flex;
-	flex-direction: column;
 }
-#wave-options > .button {
-	height: auto;
+.export-options > .button.wide {
 	flex: 1;
+    width: auto;
 }
 #tab-list {
 	user-select: none;

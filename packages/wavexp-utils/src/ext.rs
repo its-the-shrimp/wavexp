@@ -1,6 +1,7 @@
 use std::{
     array::{from_fn, try_from_fn},
     iter::{successors, Sum},
+    mem::ManuallyDrop,
     ops::{Add, Div, Mul, Neg, RangeBounds, Rem, Residual, Sub, Try},
     ptr,
 };
@@ -16,6 +17,20 @@ use crate::{
     range::RangeBoundsExt,
     AppError, Point, Rect, RoundTo, SliceRef,
 };
+
+pub trait TransposedArray<T, const OUTER: usize, const INNER: usize> {
+    fn transposed(self) -> [[T; OUTER]; INNER];
+}
+
+impl<T, const OUTER: usize, const INNER: usize> TransposedArray<T, OUTER, INNER>
+    for [[T; INNER]; OUTER]
+{
+    // [[1, 2], [4, 5], [7, 8]] => [[1, 4, 7], [2, 5, 8]]
+    fn transposed(self) -> [[T; OUTER]; INNER] {
+        let original = ManuallyDrop::new(self);
+        from_fn(|i| from_fn(|j| unsafe { ptr::read(&original[j][i]) }))
+    }
+}
 
 pub trait ArrayExt<T, const N: usize>: Sized {
     fn zip<U, R>(self, other: [U; N], f: impl FnMut(T, U) -> R) -> [R; N];

@@ -13,7 +13,7 @@ use web_sys::{
     HtmlElement,
 };
 
-use crate::{document, ext::HtmlDocumentExt};
+use crate::{ext::HtmlDocumentExt, js::document};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 // TODO: optimise by using an enum to delay conversion to a JsValue

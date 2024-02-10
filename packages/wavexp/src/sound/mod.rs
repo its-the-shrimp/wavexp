@@ -112,10 +112,10 @@ impl Sub for Note {
 }
 
 impl Note {
-    pub const MAX: Note = Note(35);
+    pub const N_NOTES: usize = 36;
+    pub const MAX: Note = Note(Self::N_NOTES as u8 - 1);
     pub const MID: Note = Note(Self::N_NOTES as u8 / 2);
-    pub const N_NOTES: usize = Self::FREQS.len();
-    pub const FREQS: [R32; 36] = [
+    pub const FREQS: [R32; Self::N_NOTES] = [
         r32!(65.410), // C2
         r32!(69.300), // C#2
         r32!(73.420), // D2
@@ -154,13 +154,12 @@ impl Note {
         r32!(493.88), // B4
     ];
 
-    pub const NAMES: [&'static str; 36] = [
+    pub const NAMES: [&'static str; Self::N_NOTES] = [
         "C2", "C#2", "D2", "D#2", "E2", "F2", "F#2", "G2", "G#2", "A2", "A#2", "B2", "C3", "C#3",
         "D3", "D#3", "E3", "F3", "F#3", "G3", "G#3", "A3", "A#3", "B3", "C4", "C#4", "D4", "D#4",
         "E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4",
     ];
 
-    #[inline]
     pub const fn new(index: u8) -> Option<Self> {
         if index <= Self::MAX.0 {
             Some(Self(index))

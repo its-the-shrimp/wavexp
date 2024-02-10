@@ -124,3 +124,8 @@ pub fn Selection() -> Html {
         </svg>
     }
 }
+
+#[function_component]
+pub fn FloppyDisk() -> Html {
+    html! { <svg viewBox="0 0 100 100"><polygon points="40,15 80,15 80,85 20,85 20,30" /></svg> }
+}

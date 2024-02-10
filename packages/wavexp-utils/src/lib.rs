@@ -21,6 +21,7 @@ pub mod cell;
 pub mod error;
 pub mod ext;
 pub mod iter;
+pub mod js;
 pub mod range;
 pub mod real;
 
@@ -28,14 +29,10 @@ use error::{AppError, Result};
 pub use js_sys;
 use real::R64;
 use std::{
-    array::from_fn,
     fmt::Debug,
-    mem::ManuallyDrop,
     ops::{Add, Deref, Div, Mul, Neg, Sub},
-    ptr,
 };
 pub use wasm_bindgen;
-use web_sys::{Document, Window};
 use yew::AttrValue;
 
 #[repr(transparent)]
@@ -117,20 +114,6 @@ where
     }
 }
 
-pub trait TransposedArray<T, const OUTER: usize, const INNER: usize> {
-    fn transposed(self) -> [[T; OUTER]; INNER];
-}
-
-impl<T, const OUTER: usize, const INNER: usize> TransposedArray<T, OUTER, INNER>
-    for [[T; INNER]; OUTER]
-{
-    // [[1, 2], [4, 5], [7, 8]] => [[1, 4, 7], [2, 5, 8]]
-    fn transposed(self) -> [[T; OUTER]; INNER] {
-        let original = ManuallyDrop::new(self);
-        from_fn(|i| from_fn(|j| unsafe { ptr::read(&original[j][i]) }))
-    }
-}
-
 pub struct SliceRef<'inner, T: ?Sized> {
     inner: &'inner T,
     index: usize,
@@ -159,67 +142,6 @@ impl<'inner, T> SliceRef<'inner, T> {
     }
 }
 
-#[allow(non_camel_case_types)]
-#[allow(dead_code)]
-pub mod js_types {
-    use js_sys::{Boolean as JsBoolean, JsString, Number as JsNumber};
-    pub type bool = JsBoolean;
-    pub type number = JsNumber;
-    pub type str = JsString;
-}
-
-#[macro_export]
-macro_rules! js_array {
-    ($($t:ident $v:expr),*) => {{
-        let res = $crate::js_sys::Array::new();
-        $( res.push(&*$crate::js_types::$t::from($v)); )*
-        $crate::wasm_bindgen::JsValue::from(res)
-    }};
-}
-
-#[macro_export]
-macro_rules! js_obj {
-	($($t:ident $k:ident : $v:expr),*) => {
-		$crate::wasm_bindgen::JsValue::from($crate::js_sys::Map::new()
-			$( .set(&$crate::js_types::str::from(stringify!($k)).into(),
-				&*$crate::js_types::$t::from($v)) )*)
-	}
-}
-
-#[macro_export]
-macro_rules! js_function {
-    (|| $body:expr) => {
-        $crate::wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || $body)
-            .into_js_value()
-            .unchecked_into::<$crate::js_sys::Function>()
-    };
-    (|$arg:ident $(: $t:ty)?| $body:expr) => {
-        $crate::wasm_bindgen::closure::Closure::<dyn FnMut(_)>::new(move |$arg $(: $t)?| $body)
-            .into_js_value()
-            .unchecked_into::<$crate::js_sys::Function>()
-    };
-    ($var:path) => {
-        $crate::wasm_bindgen::closure::Closure::new($var)
-            .into_js_value()
-            .unchecked_into::<$crate::js_sys::Function>()
-    };
-    ($obj:ident . $method:ident) => {
-        $crate::wasm_bindgen::closure::Closure::<dyn FnMut(_)>::new(move |x| $obj.$method(x))
-            .into_js_value()
-            .unchecked_into::<$crate::js_sys::Function>()
-    }
-}
-
-#[macro_export]
-macro_rules! js_log {
-	($arg:literal) => {
-        ::web_sys::console::log_1(&format!($arg).into())
-	};
-	($f:literal, $($arg:expr),*) => {
-		::web_sys::console::log_1(&format!($f, $($arg),*).into())
-	}
-}
-
 #[macro_export]
 macro_rules! eval_once {
     ($t:ty : $e:expr) => {{
@@ -227,24 +149,6 @@ macro_rules! eval_once {
             $crate::cell::WasmCell(std::cell::OnceCell::new());
         RES.get_or_init(|| $e)
     }};
-}
-
-pub fn window() -> Window {
-    unsafe { web_sys::window().unwrap_unchecked() }
-}
-
-pub fn document() -> Document {
-    unsafe {
-        web_sys::window()
-            .unwrap_unchecked()
-            .document()
-            .unwrap_unchecked()
-    }
-}
-
-/// returns precise current time in seconds.
-pub fn now() -> Option<R64> {
-    Some(R64::new(window().performance()?.now())? / 1000)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -272,21 +176,26 @@ where
 }
 
 impl RoundTo for Point {
-    fn floor_to(self, step: Self) -> Self {
-        self.x.floor_to(step.x);
-        self.y.floor_to(step.y);
-        self
+    type Output = Option<Self>;
+
+    fn floor_to(self, step: Self) -> Self::Output {
+        Some(Self {
+            x: self.x.floor_to(step.x)?,
+            y: self.y.floor_to(step.y)?,
+        })
     }
 
-    fn ceil_to(self, step: Self) -> Self {
-        self.x.ceil_to(step.x);
-        self.y.ceil_to(step.y);
-        self
+    fn ceil_to(self, step: Self) -> Self::Output {
+        Some(Self {
+            x: self.x.ceil_to(step.x)?,
+            y: self.y.ceil_to(step.y)?,
+        })
     }
 }
 
 impl Add for Point {
     type Output = Option<Self>;
+
     fn add(self, rhs: Self) -> Self::Output {
         Some(Self {
             x: self.x.checked_add(rhs.x)?,

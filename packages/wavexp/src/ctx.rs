@@ -17,7 +17,7 @@ use wavexp_utils::{
     real::R64,
     Point,
 };
-use web_sys::{AudioBuffer, Event, KeyboardEvent, MouseEvent, PointerEvent, UiEvent};
+use web_sys::{Event, KeyboardEvent, MouseEvent, PointerEvent, UiEvent};
 
 /// the all-encompassing event type for the app
 #[derive(Debug, Clone)]
@@ -123,10 +123,10 @@ pub enum AppEvent {
     SetEndCutOff(Beats),
     /// set the special action for editor spaces.
     SetSpecialAction(SpecialAction),
-    /// prepare export of the project under the provided file name.
-    PrepareExport(Rc<str>),
-    /// export audio under the provided file name.
-    Export(Rc<str>, AudioBuffer),
+    /// export the composition to a `.wav` file under the provided name
+    Export(Rc<str>),
+    /// save the composition as a `.wavexp` file under the provided name
+    Save(Rc<str>),
     /// set the filename under which the project will be saved
     SetOutputFileName(Event),
     /// display an explanation for why the export file name is invalid.

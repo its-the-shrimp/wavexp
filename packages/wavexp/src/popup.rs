@@ -17,6 +17,15 @@ use crate::{
     sound::{AudioInput, FromBeats},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    /// `.wav`
+    Wav,
+    /// `.wavexp` file, a native file format for storing the composition as it is in the editor,
+    /// i.e. preserving all the inputs, the BPM, the patterns, etc.
+    Wavexp,
+}
+
 /// Handles rendering of a pop-up window in the center of the screen.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Popup {
@@ -24,8 +33,9 @@ pub enum Popup {
     ChooseInput,
     /// Edit the contained audio input.
     EditInput(Shared<AudioInput>),
-    /// Save the sequence as a file.
+    /// Export the sequence as a file.
     Export {
+        format: ExportFormat,
         filename: Rc<str>,
         err_msg: AttrValue,
     },
@@ -36,7 +46,10 @@ impl Popup {
     pub fn handle_event(&mut self, event: &AppEvent, mut ctx: ContextMut) {
         match *event {
             AppEvent::SetOutputFileName(ref e) => {
-                if let Self::Export { filename, err_msg } = self {
+                if let Self::Export {
+                    filename, err_msg, ..
+                } = self
+                {
                     let to: Rc<str> = e.target_dyn_into::<HtmlInputElement>()?.value().into();
                     let from = replace(filename, to.clone());
                     *err_msg = "".into();
@@ -310,55 +323,65 @@ impl Popup {
                 </form>
             },
 
-            Self::Export { filename, err_msg } => html! {
-                <form
-                    id="popup-bg"
-                    method="dialog"
-                    onsubmit={{
-                    let filename = filename.clone();
-                    emitter.reform(move |_| AppEvent::PrepareExport(filename.clone()))
-                }}
-                >
-                    <p >{ "Export the project" }</p>
-                    <Button
-                        name="Close the pop-up"
-                        class="small red-on-hover"
-                        onclick={emitter.reform(|_| AppEvent::ClosePopup)}
+            &Self::Export {
+                format,
+                ref filename,
+                ref err_msg,
+            } => {
+                let (title, pattern, event): (_, _, fn(_) -> _) = match format {
+                    ExportFormat::Wav => ("Export the project", ".*\\.wav", AppEvent::Export),
+                    ExportFormat::Wavexp => ("Save the project", ".*\\.wavexp", AppEvent::Save),
+                };
+                html! {
+                    <form
+                        id="popup-bg"
+                        method="dialog"
+                        onsubmit={emitter.reform({
+                            let filename = filename.clone();
+                            move |_| event(filename.clone())
+                        })}
                     >
-                        <img::Cross />
-                    </Button>
-                    <div
-                        class="dark-bg blue-border"
-                        data-main-hint="Export the project"
-                    >
-                        <div
-                            id="popup-core"
+                        <p >{ title }</p>
+                        <Button
+                            name="Close the pop-up"
+                            class="small red-on-hover"
+                            onclick={emitter.reform(|_| AppEvent::ClosePopup)}
                         >
-                            <input
-                                type="text"
-                                value={filename.clone()}
-                                pattern=".*\\.wav"
-                                placeholder="Enter file name..."
-                                required=true
-                                class="dark-bg blue-border"
-                                data-main-hint="Output file name"
-                                oninvalid={emitter.reform(AppEvent::ExplainInvalidExportFileName)}
-                                onchange={emitter.reform(AppEvent::SetOutputFileName)}
-                            />
-                            <Button
-                                name="Save"
-                                class="wide"
-                                submit=true
+                            <img::Cross />
+                        </Button>
+                        <div
+                            class="dark-bg blue-border"
+                            data-main-hint={title}
+                        >
+                            <div
+                                id="popup-core"
                             >
-                                <p >{ "Save" }</p>
-                            </Button>
+                                <input
+                                    type="text"
+                                    value={filename.clone()}
+                                    {pattern}
+                                    placeholder="Enter file name..."
+                                    required=true
+                                    class="dark-bg blue-border"
+                                    data-main-hint="Output file name"
+                                    oninvalid={emitter.reform(AppEvent::ExplainInvalidExportFileName)}
+                                    onchange={emitter.reform(AppEvent::SetOutputFileName)}
+                                />
+                                <Button
+                                    name="Save"
+                                    class="wide"
+                                    submit=true
+                                >
+                                    <p >{ "Save" }</p>
+                                </Button>
+                            </div>
                         </div>
-                    </div>
-                    if !err_msg.is_empty() {
-                        <p class="error">{ "Error: " }{ err_msg }</p>
-                    }
-                </form>
-            },
+                        if !err_msg.is_empty() {
+                            <p class="error">{ "Error: " }{ err_msg }</p>
+                        }
+                    </form>
+                }
+            }
         }
     }
 }

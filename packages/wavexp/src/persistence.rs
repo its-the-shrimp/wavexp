@@ -1,12 +1,21 @@
-use crate::sequencer::Sequencer;
+//! defines decoding/encoding of a composition
+
+use crate::sequencer::{Composition, Sequencer};
+use crate::sound::FromBeats;
 use crate::{
     sequencer::SoundBlock,
     sound::{
-        AudioInput, Beats, CustomBlock, CustomSound, NoiseBlock, NoiseSound, Note, NoteBlock,
-        NoteSound, Sound,
+        AudioInput, CustomBlock, CustomSound, NoiseBlock, NoiseSound, Note, NoteBlock, NoteSound,
+        Sound,
     },
     visual::{GraphEditor, GraphPoint},
 };
+use hound::{SampleFormat, WavSpec, WavWriter};
+use js_sys::ArrayBuffer;
+use std::future::Future;
+use std::io::Cursor;
+use std::iter::zip;
+use std::ops::{Add, Mul};
 use std::{
     num::{
         NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroU16, NonZeroU32, NonZeroU64,
@@ -16,6 +25,9 @@ use std::{
     slice::from_raw_parts,
     str::from_utf8,
 };
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
+use wavexp_utils::ext::default;
 use wavexp_utils::{
     bail,
     cell::Shared,
@@ -25,17 +37,13 @@ use wavexp_utils::{
     real::{R32, R64},
     TryÍnto,
 };
-use web_sys::{AudioBuffer, AudioBufferOptions};
+use wavexp_utils::{const_assert, r64};
+use web_sys::{AudioBuffer, AudioBufferOptions, BaseAudioContext, OfflineAudioContext};
 
-pub struct Project {
-    pub pattern: Shared<GraphEditor<SoundBlock>>,
-    pub inputs: Vec<Shared<AudioInput>>,
-    pub bps: Beats,
-}
-
-impl Project {
+impl Composition {
     const WAVEXP_HEADER: [u8; 8] = *b"3XPL0RE!";
 
+    /// decodes the contents of a `.wavexp` file
     pub fn decode(src: &mut &[u8]) -> Result<Self> {
         let header: [u8; 8] = decode(src)?;
         ensure!(header == Self::WAVEXP_HEADER, "invalid header");
@@ -46,12 +54,97 @@ impl Project {
         })
     }
 
-    pub fn encode(&self, dst: &mut Vec<u8>) -> Result {
+    /// imports extenal audio and creates a composition of 1 custom audio block
+    pub async fn import(
+        src_name: Rc<str>,
+        src: &ArrayBuffer,
+        ctx: &BaseAudioContext,
+    ) -> Result<Self> {
+        let src = JsFuture::from(ctx.decode_audio_data(src)?)
+            .await?
+            .unchecked_into::<AudioBuffer>();
+        let src = Shared::from(AudioInput::new(src_name, src)?);
+        Ok(Self {
+            pattern: Shared::from(GraphEditor::new(vec![SoundBlock {
+                sound: Sound::Custom(CustomSound {
+                    pattern: Shared::from(GraphEditor::new(vec![CustomBlock {
+                        offset: r64!(0),
+                        pitch: Note::MID,
+                    }])),
+                    src: Some(src.clone()),
+                    ..default()
+                }),
+                layer: 0,
+                offset: r64!(0),
+            }])),
+            inputs: vec![src],
+            ..default()
+        })
+    }
+
+    /// encode the composition into the `.wavexp` file format
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let mut dst = vec![];
         dst.extend(Self::WAVEXP_HEADER);
-        self.pattern.encode(dst)?;
-        self.inputs.encode_short(dst)?;
-        self.bps.encode(dst)?;
-        Ok(())
+        self.pattern.encode(&mut dst)?;
+        self.inputs.encode_short(&mut dst)?;
+        self.bps.encode(&mut dst)?;
+        Ok(dst)
+    }
+
+    /// export the composition into the `.wav` audio file format with the provided volume
+    pub fn export(&self, volume: R32) -> Result<impl Future<Output = Result<Vec<u8>>>> {
+        let mut pat = self.pattern.get_mut()?;
+        let renderer = OfflineAudioContext::new_with_number_of_channels_and_length_and_sample_rate(
+            Sequencer::CHANNEL_COUNT,
+            'len: {
+                let Some(last) = pat.data().last() else {
+                    break 'len 1;
+                };
+                last.len(self.bps)?
+                    .add(last.offset)
+                    .mul(Sequencer::SAMPLE_RATE)
+                    .max(r64!(1))
+                    .into()
+            },
+            Sequencer::SAMPLE_RATE as f32,
+        )?;
+        let gain = renderer.create_gain()?;
+        gain.gain().set_value(*volume);
+        gain.connect_with_audio_node(&renderer.destination())?;
+        for mut block in pat.iter_data_mut() {
+            block.inner().prepare(self.bps)?;
+        }
+        for mut block in pat.iter_data_mut() {
+            let offset = block.offset.to_secs(self.bps);
+            block.inner().play(&gain, R64::ZERO, offset, self.bps)?;
+        }
+
+        Ok(async move {
+            let rendered = JsFuture::from(renderer.start_rendering()?)
+                .await?
+                .unchecked_into::<AudioBuffer>();
+            let mut wav: Cursor<Vec<u8>> = default();
+            let mut wav_writer = WavWriter::new(
+                &mut wav,
+                WavSpec {
+                    channels: Sequencer::CHANNEL_COUNT as u16,
+                    sample_rate: Sequencer::SAMPLE_RATE,
+                    bits_per_sample: 32,
+                    sample_format: SampleFormat::Float,
+                },
+            )?;
+
+            const_assert!(Sequencer::CHANNEL_COUNT == 2);
+            let ch1 = rendered.get_channel_data(0)?;
+            let ch2 = rendered.get_channel_data(1)?;
+            for (s1, s2) in zip(ch1, ch2) {
+                wav_writer.write_sample(s1)?;
+                wav_writer.write_sample(s2)?;
+            }
+            wav_writer.finalize()?;
+            Ok(wav.into_inner())
+        })
     }
 }
 

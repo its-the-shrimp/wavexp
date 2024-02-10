@@ -235,7 +235,7 @@ impl CustomSound {
                 let gain = block.gain();
                 let start = now + self_offset + pat_len * rep + offset.to_secs(bps);
                 let mut at = start;
-                gain.set_value(0.0);
+                gain.set_value_at_time(0.0, *at)?;
                 at += self.attack.to_secs(bps);
                 gain.linear_ramp_to_value_at_time(*self.volume, *at)?;
                 at += self.decay.to_secs(bps);
