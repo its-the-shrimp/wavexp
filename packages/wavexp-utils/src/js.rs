@@ -70,9 +70,7 @@ pub fn save_file(data: &[u8], filename: &str) -> Result {
     data_js_inner.copy_from(data);
     let data_js = js_array![any data_js_inner.buffer()];
     let data_js = Blob::new_with_blob_sequence(&data_js)?;
-    let temp = document()
-        .create_element("a")?
-        .unchecked_into::<HtmlAnchorElement>();
+    let temp = document().create_element("a")?.unchecked_into::<HtmlAnchorElement>();
     temp.set_href(&Url::create_object_url_with_blob(&data_js)?);
     temp.set_download(filename);
     temp.click();
@@ -84,12 +82,7 @@ pub fn window() -> Window {
 }
 
 pub fn document() -> Document {
-    unsafe {
-        web_sys::window()
-            .unwrap_unchecked()
-            .document()
-            .unwrap_unchecked()
-    }
+    unsafe { web_sys::window().unwrap_unchecked().document().unwrap_unchecked() }
 }
 
 /// returns precise current time in seconds.

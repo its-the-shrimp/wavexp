@@ -43,10 +43,7 @@ impl Ord for NoteBlock {
 
 impl GraphPoint for NoteBlock {
     const EDITOR_NAME: &'static str = "Note Editor";
-    const Y_BOUND: RangeV2<R64> = RangeV2 {
-        start: r64!(0),
-        end: r64!(Note::N_NOTES),
-    };
+    const Y_BOUND: RangeV2<R64> = RangeV2 { start: r64!(0), end: r64!(Note::N_NOTES) };
     // // I wish...
     // const SCALE_Y_BOUND: RangeV2<R64> = RangeV2::unit(Note::N_NOTES.ceil_to(10).into());
     const SCALE_Y_BOUND: RangeV2<R64> =
@@ -60,11 +57,7 @@ impl GraphPoint for NoteBlock {
     type VisualContext = (Beats, NonZeroU32);
 
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
-        Self {
-            offset,
-            value: Note::saturated(y.into()).recip(),
-            len: r64!(1),
-        }
+        Self { offset, value: Note::saturated(y.into()).recip(), len: r64!(1) }
     }
 
     fn inner(&self) -> &Self::Inner {
@@ -111,9 +104,7 @@ impl GraphPoint for NoteBlock {
         _: &Sequencer,
         _: Self::VisualContext,
     ) -> bool {
-        area[1]
-            .map_bounds(usize::from)
-            .contains(&self.value.recip().index())
+        area[1].map_bounds(usize::from).contains(&self.value.recip().index())
             && (self.offset..=self.offset + self.len).overlap(&area[0])
     }
 
@@ -222,9 +213,7 @@ impl NoteSound {
 
                 let block_core = ctx.create_oscillator()?;
                 block_core.frequency().set_value(*value.freq());
-                block_core
-                    .connect_with_audio_node(&block)?
-                    .connect_with_audio_node(plug)?;
+                block_core.connect_with_audio_node(&block)?.connect_with_audio_node(plug)?;
                 block_core.start_with_when(*start)?;
                 block_core.stop_with_when(*at)?;
                 block_core.clone().set_onended(Some(&js_function!(|| {
@@ -238,11 +227,7 @@ impl NoteSound {
 
     #[apply(fallible!)]
     pub fn len(&self) -> Beats {
-        self.pattern
-            .get()?
-            .data()
-            .last()
-            .map_or_default(|x| x.offset + x.len)
+        self.pattern.get()?.data().last().map_or_default(|x| x.offset + x.len)
     }
 
     pub const fn rep_count(&self) -> NonZeroU32 {
@@ -253,9 +238,7 @@ impl NoteSound {
         let emitter = ctx.event_emitter();
         match ctx.selected_tab() {
             0 /* General */ => html!{
-                <div
-                    id="inputs"
-                >
+                <div id="inputs">
                     <Slider
                         key="note-vol"
                         setter={emitter.reform(|x| AppEvent::Volume(R32::from(x)))}
@@ -274,9 +257,7 @@ impl NoteSound {
             },
 
             1 /* Envelope */ => html!{
-                <div
-                    id="inputs"
-                >
+                <div id="inputs">
                     <Counter
                         key="note-att"
                         setter={emitter.reform(AppEvent::Attack)}

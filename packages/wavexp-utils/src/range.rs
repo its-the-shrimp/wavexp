@@ -126,25 +126,16 @@ macro_rules! impl_range_bounds_ext_for_range {
                 T: PartialOrd<R> + Into<R>,
             {
                 if self.start > value {
-                    $r {
-                        start: value,
-                        end: self.end.into(),
-                    }
+                    $r { start: value, end: self.end.into() }
                 } else if self.end <= value {
-                    $r {
-                        start: self.start.into(),
-                        end: value,
-                    }
+                    $r { start: self.start.into(), end: value }
                 } else {
                     self.map_bounds(Into::into)
                 }
             }
 
             fn map_bounds<R>(self, mut f: impl FnMut(T) -> R) -> Self::HKT<R> {
-                $r {
-                    start: f(self.start),
-                    end: f(self.end),
-                }
+                $r { start: f(self.start), end: f(self.end) }
             }
 
             fn try_map_bounds<R>(
@@ -155,12 +146,7 @@ macro_rules! impl_range_bounds_ext_for_range {
                 R: Try,
                 R::Residual: Residual<Self::HKT<R::Output>>,
             {
-                try {
-                    $r {
-                        start: f(self.start)?,
-                        end: f(self.end)?,
-                    }
-                }
+                try { $r { start: f(self.start)?, end: f(self.end)? } }
             }
         }
     };
@@ -246,9 +232,7 @@ impl<T> RangeV2<T> {
     where
         T: PartialOrd,
     {
-        self.start
-            .partial_cmp(&self.end)
-            .map_or(true, Ordering::is_ge)
+        self.start.partial_cmp(&self.end).map_or(true, Ordering::is_ge)
     }
 }
 
@@ -285,9 +269,7 @@ impl<T> RangeInclusiveV2<T> {
     where
         T: PartialOrd,
     {
-        self.start
-            .partial_cmp(&self.end)
-            .map_or(true, Ordering::is_gt)
+        self.start.partial_cmp(&self.end).map_or(true, Ordering::is_gt)
     }
 }
 
@@ -316,10 +298,7 @@ impl<T> IntoRange for T {
         Self: Ord,
     {
         if self > end {
-            RangeV2 {
-                start: end,
-                end: self,
-            }
+            RangeV2 { start: end, end: self }
         } else {
             RangeV2 { start: self, end }
         }
@@ -330,10 +309,7 @@ impl<T> IntoRange for T {
         Self: Ord,
     {
         if self > end {
-            RangeInclusiveV2 {
-                start: end,
-                end: self,
-            }
+            RangeInclusiveV2 { start: end, end: self }
         } else {
             RangeInclusiveV2 { start: self, end }
         }

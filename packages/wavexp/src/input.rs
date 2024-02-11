@@ -66,11 +66,8 @@ impl TryFrom<&MouseEvent> for Cursor {
     #[apply(fallible!)]
     fn try_from(value: &MouseEvent) -> Self {
         let canvas: HtmlCanvasElement = value.target_dyn_into()?;
-        let point = Point {
-            x: value.offset_x(),
-            y: value.offset_y(),
-        }
-        .normalise(canvas.client_rect(), canvas.rect())?;
+        let point = Point { x: value.offset_x(), y: value.offset_y() }
+            .normalise(canvas.client_rect(), canvas.rect())?;
         Self {
             point,
             buttons: Buttons {
@@ -88,11 +85,8 @@ impl TryFrom<&PointerEvent> for Cursor {
     #[apply(fallible!)]
     fn try_from(value: &PointerEvent) -> Self {
         let canvas: HtmlCanvasElement = value.target_dyn_into()?;
-        let point = Point {
-            x: value.offset_x(),
-            y: value.offset_y(),
-        }
-        .normalise(canvas.client_rect(), canvas.rect())?;
+        let point = Point { x: value.offset_x(), y: value.offset_y() }
+            .normalise(canvas.client_rect(), canvas.rect())?;
         Self {
             point,
             buttons: Buttons {
@@ -139,11 +133,7 @@ impl Component for Slider {
     type Properties = SliderProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        Self {
-            value: ctx.props().initial,
-            old_value: f64::NAN,
-            target: default(),
-        }
+        Self { value: ctx.props().initial, old_value: f64::NAN, target: default() }
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -193,14 +183,7 @@ impl Component for Slider {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let SliderProps {
-            name,
-            postfix,
-            max,
-            min,
-            fmt,
-            ..
-        } = ctx.props();
+        let SliderProps { name, postfix, max, min, fmt, .. } = ctx.props();
         let scope = ctx.link();
         let selected: AttrValue = if self.value.abs() == *max {
             "M 50 12 A 38 38 0 0 0 50 88 A 38 38 0 1 0 50 12".into()
@@ -254,12 +237,7 @@ impl Component for Switch {
     type Properties = SwitchProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        Self {
-            value: ctx.props().initial.into(),
-            old_value: 0,
-            focused: false,
-            target: default(),
-        }
+        Self { value: ctx.props().initial.into(), old_value: 0, focused: false, target: default() }
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -341,10 +319,7 @@ impl Component for Switch {
                 <circle class="outer" cx="50" cy="50" r="40" />
                 <path d={selected} />
                 <circle class="inner" cx="50" cy="50" r="38" />
-                <text
-                    x="50"
-                    y="50"
-                >
+                <text x="50" y="50">
                     { unsafe { options.get_unchecked(usize::from(self.value)) } }
                 </text>
             </svg>
@@ -382,25 +357,12 @@ impl Component for Button {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let ButtonProps {
-            name,
-            children,
-            svg,
-            class,
-            onclick,
-            help,
-            submit,
-        } = ctx.props();
+        let ButtonProps { name, children, svg, class, onclick, help, submit } = ctx.props();
         let mut class = class.clone();
         class.push("input button");
         if *svg {
             html! {
-                <g
-                    {class}
-                    data-main-hint={name}
-                    data-aux-hint={help}
-                    onpointerup={onclick}
-                >
+                <g {class} data-main-hint={name} data-aux-hint={help} onpointerup={onclick}>
                     { children.clone() }
                 </g>
             }
@@ -438,11 +400,7 @@ impl<T: GraphPoint> Component for GraphEditorCanvas<T> {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let GraphEditorCanvasProps {
-            emitter,
-            editor,
-            id,
-        } = ctx.props();
+        let GraphEditorCanvasProps { emitter, editor, id } = ctx.props();
         match editor.get().report() {
             Some(editor) => {
                 // TODO: remove the need to store `GraphEditor`s as shared by removing the need to
@@ -501,11 +459,7 @@ impl Component for Counter {
     type Properties = CounterProps;
 
     fn create(ctx: &Context<Self>) -> Self {
-        Self {
-            value: ctx.props().initial,
-            old_value: f64::NAN,
-            target: default(),
-        }
+        Self { value: ctx.props().initial, old_value: f64::NAN, target: default() }
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -547,13 +501,7 @@ impl Component for Counter {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let CounterProps {
-            name,
-            fmt,
-            postfix,
-            min,
-            ..
-        } = ctx.props();
+        let CounterProps { name, fmt, postfix, min, .. } = ctx.props();
         let scope = ctx.link();
         html! {
             <svg
@@ -589,12 +537,7 @@ pub struct TabProps {
 
 #[function_component]
 pub fn Tab(props: &TabProps) -> Html {
-    let TabProps {
-        name,
-        desc,
-        setter,
-        selected,
-    } = props;
+    let TabProps { name, desc, setter, selected } = props;
     html! {
         <div
             class={selected.then_some("selected")}
@@ -602,7 +545,7 @@ pub fn Tab(props: &TabProps) -> Html {
             data-main-hint={name}
             data-aux-hint={desc}
         >
-            <p >{ name }</p>
+            <p>{ name }</p>
         </div>
     }
 }
@@ -625,27 +568,11 @@ pub struct AudioInputButtonProps {
 
 #[function_component]
 pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
-    let AudioInputButtonProps {
-        name,
-        bps,
-        input,
-        help,
-        onclick,
-        playing,
-        emitter,
-        class,
-    } = props;
+    let AudioInputButtonProps { name, bps, input, help, onclick, playing, emitter, class } = props;
     match input.as_ref().map(|x| x.get_aware().report()) {
         Some(Some(input)) => html! {
-            <Button
-                {name}
-                {help}
-                class={classes!(class.clone(), "wide")}
-                onclick={onclick}
-            >
-                <div
-                    class="inner-button-panel"
-                >
+            <Button {name} {help} class={classes!(class.clone(), "wide")} {onclick}>
+                <div class="inner-button-panel">
                     if *playing {
                         <Button
                             name="Stop playing"
@@ -672,7 +599,7 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                             <img::Play />
                         </Button>
                     }
-                    <p >{ input.desc(*bps) }</p>
+                    <p>{ input.desc(*bps) }</p>
                     <Button
                         name="Edit audio input"
                         help="Click to edit the audio input"
@@ -691,25 +618,14 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
         },
 
         Some(None) => html! {
-            <Button
-                {name}
-                {help}
-                class={classes!(class.clone(), "wide")}
-            >
+            <Button {name} {help} class={classes!(class.clone(), "wide")}>
                 <p style="color:red">{ "Failed to access the audio input" }</p>
             </Button>
         },
 
         None => html! {
-            <Button
-                {name}
-                {help}
-                class={classes!(class.clone(), "wide")}
-                onclick={onclick}
-            >
-                <div
-                    class="inner-button-panel"
-                >
+            <Button {name} {help} class={classes!(class.clone(), "wide")} {onclick}>
+                <div class="inner-button-panel">
                     <Button
                         class="unavailable"
                         name="Play audio input (not chosen)"
@@ -718,7 +634,9 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                     >
                         <img::Play />
                     </Button>
-                    <p >{ "Not chosen" }</p>
+                    <p>
+                        { "Not chosen" }
+                    </p>
                     <Button
                         class="unavailable"
                         name="Edit audio input (not chosen)"

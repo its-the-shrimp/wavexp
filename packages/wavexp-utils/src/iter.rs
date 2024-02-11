@@ -57,20 +57,10 @@ pub trait ToEveryNth<T> {
 
 impl<T> ToEveryNth<T> for [T] {
     fn every_nth(&self, n: usize) -> EveryNth<'_, T> {
-        EveryNth {
-            iter: self,
-            n,
-            state: 0,
-            off: 0,
-        }
+        EveryNth { iter: self, n, state: 0, off: 0 }
     }
     fn every_nth_mut(&mut self, n: usize) -> EveryNthMut<'_, T> {
-        EveryNthMut {
-            iter: self,
-            n,
-            state: 0,
-            off: 0,
-        }
+        EveryNthMut { iter: self, n, state: 0, off: 0 }
     }
 }
 
@@ -120,11 +110,7 @@ impl<'data, 'ids, T> ToIterIndicesMut<'data, 'ids, T> for [T] {
         &'data mut self,
         ids: &'ids [usize],
     ) -> IterIndicesMut<'data, 'ids, T> {
-        IterIndicesMut {
-            data: self,
-            ids,
-            state: 0,
-        }
+        IterIndicesMut { data: self, ids, state: 0 }
     }
 
     fn iter_indices_mut(
@@ -135,10 +121,6 @@ impl<'data, 'ids, T> ToIterIndicesMut<'data, 'ids, T> for [T] {
         if ids.iter().any(|&i| i >= len) {
             return None;
         }
-        Some(IterIndicesMut {
-            data: self,
-            ids,
-            state: 0,
-        })
+        Some(IterIndicesMut { data: self, ids, state: 0 })
     }
 }

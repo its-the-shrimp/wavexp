@@ -76,29 +76,16 @@ impl Ord for SoundBlock {
 
 impl GraphPoint for SoundBlock {
     const EDITOR_NAME: &'static str = "Editor plane";
-    const Y_BOUND: RangeV2<R64> = RangeV2 {
-        start: r64!(0),
-        end: R64::INFINITY,
-    };
-    const SCALE_Y_BOUND: RangeV2<R64> = RangeV2 {
-        start: r64!(5),
-        end: r64!(30),
-    };
-    const OFFSET_Y_BOUND: RangeV2<R64> = RangeV2 {
-        start: r64!(-1),
-        end: R64::INFINITY,
-    };
+    const Y_BOUND: RangeV2<R64> = RangeV2 { start: r64!(0), end: R64::INFINITY };
+    const SCALE_Y_BOUND: RangeV2<R64> = RangeV2 { start: r64!(5), end: r64!(30) };
+    const OFFSET_Y_BOUND: RangeV2<R64> = RangeV2 { start: r64!(-1), end: R64::INFINITY };
     const Y_SNAP: R64 = r64!(1);
     type Inner = Sound;
     type Y = u32;
     type VisualContext = ();
 
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
-        Self {
-            sound: default(),
-            layer: y.into(),
-            offset,
-        }
+        Self { sound: default(), layer: y.into(), offset }
     }
 
     fn inner(&self) -> &Self::Inner {
@@ -148,9 +135,7 @@ impl GraphPoint for SoundBlock {
     }
 
     fn on_selection_change(editor: &mut GraphEditor<Self>, ctx: ContextMut) -> Result {
-        Ok(ctx.emit_event(AppEvent::Select(
-            editor.selection().not_empty().then_some(0),
-        )))
+        Ok(ctx.emit_event(AppEvent::Select(editor.selection().not_empty().then_some(0))))
     }
 
     fn on_redraw(
@@ -268,11 +253,7 @@ pub struct Composition {
 
 impl Default for Composition {
     fn default() -> Self {
-        Composition {
-            bps: r64!(2),
-            pattern: default(),
-            inputs: vec![],
-        }
+        Composition { bps: r64!(2), pattern: default(), inputs: vec![] }
     }
 }
 
@@ -358,9 +339,7 @@ impl Sequencer {
         let emitter = ctx.event_emitter();
         match ctx.selected_tab() {
             0 /* General */ => html! {
-                <div
-                    id="inputs"
-                >
+                <div id="inputs">
                     <Slider
                         key="tmp"
                         name="Tempo"
@@ -393,7 +372,7 @@ impl Sequencer {
                                 )
                             })}
                         >
-                            <span >{ "Export the project" }</span>
+                            <span>{ "Export the project" }</span>
                         </Button>
                         <Button
                             name="Save the project"
@@ -415,9 +394,7 @@ impl Sequencer {
             },
 
             1 /* Inputs */ => html!{
-                <div
-                    class="horizontal-menu dark-bg"
-                >
+                <div class="horizontal-menu dark-bg">
                     { for self.comp.inputs.iter().map(|input| html! {
                         <AudioInputButton
                             playing={self.playback_ctx.played_input().is_some_and(|i| i.eq(input))}
@@ -451,8 +428,7 @@ impl Sequencer {
                 } else {
                     self.audio_ctx = AudioContext::new()?.into();
                     self.analyser = self.audio_ctx.create_analyser()?;
-                    self.analyser
-                        .connect_with_audio_node(&self.audio_ctx.destination())?;
+                    self.analyser.connect_with_audio_node(&self.audio_ctx.destination())?;
                     self.ctx_created_at = now()?;
                 }
                 if let Some(input) = input {
@@ -499,14 +475,12 @@ impl Sequencer {
             }
 
             AppEvent::StartInputAdd => {
-                let temp = document()
-                    .create_element("input")?
-                    .unchecked_into::<HtmlInputElement>();
+                let temp = document().create_element("input")?.unchecked_into::<HtmlInputElement>();
                 temp.set_type("file");
                 let emitter = ctx.event_emitter().clone();
-                temp.set_onchange(Some(&js_function!(
-                    |e| emitter.emit(AppEvent::AudioUploaded(e))
-                )));
+                temp.set_onchange(Some(
+                    &js_function!(|e| emitter.emit(AppEvent::AudioUploaded(e))),
+                ));
                 temp.click();
             }
 
@@ -552,10 +526,7 @@ impl Sequencer {
 
             AppEvent::Bpm(mut to) => {
                 to /= 60;
-                ctx.register_action(EditorAction::SetTempo {
-                    from: self.comp.bps,
-                    to,
-                })?;
+                ctx.register_action(EditorAction::SetTempo { from: self.comp.bps, to })?;
                 self.comp.bps = to
             }
 
@@ -575,10 +546,7 @@ impl Sequencer {
                         _ => (),
                     }
                 }
-                self.comp
-                    .pattern
-                    .get_mut()?
-                    .handle_event(event, ctx, self, || ())?
+                self.comp.pattern.get_mut()?.handle_event(event, ctx, self, || ())?
             }
 
             AppEvent::Redo(ref actions) => {
@@ -593,17 +561,10 @@ impl Sequencer {
                         _ => (),
                     }
                 }
-                self.comp
-                    .pattern
-                    .get_mut()?
-                    .handle_event(event, ctx, self, || ())?
+                self.comp.pattern.get_mut()?.handle_event(event, ctx, self, || ())?
             }
 
-            _ => self
-                .comp
-                .pattern
-                .get_mut()?
-                .handle_event(event, ctx, self, || ())?,
+            _ => self.comp.pattern.get_mut()?.handle_event(event, ctx, self, || ())?,
         }
     }
 }

@@ -100,10 +100,7 @@ impl AppError {
 }
 
 pub fn report_err(err: js_sys::Error) {
-    warn_2(
-        &err,
-        &js_sys::Reflect::get(err.as_ref(), &"stack".into()).unwrap_or_else(|e| e),
-    );
+    warn_2(&err, &js_sys::Reflect::get(err.as_ref(), &"stack".into()).unwrap_or_else(|e| e));
     if let Some(x) = document().element_dyn_into::<HtmlElement>("error-sign") {
         x.set_hidden(false)
     } else {
@@ -121,9 +118,7 @@ pub type Result<T = (), E = AppError> = std::result::Result<T, E>;
 
 impl<T, F, E: Into<F>> FromResidual<Result<Infallible, E>> for ResultV2<T, F> {
     fn from_residual(residual: Result<Infallible, E>) -> Self {
-        let Result::Err(err) = residual else {
-            unsafe { unreachable_unchecked() }
-        };
+        let Result::Err(err) = residual else { unsafe { unreachable_unchecked() } };
         Self::Err(err.into())
     }
 }

@@ -248,9 +248,8 @@ impl AudioInput {
 
     async fn from_file_base(file: File, audio_ctx: BaseAudioContext) -> Result<Self> {
         let raw = JsFuture::from(file.array_buffer()).await?.dyn_into()?;
-        let buffer: AudioBuffer = JsFuture::from(audio_ctx.decode_audio_data(&raw)?)
-            .await?
-            .dyn_into()?;
+        let buffer: AudioBuffer =
+            JsFuture::from(audio_ctx.decode_audio_data(&raw)?).await?.dyn_into()?;
         Self::new(format!("File {:?}", file.name()).into(), buffer)
     }
 
@@ -321,11 +320,7 @@ impl AudioInput {
     }
 
     pub fn desc(&self, bps: Beats) -> String {
-        format!(
-            "{}, {:.2} beats",
-            self.name,
-            self.duration.secs_to_beats(bps)
-        )
+        format!("{}, {:.2} beats", self.name, self.duration.secs_to_beats(bps))
     }
 }
 
@@ -418,9 +413,7 @@ impl Sound {
             Self::None => {
                 let emitter = ctx.event_emitter();
                 html! {
-                    <div
-                        class="horizontal-menu"
-                    >
+                    <div class="horizontal-menu">
                         { for Sound::TYPES.iter().map(|x| html!{
                         <Button name={x.name()}
                             onclick={emitter.reform(|_| AppEvent::SetBlockType(*x))}>

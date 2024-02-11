@@ -171,9 +171,7 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
     }
 
     fn zip_fold<O, R>(self, init: R, other: [O; N], mut f: impl FnMut(R, T, O) -> R) -> R {
-        self.into_iter()
-            .zip(other)
-            .fold(init, |r, (x, y)| f(r, x, y))
+        self.into_iter().zip(other).fold(init, |r, (x, y)| f(r, x, y))
     }
 
     fn sum<R: Sum<T>>(self) -> R {
@@ -380,13 +378,7 @@ impl HtmlCanvasExt for HtmlCanvasElement {
     }
 
     fn rect(&self) -> Rect {
-        Rect(
-            Point::ZERO,
-            Point {
-                x: self.width() as i32,
-                y: self.height() as i32,
-            },
-        )
+        Rect(Point::ZERO, Point { x: self.width() as i32, y: self.height() as i32 })
     }
 
     fn size(&self) -> [u32; 2] {
@@ -417,13 +409,7 @@ pub trait HtmlElementExt {
 
 impl HtmlElementExt for Element {
     fn client_rect(&self) -> Rect {
-        Rect(
-            Point::ZERO,
-            Point {
-                x: self.client_width(),
-                y: self.client_height(),
-            },
-        )
+        Rect(Point::ZERO, Point { x: self.client_width(), y: self.client_height() })
     }
 
     fn client_size(&self) -> [i32; 2] {
@@ -548,10 +534,7 @@ fn slice_get_var() {
 #[test]
 fn slice_get_var_mut() {
     let mut x = [1, 2, 4, 8, 16, 32, 64];
-    assert_eq!(
-        x.get_var_mut(&[1, 3, 6]),
-        Some(vec![&mut 2, &mut 8, &mut 64])
-    );
+    assert_eq!(x.get_var_mut(&[1, 3, 6]), Some(vec![&mut 2, &mut 8, &mut 64]));
     assert_eq!(x.get_var_mut(&[1, 25]), None);
     assert_eq!(x.get_var_mut(&[1, 4, 5, 1]), None);
 }

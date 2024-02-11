@@ -159,10 +159,7 @@ pub struct Point {
 
 impl From<[R64; 2]> for Point {
     fn from(value: [R64; 2]) -> Self {
-        Self {
-            x: value[0].into(),
-            y: value[1].into(),
-        }
+        Self { x: value[0].into(), y: value[1].into() }
     }
 }
 
@@ -179,17 +176,11 @@ impl RoundTo for Point {
     type Output = Option<Self>;
 
     fn floor_to(self, step: Self) -> Self::Output {
-        Some(Self {
-            x: self.x.floor_to(step.x)?,
-            y: self.y.floor_to(step.y)?,
-        })
+        Some(Self { x: self.x.floor_to(step.x)?, y: self.y.floor_to(step.y)? })
     }
 
     fn ceil_to(self, step: Self) -> Self::Output {
-        Some(Self {
-            x: self.x.ceil_to(step.x)?,
-            y: self.y.ceil_to(step.y)?,
-        })
+        Some(Self { x: self.x.ceil_to(step.x)?, y: self.y.ceil_to(step.y)? })
     }
 }
 
@@ -197,10 +188,7 @@ impl Add for Point {
     type Output = Option<Self>;
 
     fn add(self, rhs: Self) -> Self::Output {
-        Some(Self {
-            x: self.x.checked_add(rhs.x)?,
-            y: self.y.checked_add(rhs.y)?,
-        })
+        Some(Self { x: self.x.checked_add(rhs.x)?, y: self.y.checked_add(rhs.y)? })
     }
 }
 
@@ -208,10 +196,7 @@ impl Sub for Point {
     type Output = Option<Self>;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        Some(Self {
-            x: self.x.checked_sub(rhs.x)?,
-            y: self.y.checked_sub(rhs.y)?,
-        })
+        Some(Self { x: self.x.checked_sub(rhs.x)?, y: self.y.checked_sub(rhs.y)? })
     }
 }
 
@@ -219,10 +204,7 @@ impl Neg for Point {
     type Output = Option<Point>;
 
     fn neg(self) -> Self::Output {
-        Some(Self {
-            x: self.x.checked_neg()?,
-            y: self.y.checked_neg()?,
-        })
+        Some(Self { x: self.x.checked_neg()?, y: self.y.checked_neg()? })
     }
 }
 

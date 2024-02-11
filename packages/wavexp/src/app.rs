@@ -30,11 +30,7 @@ pub struct AppContext {
 impl AppContext {
     #[apply(fallible!)]
     pub fn new(event_emitter: Callback<AppEvent>) -> Self {
-        Self {
-            frame: now()? / 1000,
-            rerender_needed: false,
-            event_emitter,
-        }
+        Self { frame: now()? / 1000, rerender_needed: false, event_emitter }
     }
 
     pub fn force_rerender(&mut self) {
@@ -85,9 +81,7 @@ impl Component for App {
             frame_emitter: js_function!(|x| cb.emit(R64::new_or(r64!(0), x))),
             popups: vec![],
         };
-        window()
-            .request_animation_frame(&res.frame_emitter)
-            .unwrap();
+        window().request_animation_frame(&res.frame_emitter).unwrap();
         res
     }
 

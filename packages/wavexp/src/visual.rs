@@ -62,11 +62,7 @@ impl From<Rgba> for u32 {
 
 impl Display for Rgba {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "#{:02X}{:02X}{:02X}{:02X}",
-            self.r, self.g, self.b, self.a
-        )
+        write!(f, "#{:02X}{:02X}{:02X}{:02X}", self.r, self.g, self.b, self.a)
     }
 }
 
@@ -94,27 +90,15 @@ pub struct SoundVisualiser {
 }
 
 impl SoundVisualiser {
-    pub const FG: Rgba = Rgba {
-        r: 0x00,
-        g: 0x69,
-        b: 0xE1,
-        a: 0xFF,
-    };
+    pub const FG: Rgba = Rgba { r: 0x00, g: 0x69, b: 0xE1, a: 0xFF };
 
-    pub const BG: Rgba = Rgba {
-        r: 0x18,
-        g: 0x18,
-        b: 0x18,
-        a: 0xFF,
-    };
+    pub const BG: Rgba = Rgba { r: 0x18, g: 0x18, b: 0x18, a: 0xFF };
 
     pub fn new() -> Self {
         Self {
             out_data: vec![],
             in_data: vec![],
-            gradient: (0..=u8::MAX)
-                .map(|i| interp(&[Self::BG, Self::FG], i))
-                .collect(),
+            gradient: (0..=u8::MAX).map(|i| interp(&[Self::BG, Self::FG], i)).collect(),
             width: 0,
             height: 0,
             canvas: default(),
@@ -143,13 +127,9 @@ impl SoundVisualiser {
             AppEvent::Frame(..) => {
                 if sequencer.playback_ctx().playing() {
                     self.out_data.rotate_right(1);
-                    sequencer
-                        .analyser()
-                        .get_byte_frequency_data(&mut self.in_data);
-                    for (&src, dst) in self
-                        .in_data
-                        .iter()
-                        .zip(self.out_data.every_nth_mut(self.width as usize))
+                    sequencer.analyser().get_byte_frequency_data(&mut self.in_data);
+                    for (&src, dst) in
+                        self.in_data.iter().zip(self.out_data.every_nth_mut(self.width as usize))
                     {
                         *dst = unsafe { *self.gradient.get_unchecked(src as usize) };
                     }
@@ -234,20 +214,11 @@ pub trait GraphPoint: Sized + Clone + Ord + 'static {
     /// the name of the plane that will be displayed as a hint when hovered over it
     const EDITOR_NAME: &'static str;
     /// bounds for the points along the X axis
-    const X_BOUND: RangeV2<R64> = RangeV2 {
-        start: r64!(0),
-        end: R64::INFINITY,
-    };
+    const X_BOUND: RangeV2<R64> = RangeV2 { start: r64!(0), end: R64::INFINITY };
     /// bounds for the scale of the X axis of the graph
-    const SCALE_X_BOUND: RangeV2<R64> = RangeV2 {
-        start: r64!(3),
-        end: r64!(30),
-    };
+    const SCALE_X_BOUND: RangeV2<R64> = RangeV2 { start: r64!(3), end: r64!(30) };
     /// bounds for the offset of the X axis of the graph
-    const OFFSET_X_BOUND: RangeV2<R64> = RangeV2 {
-        start: r64!(-1),
-        end: R64::INFINITY,
-    };
+    const OFFSET_X_BOUND: RangeV2<R64> = RangeV2 { start: r64!(-1), end: R64::INFINITY };
     /// bounds for the points along the Y axis
     const Y_BOUND: RangeV2<R64>;
     /// bounds for the scale of the Y axis of the graph
@@ -539,11 +510,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                 let index = *self.selection.get_unchecked(i);
                 if !to_remove((index, self.data.get_unchecked(index))) {
                     let point = Rc::new(self.data.remove_unchecked(index));
-                    removed.push(RemovedPoint {
-                        point,
-                        index,
-                        was_selected: true,
-                    });
+                    removed.push(RemovedPoint { point, index, was_selected: true });
                     self.selection.remove_unchecked(i);
                     self.redraw = true;
                 }
@@ -565,10 +532,7 @@ impl<T: GraphPoint> GraphEditor<T> {
         let mut prev_id = data.len();
         let mut removed = vec![];
         for index in to_remove.rev() {
-            ensure!(
-                index < replace(&mut prev_id, index),
-                "indices for removal weren't sorted"
-            );
+            ensure!(index < replace(&mut prev_id, index), "indices for removal weren't sorted");
             let (rem, was_selected) = loop {
                 let Some(x) = ids_iter.next() else {
                     break (0, false);
@@ -590,17 +554,9 @@ impl<T: GraphPoint> GraphEditor<T> {
                 index,
                 was_selected,
             });
-            ids_iter = inner
-                .selection
-                .get_mut(..rem)
-                .unwrap_or(&mut [])
-                .iter_mut()
-                .rev();
+            ids_iter = inner.selection.get_mut(..rem).unwrap_or(&mut []).iter_mut().rev();
         }
-        Ok(EditorAction::RemovePoint(
-            self.id,
-            removed.into_boxed_slice(),
-        ))
+        Ok(EditorAction::RemovePoint(self.id, removed.into_boxed_slice()))
     }
 
     pub fn force_redraw(&mut self) {
@@ -640,19 +596,13 @@ impl<T: GraphPoint> GraphEditor<T> {
             .iter()
             .enumerate()
             .try_find(|x| {
-                x.1.in_hitbox(
-                    &loc.map(|x| x.incl_range_to(x)),
-                    ctx.as_ref(),
-                    sequencer,
-                    visual_ctx,
-                )
+                x.1.in_hitbox(&loc.map(|x| x.incl_range_to(x)), ctx.as_ref(), sequencer, visual_ctx)
             })?
             .map(|(id, x)| unsafe { SliceRef::raw(x, id) }))
     }
 
     fn point_in_selection(&self, loc: ConfinedAlignedUserPoint) -> bool {
-        loc.sub(self.selection_src)
-            .fits(&self.selection_size.map(|s| r64!(0)..=s))
+        loc.sub(self.selection_src).fits(&self.selection_size.map(|s| r64!(0)..=s))
     }
 
     fn update_hint(&self, ctx: ContextMut, cursor: Cursor) {
@@ -671,11 +621,7 @@ impl<T: GraphPoint> GraphEditor<T> {
             Focus::Plane { .. } => {
                 let main = Cow::from(T::EDITOR_NAME);
                 match *cursor {
-                    Buttons {
-                        left: false,
-                        meta: false,
-                        ..
-                    } => (
+                    Buttons { left: false, meta: false, .. } => (
                         main,
                         match ctx.special_action() {
                             SpecialAction::Select => "Shift - zoom, Meta - select points",
@@ -684,33 +630,22 @@ impl<T: GraphPoint> GraphEditor<T> {
                         },
                     ),
 
-                    Buttons {
-                        left: false,
-                        meta: true,
-                        ..
-                    } => match ctx.special_action() {
+                    Buttons { left: false, meta: true, .. } => match ctx.special_action() {
                         // TODO: find a way to replace `format!` with smth const
-                        SpecialAction::Select => (
-                            main + ": selecting",
-                            "Press and hold left mouse button to select",
-                        ),
+                        SpecialAction::Select => {
+                            (main + ": selecting", "Press and hold left mouse button to select")
+                        }
                         SpecialAction::Add => (main + ": adding", "Click to add a point"),
                         SpecialAction::Remove => {
                             (main + ": removing", "Click on a point to remove it")
                         }
                     },
 
-                    Buttons {
-                        left: true,
-                        meta: false,
-                        ..
-                    } => (main + ": moving", "Release to stop"),
+                    Buttons { left: true, meta: false, .. } => {
+                        (main + ": moving", "Release to stop")
+                    }
 
-                    Buttons {
-                        left: true,
-                        meta: true,
-                        ..
-                    } => match ctx.special_action() {
+                    Buttons { left: true, meta: true, .. } => match ctx.special_action() {
                         SpecialAction::Select => (main + ": selecting", "Release to select"),
                         SpecialAction::Add => (main + ": adding a point", "Release to add a point"),
                         SpecialAction::Remove => (
@@ -724,11 +659,7 @@ impl<T: GraphPoint> GraphEditor<T> {
             Focus::Point { id, .. } => {
                 let main = || unsafe { T::fmt_loc(self.data.get_unchecked(id).loc()).into() };
                 match *cursor {
-                    Buttons {
-                        left: false,
-                        meta: false,
-                        ..
-                    } => (
+                    Buttons { left: false, meta: false, .. } => (
                         main(),
                         match ctx.special_action() {
                             SpecialAction::Select => "Shift - zoom, Meta - select points",
@@ -737,11 +668,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         },
                     ),
 
-                    Buttons {
-                        left: false,
-                        meta: true,
-                        ..
-                    } => match ctx.special_action() {
+                    Buttons { left: false, meta: true, .. } => match ctx.special_action() {
                         // TODO: find a way to replace `format!` with smth const
                         SpecialAction::Select => (
                             Cow::from(T::EDITOR_NAME) + ": selecting",
@@ -756,29 +683,21 @@ impl<T: GraphPoint> GraphEditor<T> {
                         }
                     },
 
-                    Buttons {
-                        left: true,
-                        meta: false,
-                        ..
-                    } => (main() + ": moving", "Release to stop"),
+                    Buttons { left: true, meta: false, .. } => {
+                        (main() + ": moving", "Release to stop")
+                    }
 
-                    Buttons {
-                        left: true,
-                        meta: true,
-                        ..
-                    } => match ctx.special_action() {
-                        SpecialAction::Select => (
-                            Cow::from(T::EDITOR_NAME) + ": selecting",
-                            "Release to select",
-                        ),
+                    Buttons { left: true, meta: true, .. } => match ctx.special_action() {
+                        SpecialAction::Select => {
+                            (Cow::from(T::EDITOR_NAME) + ": selecting", "Release to select")
+                        }
                         SpecialAction::Add => (
                             Cow::from(T::EDITOR_NAME) + ": adding a point",
                             "Release and click on empty space to add a point",
                         ),
-                        SpecialAction::Remove => (
-                            main() + ": removing a point",
-                            "Release to remove this point",
-                        ),
+                        SpecialAction::Remove => {
+                            (main() + ": removing a point", "Release to remove this point")
+                        }
                     },
                 }
             }
@@ -789,11 +708,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     Cow::from(format!("{len} block{}", if len == 1 { "" } else { "s" }))
                 };
                 match *cursor {
-                    Buttons {
-                        left: false,
-                        meta: false,
-                        ..
-                    } => (
+                    Buttons { left: false, meta: false, .. } => (
                         main(),
                         match ctx.special_action() {
                             SpecialAction::Select => "Shift - zoom, Meta - select points",
@@ -802,11 +717,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                         },
                     ),
 
-                    Buttons {
-                        left: false,
-                        meta: true,
-                        ..
-                    } => match ctx.special_action() {
+                    Buttons { left: false, meta: true, .. } => match ctx.special_action() {
                         // TODO: find a way to replace `format!` with smth const
                         SpecialAction::Select => (
                             Cow::from(T::EDITOR_NAME) + ": selecting",
@@ -816,35 +727,26 @@ impl<T: GraphPoint> GraphEditor<T> {
                             Cow::from(T::EDITOR_NAME) + ": adding a point",
                             "Click on empty space to add a point",
                         ),
-                        SpecialAction::Remove => (
-                            main() + ": removing selection",
-                            "Click to remove this point",
-                        ),
+                        SpecialAction::Remove => {
+                            (main() + ": removing selection", "Click to remove this point")
+                        }
                     },
 
-                    Buttons {
-                        left: true,
-                        meta: false,
-                        ..
-                    } => (main() + ": moving", "Release to stop"),
+                    Buttons { left: true, meta: false, .. } => {
+                        (main() + ": moving", "Release to stop")
+                    }
 
-                    Buttons {
-                        left: true,
-                        meta: true,
-                        ..
-                    } => match ctx.special_action() {
-                        SpecialAction::Select => (
-                            Cow::from(T::EDITOR_NAME) + ": selecting",
-                            "Release to select",
-                        ),
+                    Buttons { left: true, meta: true, .. } => match ctx.special_action() {
+                        SpecialAction::Select => {
+                            (Cow::from(T::EDITOR_NAME) + ": selecting", "Release to select")
+                        }
                         SpecialAction::Add => (
                             Cow::from(T::EDITOR_NAME) + ": adding a point",
                             "Release and click on empty space to add a point",
                         ),
-                        SpecialAction::Remove => (
-                            main() + ": removing selection",
-                            "Release to remove the selection",
-                        ),
+                        SpecialAction::Remove => {
+                            (main() + ": removing selection", "Release to remove the selection")
+                        }
                     },
                 }
             }
@@ -863,29 +765,17 @@ impl<T: GraphPoint> GraphEditor<T> {
     }
 
     fn set_plane_focus(&mut self) {
-        self.focus = Focus::Plane {
-            origin: default(),
-            init_offset: default(),
-        };
+        self.focus = Focus::Plane { origin: default(), init_offset: default() };
         self.update_hint = true;
     }
 
     fn set_point_focus(&mut self, id: usize) {
-        self.focus = Focus::Point {
-            id,
-            last_loc: default(),
-            origin: default(),
-            meta: false,
-        };
+        self.focus = Focus::Point { id, last_loc: default(), origin: default(), meta: false };
         self.update_hint = true;
     }
 
     fn set_selection_focus(&mut self) {
-        self.focus = Focus::Selection {
-            origin: default(),
-            end: default(),
-            meta: false,
-        };
+        self.focus = Focus::Selection { origin: default(), end: default(), meta: false };
         self.update_hint = true;
     }
 
@@ -910,9 +800,8 @@ impl<T: GraphPoint> GraphEditor<T> {
     ) {
         match ctx.special_action() {
             SpecialAction::Select => {
-                let area = [pressed_at, released_at]
-                    .transposed()
-                    .map(|x| x[0].sorted_incl_range_to(x[1]));
+                let area =
+                    [pressed_at, released_at].transposed().map(|x| x[0].sorted_incl_range_to(x[1]));
                 let prev_ids = self.inner.selection.to_box();
                 self.inner.selection = self
                     .data
@@ -987,19 +876,13 @@ impl<T: GraphPoint> GraphEditor<T> {
             move || R64::array_from(cursor.point.add(off).unwrap_or_default()).div(step)
         });
         let cursor_point_user_aligned_confined = LazyCell::new(|| {
-            cursor_point_user
-                .floor_to(snap_step)
-                .array_fit_into([T::X_BOUND, T::Y_BOUND])
+            cursor_point_user.floor_to(snap_step).array_fit_into([T::X_BOUND, T::Y_BOUND])
         });
 
         match &mut self.inner.focus {
             Focus::None => self.set_plane_focus(),
 
-            Focus::Zoom {
-                init_offset,
-                init_scale,
-                pivot,
-            } => {
+            Focus::Zoom { init_offset, init_scale, pivot } => {
                 if cursor.left {
                     if !self.inner.last_cursor.left {
                         *pivot = (cursor.point + self.inner.offset)?;
@@ -1046,19 +929,10 @@ impl<T: GraphPoint> GraphEditor<T> {
                 }
             }
 
-            Focus::Plane {
-                origin,
-                init_offset,
-            } => match *cursor {
-                Buttons {
-                    shift: true,
-                    left: false,
-                    ..
-                } => self.set_zoom_focus(cursor)?,
+            Focus::Plane { origin, init_offset } => match *cursor {
+                Buttons { shift: true, left: false, .. } => self.set_zoom_focus(cursor)?,
 
-                Buttons {
-                    left: false, meta, ..
-                } => {
+                Buttons { left: false, meta, .. } => {
                     if self.inner.last_cursor.left {
                         if self.inner.last_cursor.meta {
                             let origin = *origin;
@@ -1088,9 +962,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     }
                 }
 
-                Buttons {
-                    left: true, meta, ..
-                } => {
+                Buttons { left: true, meta, .. } => {
                     if meta {
                         if !self.inner.last_cursor.left {
                             *origin = *cursor_point_user_aligned_confined;
@@ -1131,12 +1003,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                 }
             },
 
-            Focus::Point {
-                id,
-                last_loc,
-                origin,
-                meta,
-            } => {
+            Focus::Point { id, last_loc, origin, meta } => {
                 if cursor.left {
                     if *meta {
                         self.special_action_on_drag(
@@ -1294,23 +1161,13 @@ impl<T: GraphPoint> GraphEditor<T> {
         visual_ctx: impl FnOnce() -> T::VisualContext,
     ) {
         match event {
-            AppEvent::Enter(id, e) | AppEvent::Hover(id, e) if *id == self.id => self
-                .handle_hover(
-                    Some(e.try_into()?),
-                    ctx,
-                    sequencer,
-                    LazyCell::new(visual_ctx),
-                )?,
+            AppEvent::Enter(id, e) | AppEvent::Hover(id, e) if *id == self.id => {
+                self.handle_hover(Some(e.try_into()?), ctx, sequencer, LazyCell::new(visual_ctx))?
+            }
 
             AppEvent::Focus(id, e) if *id == self.id => {
-                e.target_dyn_into::<Element>()?
-                    .set_pointer_capture(e.pointer_id())?;
-                self.handle_hover(
-                    Some(e.try_into()?),
-                    ctx,
-                    sequencer,
-                    LazyCell::new(visual_ctx),
-                )?;
+                e.target_dyn_into::<Element>()?.set_pointer_capture(e.pointer_id())?;
+                self.handle_hover(Some(e.try_into()?), ctx, sequencer, LazyCell::new(visual_ctx))?;
             }
 
             AppEvent::SetSpecialAction(_) => {
@@ -1343,11 +1200,7 @@ impl<T: GraphPoint> GraphEditor<T> {
             AppEvent::Undo(actions) => {
                 for action in actions.iter() {
                     match *action {
-                        EditorAction::DragPlane {
-                            editor_id,
-                            offset_delta,
-                            scale_delta,
-                        } => {
+                        EditorAction::DragPlane { editor_id, offset_delta, scale_delta } => {
                             if editor_id == self.id {
                                 self.redraw = true;
                                 self.offset = (self.offset - offset_delta)?;
@@ -1355,11 +1208,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                             }
                         }
 
-                        EditorAction::DragPoint {
-                            editor_id,
-                            point_id,
-                            mut delta,
-                        } => {
+                        EditorAction::DragPoint { editor_id, point_id, mut delta } => {
                             if editor_id == self.id {
                                 self.redraw = true;
                                 delta = delta.map(|x| -x);
@@ -1367,10 +1216,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                             }
                         }
 
-                        EditorAction::DragSelection {
-                            editor_id,
-                            mut delta,
-                        } => {
+                        EditorAction::DragSelection { editor_id, mut delta } => {
                             if editor_id == self.id {
                                 self.redraw = true;
                                 delta = delta.map(neg);
@@ -1396,21 +1242,16 @@ impl<T: GraphPoint> GraphEditor<T> {
                             }
                         }
 
-                        EditorAction::AddPoint {
-                            editor_id,
-                            point_id,
-                            ..
-                        } if editor_id == self.id => _ = self.remove_points(once(point_id))?,
+                        EditorAction::AddPoint { editor_id, point_id, .. }
+                            if editor_id == self.id =>
+                        {
+                            _ = self.remove_points(once(point_id))?
+                        }
 
                         EditorAction::RemovePoint(editor_id, ref points)
                             if editor_id == self.id =>
                         {
-                            for &RemovedPoint {
-                                ref point,
-                                index,
-                                was_selected,
-                            } in points.iter()
-                            {
+                            for &RemovedPoint { ref point, index, was_selected } in points.iter() {
                                 self.data.insert(index, point.downcast_ref::<T>()?.clone());
                                 if was_selected {
                                     self.selection.push(index);
@@ -1426,11 +1267,7 @@ impl<T: GraphPoint> GraphEditor<T> {
             AppEvent::Redo(actions) => {
                 for action in actions.iter() {
                     match *action {
-                        EditorAction::DragPlane {
-                            editor_id,
-                            offset_delta,
-                            scale_delta,
-                        } => {
+                        EditorAction::DragPlane { editor_id, offset_delta, scale_delta } => {
                             if editor_id == self.id {
                                 self.redraw = true;
                                 self.offset = self.offset.add(offset_delta)?;
@@ -1438,11 +1275,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                             }
                         }
 
-                        EditorAction::DragPoint {
-                            editor_id,
-                            point_id,
-                            delta,
-                        } => {
+                        EditorAction::DragPoint { editor_id, point_id, delta } => {
                             if editor_id == self.id {
                                 self.redraw = true;
                                 T::móve(self.data.get_mut(point_id)?, delta, false)?
@@ -1474,11 +1307,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                             }
                         }
 
-                        EditorAction::AddPoint {
-                            editor_id,
-                            point_id,
-                            point_loc,
-                        } => {
+                        EditorAction::AddPoint { editor_id, point_id, point_loc } => {
                             if editor_id == self.id {
                                 let new = T::create(self, point_loc);
                                 self.data.insert(point_id, new);
@@ -1559,9 +1388,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                 dotted.rect(*x, *y, *w, *h);
 
                 match self.focus {
-                    Focus::Zoom {
-                        pivot, init_offset, ..
-                    } => {
+                    Focus::Zoom { pivot, init_offset, .. } => {
                         if self.last_cursor.left {
                             let [x, y] = pivot.sub(init_offset)?.map(|x| x as f64);
                             solid.move_to(x - 10.0, y);
@@ -1602,15 +1429,7 @@ impl<T: GraphPoint> GraphEditor<T> {
                     _ => (),
                 }
 
-                T::on_redraw(
-                    self,
-                    ctx.as_ref(),
-                    sequencer,
-                    &size,
-                    &solid,
-                    &dotted,
-                    visual_ctx(),
-                )?;
+                T::on_redraw(self, ctx.as_ref(), sequencer, &size, &solid, &dotted, visual_ctx())?;
 
                 canvas_ctx.set_stroke_style(&AnyGraphEditor::FG_STYLE.into());
                 canvas_ctx.fill_with_path_2d(&solid);

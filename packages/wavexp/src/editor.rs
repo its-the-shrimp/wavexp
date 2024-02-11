@@ -43,8 +43,7 @@ impl EditorContext {
 
     pub fn register_action(&mut self, app: &mut AppContext, action: EditorAction) -> Result {
         app.force_rerender();
-        self.actions
-            .drain(self.actions.len() - take(&mut self.undid_actions)..);
+        self.actions.drain(self.actions.len() - take(&mut self.undid_actions)..);
         if let Some(last) = self.actions.pop() {
             match last.merge(action) {
                 Ok(None) => (),
@@ -101,24 +100,15 @@ impl Editor {
 
     #[apply(fallible!)]
     pub fn handle_event(&mut self, event: &mut AppEvent, app: &mut AppContext) {
-        let mut ctx = ContextMut {
-            editor: &mut self.ctx,
-            app,
-        };
+        let mut ctx = ContextMut { editor: &mut self.ctx, app };
         match *event {
             AppEvent::SnapStep(to) => {
-                ctx.register_action(EditorAction::SetSnapStep {
-                    from: ctx.editor.snap_step,
-                    to,
-                })?;
+                ctx.register_action(EditorAction::SetSnapStep { from: ctx.editor.snap_step, to })?;
                 ctx.editor.snap_step = to;
             }
 
             AppEvent::SetTab(to) => {
-                ctx.register_action(EditorAction::SwitchTab {
-                    from: ctx.editor.selected_tab,
-                    to,
-                })?;
+                ctx.register_action(EditorAction::SwitchTab { from: ctx.editor.selected_tab, to })?;
                 ctx.editor.selected_tab = to;
             }
 
@@ -228,11 +218,7 @@ impl Editor {
             AppEvent::Undo(ref actions) => {
                 for action in actions.iter() {
                     match *action {
-                        EditorAction::Select {
-                            from,
-                            prev_selected_tab,
-                            ..
-                        } => {
+                        EditorAction::Select { from, prev_selected_tab, .. } => {
                             ctx.editor.selected_block = from;
                             ctx.editor.selected_tab = prev_selected_tab;
                         }
@@ -278,18 +264,13 @@ impl Editor {
             .selected_block
             .try_map(|i| pattern.selection().get(i))?
             .try_map(|i| pattern.data().get(*i))?;
-        let ctx = ContextRef {
-            editor: &self.ctx,
-            app,
-        };
+        let ctx = ContextRef { editor: &self.ctx, app };
         let emitter = ctx.event_emitter();
         let special_action = self.ctx.special_action;
 
         html! {
             <>
-                <div
-                    id="main-panel"
-                >
+                <div id="main-panel">
                     <div
                         id="ctrl-panel"
                         class="dark-bg"
@@ -309,10 +290,7 @@ impl Editor {
                         if let Some(block) = block {
                             <div id="tab-list">{ block.tabs(ctx) }</div>
                             { block.sound.params(ctx, &self.sequencer) }
-                            <div
-                                id="general-ctrl"
-                                class="dark-bg"
-                            >
+                            <div id="general-ctrl" class="dark-bg">
                                 <Button
                                     name="Back to project-wide settings"
                                     onclick={emitter.reform(|_| AppEvent::Select(None))}
@@ -337,14 +315,8 @@ impl Editor {
                         emitter={emitter.clone()}
                     />
                 </div>
-                <div
-                    id="io-panel"
-                    data-main-hint="Editor plane settings"
-                >
-                    <div
-                        class="horizontal-menu"
-                        id="actions"
-                    >
+                <div id="io-panel" data-main-hint="Editor plane settings">
+                    <div class="horizontal-menu" id="actions">
                         { for ctx
                             .actions()
                             .iter()
@@ -352,9 +324,7 @@ impl Editor {
                             .enumerate()
                             .map(|(i, a)| self.render_action(a, i, emitter)) }
                     </div>
-                    <div
-                        id="special-actions"
-                    >
+                    <div id="special-actions">
                         <Button
                             name="Special Action: Select"
                             class={(special_action == SpecialAction::Select).choose("small selected", "small")}
@@ -383,10 +353,7 @@ impl Editor {
                             <img::Minus />
                         </Button>
                     </div>
-                    <div
-                        id="editor-settings"
-                        data-main-hint="Editor settings"
-                    >
+                    <div id="editor-settings" data-main-hint="Editor settings">
                         <Switch
                             key="snap"
                             name="Interval for blocks to snap to"
@@ -407,10 +374,7 @@ impl Editor {
                         />
                     </div>
                     if self.sequencer.playback_ctx().all_playing() {
-                        <Button
-                            name="Stop"
-                            onclick={emitter.reform(|_| AppEvent::StopPlay)}
-                        >
+                        <Button name="Stop" onclick={emitter.reform(|_| AppEvent::StopPlay)}>
                             <img::Stop />
                         </Button>
                     } else {
@@ -436,10 +400,7 @@ impl Editor {
 impl Editor {
     #[apply(fallible!)]
     fn forward_event(&mut self, event: &mut AppEvent, app: &mut AppContext) {
-        let mut ctx = ContextMut {
-            editor: &mut self.ctx,
-            app,
-        };
+        let mut ctx = ContextMut { editor: &mut self.ctx, app };
         self.hint_handler.handle_event(event)?;
         self.sound_visualiser.handle_event(event, &self.sequencer)?;
         self.sequencer.handle_event(event, ctx.as_mut())?;
@@ -447,9 +408,7 @@ impl Editor {
         if let Some(&id) = pattern.selection().first() {
             let mut block = pattern.get_mut(id)?;
             let offset = block.offset;
-            block
-                .inner()
-                .handle_event(event, ctx.as_mut(), &self.sequencer, offset)?;
+            block.inner().handle_event(event, ctx.as_mut(), &self.sequencer, offset)?;
         }
     }
 
@@ -473,14 +432,14 @@ impl Editor {
                     }}
                         onclick={emitter.reform(move |_| AppEvent::Rewind(index))}
                     >
-                        <s >{ name }</s>
+                        <s>{ name }</s>
                     </Button>
                 }
             },
 
             Ordering::Equal => html! {
                 if let Some(name) = action.name() {
-                    <Button {name} class="selected" help="Last action"><p >{ name }</p></Button>
+                    <Button {name} class="selected" help="Last action"><p>{ name }</p></Button>
                 }
             },
 
@@ -495,7 +454,7 @@ impl Editor {
                     }}
                         onclick={emitter.reform(move |_| AppEvent::Unwind(index))}
                     >
-                        <p >{ name }</p>
+                        <p>{ name }</p>
                     </Button>
                 }
             }

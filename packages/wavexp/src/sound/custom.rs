@@ -59,10 +59,7 @@ impl GraphPoint for CustomBlock {
     type VisualContext = (Beats, NonZeroU32, Beats);
 
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
-        Self {
-            offset,
-            pitch: Note::saturated(y.into()).recip(),
-        }
+        Self { offset, pitch: Note::saturated(y.into()).recip() }
     }
 
     fn inner(&self) -> &Self::Inner {
@@ -101,9 +98,7 @@ impl GraphPoint for CustomBlock {
         _: &Sequencer,
         (.., len): Self::VisualContext,
     ) -> Result<bool> {
-        Ok(area[1]
-            .map_bounds(usize::from)
-            .contains(&self.pitch.recip().index())
+        Ok(area[1].map_bounds(usize::from).contains(&self.pitch.recip().index())
             && (self.offset..=self.offset + len / self.pitch.pitch_coef()).overlap(&area[0]))
     }
 
@@ -148,18 +143,11 @@ impl GraphPoint for CustomBlock {
         );
         for block in editor.data() {
             let [x, y] = block.loc().mul(step).sub(offset);
-            solid.rect(
-                *x,
-                *y,
-                *len / *block.pitch.pitch_coef() * *step[0],
-                *step[1],
-            );
+            solid.rect(*x, *y, *len / *block.pitch.pitch_coef() * *step[0], *step[1]);
         }
 
-        let total_len = editor
-            .data()
-            .last()
-            .map_or_default(|last| last.offset + len / last.pitch.pitch_coef());
+        let total_len =
+            editor.data().last().map_or_default(|last| last.offset + len / last.pitch.pitch_coef());
         if let PlaybackContext::All(start) = sequencer.playback_ctx() && start.is_finite() {
             let progress = (ctx.frame() - start).secs_to_beats(bps) - sb_offset;
             if progress < total_len * n_reps {
@@ -189,11 +177,8 @@ pub struct CustomSound {
 impl Default for CustomSound {
     fn default() -> Self {
         Self {
-            pattern: GraphEditor::new(vec![CustomBlock {
-                offset: r64!(0),
-                pitch: Note::MID,
-            }])
-            .into(),
+            pattern: GraphEditor::new(vec![CustomBlock { offset: r64!(0), pitch: Note::MID }])
+                .into(),
             src: None,
             volume: r32!(1),
             attack: r64!(0),
@@ -248,9 +233,7 @@ impl CustomSound {
                 let block_core = ctx.create_buffer_source()?;
                 block_core.set_buffer(Some(src.baked()?));
                 block_core.playback_rate().set_value(*(self.speed * coef));
-                block_core
-                    .connect_with_audio_node(&block)?
-                    .connect_with_audio_node(plug)?;
+                block_core.connect_with_audio_node(&block)?.connect_with_audio_node(plug)?;
                 block_core.start_with_when(*start)?;
                 block_core.clone().set_onended(Some(&js_function!(|| {
                     block.disconnect().map_err(AppError::from).report();
@@ -278,9 +261,7 @@ impl CustomSound {
         let emitter = ctx.event_emitter();
         match ctx.selected_tab() {
             0 /* General */ => html!{
-                <div
-                    id="inputs"
-                >
+                <div id="inputs">
                     <Slider
                         key="custom-vol"
                         setter={emitter.reform(|x| AppEvent::Volume(R32::from(x)))}
@@ -315,9 +296,7 @@ impl CustomSound {
             },
 
             1 /* Envelope */ => html!{
-                <div
-                    id="inputs"
-                >
+                <div id="inputs">
                     <Counter
                         key="custom-att"
                         setter={emitter.reform(AppEvent::Attack)}
@@ -516,18 +495,16 @@ impl CustomSound {
 
             _ => {
                 if ctx.selected_tab() == 2 {
-                    self.pattern
-                        .get_mut()?
-                        .handle_event(event, ctx, sequencer, || {
-                            (
-                                offset,
-                                self.rep_count,
-                                self.src
-                                    .as_ref()
-                                    .and_then(|x| x.get().ok())
-                                    .map_or_default(|x| x.baked_duration() / self.speed),
-                            )
-                        })?;
+                    self.pattern.get_mut()?.handle_event(event, ctx, sequencer, || {
+                        (
+                            offset,
+                            self.rep_count,
+                            self.src
+                                .as_ref()
+                                .and_then(|x| x.get().ok())
+                                .map_or_default(|x| x.baked_duration() / self.speed),
+                        )
+                    })?;
                 }
             }
         }

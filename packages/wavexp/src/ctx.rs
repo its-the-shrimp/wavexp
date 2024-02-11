@@ -147,17 +147,9 @@ pub enum EditorAction {
     /// start the session; added to the action stack by default and is always the first one
     Start,
     /// drag the plane of a graph editor
-    DragPlane {
-        editor_id: usize,
-        offset_delta: Point,
-        scale_delta: [R64; 2],
-    },
+    DragPlane { editor_id: usize, offset_delta: Point, scale_delta: [R64; 2] },
     /// drag a point of a graph editor
-    DragPoint {
-        editor_id: usize,
-        point_id: usize,
-        delta: [R64; 2],
-    },
+    DragPoint { editor_id: usize, point_id: usize, delta: [R64; 2] },
     /// drag selection in a graph editor
     DragSelection { editor_id: usize, delta: [R64; 2] },
     /// change selection in a graph editor
@@ -171,11 +163,7 @@ pub enum EditorAction {
         cur_size: [R64; 2],
     },
     /// select a sound block
-    Select {
-        from: Option<usize>,
-        to: Option<usize>,
-        prev_selected_tab: usize,
-    },
+    Select { from: Option<usize>, to: Option<usize>, prev_selected_tab: usize },
     /// set sound block type from the default undefined one
     SetBlockType(SoundType),
     /// switch tabs in the side editor
@@ -207,18 +195,11 @@ pub enum EditorAction {
     /// Close a pop-up window.
     ClosePopup(Popup),
     /// change the selected audio input of the sound block.
-    SelectInput {
-        from: Option<Shared<AudioInput>>,
-        to: Option<Shared<AudioInput>>,
-    },
+    SelectInput { from: Option<Shared<AudioInput>>, to: Option<Shared<AudioInput>> },
     /// change the name of the currently edited audio input.
     SetInputName { from: Rc<str>, to: Rc<str> },
     /// add a point onto a graph editor.
-    AddPoint {
-        editor_id: usize,
-        point_id: usize,
-        point_loc: [R64; 2],
-    },
+    AddPoint { editor_id: usize, point_id: usize, point_loc: [R64; 2] },
     /// remove a point from a graph editor.
     RemovePoint(usize, Box<[RemovedPoint]>),
     /// reverse the currently edited audio input.
@@ -289,66 +270,26 @@ impl EditorAction {
             (Self::SwitchTab { from, .. }, Self::SwitchTab { to, .. }) => {
                 Some((Self::SwitchTab { from, to }, None))
             }
+            (Self::Select { from, prev_selected_tab: 0, .. }, Self::Select { to, .. })
+                if from == to =>
+            {
+                None
+            }
+            (Self::Select { from, prev_selected_tab, .. }, Self::Select { to, .. })
+                if from == to =>
+            {
+                Some((Self::SwitchTab { from: prev_selected_tab, to: 0 }, None))
+            }
+            (Self::Select { from, prev_selected_tab, .. }, Self::Select { to, .. }) => {
+                Some((Self::Select { from, to, prev_selected_tab }, None))
+            }
             (
-                Self::Select {
-                    from,
-                    prev_selected_tab: 0,
-                    ..
-                },
-                Self::Select { to, .. },
-            ) if from == to => None,
-            (
-                Self::Select {
-                    from,
-                    prev_selected_tab,
-                    ..
-                },
-                Self::Select { to, .. },
-            ) if from == to => Some((
-                Self::SwitchTab {
-                    from: prev_selected_tab,
-                    to: 0,
-                },
-                None,
-            )),
-            (
-                Self::Select {
-                    from,
-                    prev_selected_tab,
-                    ..
-                },
-                Self::Select { to, .. },
-            ) => Some((
-                Self::Select {
-                    from,
-                    to,
-                    prev_selected_tab,
-                },
-                None,
-            )),
-            (
-                Self::DragPlane {
-                    editor_id: eid_1,
-                    offset_delta: off_1,
-                    scale_delta: s_1,
-                },
-                Self::DragPlane {
-                    editor_id: eid_2,
-                    offset_delta: off_2,
-                    scale_delta: s_2,
-                },
+                Self::DragPlane { editor_id: eid_1, offset_delta: off_1, scale_delta: s_1 },
+                Self::DragPlane { editor_id: eid_2, offset_delta: off_2, scale_delta: s_2 },
             ) if eid_1 == eid_2 && Some(off_1) == -off_2 && s_1 == s_2.map(R64::recip) => None,
             (
-                ref a @ Self::DragPlane {
-                    editor_id: eid_1,
-                    offset_delta: off_1,
-                    scale_delta: s_1,
-                },
-                ref b @ Self::DragPlane {
-                    editor_id: eid_2,
-                    offset_delta: off_2,
-                    scale_delta: s_2,
-                },
+                ref a @ Self::DragPlane { editor_id: eid_1, offset_delta: off_1, scale_delta: s_1 },
+                ref b @ Self::DragPlane { editor_id: eid_2, offset_delta: off_2, scale_delta: s_2 },
             ) if eid_1 == eid_2 => Some((
                 Self::DragPlane {
                     editor_id: eid_1,
@@ -392,16 +333,10 @@ impl<'app, 'editor> ContextMut<'app, 'editor> {
     }
 
     pub fn as_ref(&self) -> ContextRef<'_, '_> {
-        ContextRef {
-            editor: self.editor,
-            app: self.app,
-        }
+        ContextRef { editor: self.editor, app: self.app }
     }
 
     pub fn as_mut(&mut self) -> ContextMut<'_, '_> {
-        ContextMut {
-            editor: self.editor,
-            app: self.app,
-        }
+        ContextMut { editor: self.editor, app: self.app }
     }
 }

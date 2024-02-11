@@ -44,11 +44,7 @@ impl GraphPoint for NoiseBlock {
     type VisualContext = (Beats, NonZeroU32);
 
     fn create(_: &GraphEditor<Self>, [offset, y]: [R64; 2]) -> Self {
-        Self {
-            offset,
-            pitch: Note::saturated(y.into()).recip(),
-            len: r64!(1),
-        }
+        Self { offset, pitch: Note::saturated(y.into()).recip(), len: r64!(1) }
     }
 
     fn inner(&self) -> &Self::Inner {
@@ -93,9 +89,7 @@ impl GraphPoint for NoiseBlock {
         _: &Sequencer,
         _: Self::VisualContext,
     ) -> bool {
-        area[1]
-            .map_bounds(usize::from)
-            .contains(&self.pitch.recip().index())
+        area[1].map_bounds(usize::from).contains(&self.pitch.recip().index())
             && (self.offset..=self.offset + self.len).overlap(&area[0])
     }
 
@@ -203,13 +197,9 @@ impl NoiseSound {
 
                 let block_core = ctx.create_buffer_source()?;
                 block_core.set_buffer(NOISE.as_ref());
-                block_core
-                    .playback_rate()
-                    .set_value(*pitch.pitch_coef() as f32);
+                block_core.playback_rate().set_value(*pitch.pitch_coef() as f32);
                 block_core.set_loop(true);
-                block_core
-                    .connect_with_audio_node(&block)?
-                    .connect_with_audio_node(plug)?;
+                block_core.connect_with_audio_node(&block)?.connect_with_audio_node(plug)?;
                 block_core.start_with_when(*start)?;
                 block_core.stop_with_when(*at)?;
                 block_core.clone().set_onended(Some(&js_function!(|| {
@@ -222,12 +212,7 @@ impl NoiseSound {
     }
 
     pub fn len(&self) -> Result<Beats> {
-        Ok(self
-            .pattern
-            .get()?
-            .data()
-            .last()
-            .map_or_default(|x| x.offset + x.len))
+        Ok(self.pattern.get()?.data().last().map_or_default(|x| x.offset + x.len))
     }
 
     pub const fn rep_count(&self) -> NonZeroU32 {
@@ -238,9 +223,7 @@ impl NoiseSound {
         let emitter = ctx.event_emitter();
         match ctx.selected_tab() {
             0 /* General */ => html!{
-                <div
-                    id="inputs"
-                >
+                <div id="inputs">
                     <Slider
                         key="noise-vol"
                         setter={emitter.reform(|x| AppEvent::Volume(R32::from(x)))}
@@ -259,9 +242,7 @@ impl NoiseSound {
             },
 
             1 /* Envelope */ => html!{
-                <div
-                    id="inputs"
-                >
+                <div id="inputs">
                     <Counter
                         key="noise-att"
                         setter={emitter.reform(AppEvent::Attack)}

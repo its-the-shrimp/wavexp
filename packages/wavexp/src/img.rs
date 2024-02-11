@@ -3,9 +3,7 @@ use yew::{function_component, html, Html};
 #[function_component]
 pub fn Settings() -> Html {
     html! {
-        <svg
-            viewBox="0 0 100 100"
-        >
+        <svg viewBox="0 0 100 100">
             <polygon points="15,20 30,15 30,10 40,15 85,20 40,25 30,30 30,25" />
             <polygon points="85,50 70,45 70,40 60,45 15,50 60,55 70,60 70,55" />
             <polygon points="15,80 30,85 30,90 40,85 85,80 40,75 30,70 30,75" />
@@ -26,9 +24,7 @@ pub fn Stop() -> Html {
 #[function_component]
 pub fn Plus() -> Html {
     html! {
-        <svg
-            viewBox="0 0 100 100"
-        >
+        <svg viewBox="0 0 100 100">
             <polygon
                 points="
                 40,10 60,10 60,40 90,40 90,60 60,60
@@ -47,9 +43,7 @@ pub fn Minus() -> Html {
 #[function_component]
 pub fn Warning() -> Html {
     html! {
-        <svg
-            viewBox="0 0 100 100"
-        >
+        <svg viewBox="0 0 100 100">
             <polygon points="10,90 50,10 90,90" />
             <polygon points="48,40 52,40 52,60 48,60" />
             <polygon points="48,70 52,70 52,74 48,74" />
@@ -60,9 +54,7 @@ pub fn Warning() -> Html {
 #[function_component]
 pub fn Cross() -> Html {
     html! {
-        <svg
-            viewBox="0 0 100 100"
-        >
+        <svg viewBox="0 0 100 100">
             <polygon
                 points="
                 27,35 35,27 50,42 65,27 73,35 58,50
@@ -76,9 +68,7 @@ pub fn Cross() -> Html {
 #[function_component]
 pub fn House() -> Html {
     html! {
-        <svg
-            viewBox="0 0 100 100"
-        >
+        <svg viewBox="0 0 100 100">
             <polygon points="20,60 50,20 80,60 70,60 70,80 30,80 30,60" />
         </svg>
     }
@@ -87,9 +77,7 @@ pub fn House() -> Html {
 #[function_component]
 pub fn RightArrow() -> Html {
     html! {
-        <svg
-            viewBox="0 0 100 100"
-        >
+        <svg viewBox="0 0 100 100">
             <polygon points="50,15 85,50 50,85 50,70 15,70 15,30 50,30" />
         </svg>
     }
@@ -98,9 +86,7 @@ pub fn RightArrow() -> Html {
 #[function_component]
 pub fn LeftArrow() -> Html {
     html! {
-        <svg
-            viewBox="0 0 100 100"
-        >
+        <svg viewBox="0 0 100 100">
             <polygon points="50,15 15,50 50,85 50,70 85,70 85,30 50,30" />
         </svg>
     }
@@ -109,9 +95,7 @@ pub fn LeftArrow() -> Html {
 #[function_component]
 pub fn Selection() -> Html {
     html! {
-        <svg
-            viewBox="0 0 100 100"
-        >
+        <svg viewBox="0 0 100 100">
             <rect
                 x=15
                 y=15

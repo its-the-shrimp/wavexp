@@ -47,11 +47,7 @@ impl Composition {
     pub fn decode(src: &mut &[u8]) -> Result<Self> {
         let header: [u8; 8] = decode(src)?;
         ensure!(header == Self::WAVEXP_HEADER, "invalid header");
-        Ok(Self {
-            pattern: decode(src)?,
-            inputs: decode_short(src)?,
-            bps: decode(src)?,
-        })
+        Ok(Self { pattern: decode(src)?, inputs: decode_short(src)?, bps: decode(src)? })
     }
 
     /// imports extenal audio and creates a composition of 1 custom audio block
@@ -60,9 +56,8 @@ impl Composition {
         src: &ArrayBuffer,
         ctx: &BaseAudioContext,
     ) -> Result<Self> {
-        let src = JsFuture::from(ctx.decode_audio_data(src)?)
-            .await?
-            .unchecked_into::<AudioBuffer>();
+        let src =
+            JsFuture::from(ctx.decode_audio_data(src)?).await?.unchecked_into::<AudioBuffer>();
         let src = Shared::from(AudioInput::new(src_name, src)?);
         Ok(Self {
             pattern: Shared::from(GraphEditor::new(vec![SoundBlock {
@@ -101,11 +96,7 @@ impl Composition {
                 let Some(last) = pat.data().last() else {
                     break 'len 1;
                 };
-                last.len(self.bps)?
-                    .add(last.offset)
-                    .mul(Sequencer::SAMPLE_RATE)
-                    .max(r64!(1))
-                    .into()
+                last.len(self.bps)?.add(last.offset).mul(Sequencer::SAMPLE_RATE).max(r64!(1)).into()
             },
             Sequencer::SAMPLE_RATE as f32,
         )?;
@@ -121,9 +112,8 @@ impl Composition {
         }
 
         Ok(async move {
-            let rendered = JsFuture::from(renderer.start_rendering()?)
-                .await?
-                .unchecked_into::<AudioBuffer>();
+            let rendered =
+                JsFuture::from(renderer.start_rendering()?).await?.unchecked_into::<AudioBuffer>();
             let mut wav: Cursor<Vec<u8>> = default();
             let mut wav_writer = WavWriter::new(
                 &mut wav,

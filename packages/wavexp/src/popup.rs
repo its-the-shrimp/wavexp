@@ -34,11 +34,7 @@ pub enum Popup {
     /// Edit the contained audio input.
     EditInput(Shared<AudioInput>),
     /// Export the sequence as a file.
-    Export {
-        format: ExportFormat,
-        filename: Rc<str>,
-        err_msg: AttrValue,
-    },
+    Export { format: ExportFormat, filename: Rc<str>, err_msg: AttrValue },
 }
 
 impl Popup {
@@ -46,10 +42,7 @@ impl Popup {
     pub fn handle_event(&mut self, event: &AppEvent, mut ctx: ContextMut) {
         match *event {
             AppEvent::SetOutputFileName(ref e) => {
-                if let Self::Export {
-                    filename, err_msg, ..
-                } = self
-                {
+                if let Self::Export { filename, err_msg, .. } = self {
                     let to: Rc<str> = e.target_dyn_into::<HtmlInputElement>()?.value().into();
                     let from = replace(filename, to.clone());
                     *err_msg = "".into();
@@ -204,24 +197,13 @@ impl Popup {
                     method="dialog"
                     onsubmit={emitter.reform(|_| AppEvent::ClosePopup)}
                 >
-                    <p >{ "Choose audio input" }</p>
-                    <Button
-                        name="Close the pop-up"
-                        class="small red-on-hover"
-                        submit=true
-                    >
+                    <p>{ "Choose audio input" }</p>
+                    <Button name="Close the pop-up" class="small red-on-hover" submit=true>
                         <img::Cross />
                     </Button>
-                    <div
-                        class="blue-border"
-                        data-main-hint="Choose audio input"
-                    >
-                        <div
-                            class="dark-bg horizontal-menu-wrapper full"
-                        >
-                            <div
-                                class="horizontal-menu dark-bg"
-                            >
+                    <div class="blue-border" data-main-hint="Choose audio input">
+                        <div class="dark-bg horizontal-menu-wrapper full">
+                            <div class="horizontal-menu dark-bg">
                                 { for sequencer.inputs().iter().map(|input| html!{
                                     <AudioInputButton class="extend-inner-button-panel"
                                     bps={sequencer.bps()} {input} {emitter}
@@ -251,25 +233,14 @@ impl Popup {
                     method="dialog"
                     onsubmit={emitter.reform(|_| AppEvent::ClosePopup)}
                 >
-                    <p >{ "Edit audio input" }</p>
-                    <Button
-                        name="Close the pop-up"
-                        class="small red-on-hover"
-                        submit=true
-                    >
+                    <p>{ "Edit audio input" }</p>
+                    <Button name="Close the pop-up" class="small red-on-hover" submit=true>
                         <img::Cross />
                     </Button>
-                    <div
-                        class="dark-bg blue-border"
-                        data-main-hint="Edit audio input"
-                    >
-                        <div
-                            id="popup-core"
-                        >
+                    <div class="dark-bg blue-border" data-main-hint="Edit audio input">
+                        <div id="popup-core">
                             if let Some(input) = input_outer.get().report() {
-                                <div
-                                    style="display: grid; grid-template-columns: repeat(3, 1fr)"
-                                >
+                                <div style="display: grid; grid-template-columns: repeat(3, 1fr)">
                                     if input.changes().reversed {
                                         <Button
                                             name="Playback direction: reverse"
@@ -299,9 +270,7 @@ impl Popup {
                                         onchange={emitter.reform(AppEvent::SetInputName)}
                                     />
                                 </div>
-                                <div
-                                    style="display: grid; grid-template-columns: repeat(2, 1fr)"
-                                >
+                                <div style="display: grid; grid-template-columns: repeat(2, 1fr)">
                                     <Slider
                                         name="Start cut-off"
                                         max={input.raw_duration().secs_to_beats(sequencer.bps())}
@@ -323,11 +292,7 @@ impl Popup {
                 </form>
             },
 
-            &Self::Export {
-                format,
-                ref filename,
-                ref err_msg,
-            } => {
+            &Self::Export { format, ref filename, ref err_msg } => {
                 let (title, pattern, event): (_, _, fn(_) -> _) = match format {
                     ExportFormat::Wav => ("Export the project", ".*\\.wav", AppEvent::Export),
                     ExportFormat::Wavexp => ("Save the project", ".*\\.wavexp", AppEvent::Save),
@@ -341,7 +306,7 @@ impl Popup {
                             move |_| event(filename.clone())
                         })}
                     >
-                        <p >{ title }</p>
+                        <p>{ title }</p>
                         <Button
                             name="Close the pop-up"
                             class="small red-on-hover"
@@ -353,9 +318,7 @@ impl Popup {
                             class="dark-bg blue-border"
                             data-main-hint={title}
                         >
-                            <div
-                                id="popup-core"
-                            >
+                            <div id="popup-core">
                                 <input
                                     type="text"
                                     value={filename.clone()}
@@ -372,7 +335,7 @@ impl Popup {
                                     class="wide"
                                     submit=true
                                 >
-                                    <p >{ "Save" }</p>
+                                    <p>{ "Save" }</p>
                                 </Button>
                             </div>
                         </div>
