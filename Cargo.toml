@@ -35,9 +35,10 @@ web-sys = { version = "0.3.64", features = [
 	"HtmlAnchorElement",
 	"OfflineAudioCompletionEvent"
 ]}
-yew = { version = "0.20.0", features = ["csr"] }
+yew = { version = "0.21.0", features = ["csr"] }
 hound = "3.5.1"
 macro_rules_attribute = "0.2.0"
+yew-html-ext = "0.1"
 
 [workspace.lints.clippy]
 unit_arg = "allow"

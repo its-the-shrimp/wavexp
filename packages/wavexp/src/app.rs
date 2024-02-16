@@ -176,12 +176,18 @@ impl Component for App {
                         hidden=true
                         data-main-hint="Error has occured"
                         data-aux-hint="Check the console for more info"
-                    ><img::Warning /></div>
+                    >
+                        <img::Warning />
+                    </div>
                 </>
             };
         }
         .report();
-        html! { <div id="error-sign"><img::Warning /></div> }
+        html! {
+            <div id="error-sign">
+                <img::Warning />
+            </div>
+        }
     }
 
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {

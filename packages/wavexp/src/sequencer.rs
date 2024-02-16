@@ -32,7 +32,8 @@ use web_sys::{
     AnalyserNode, AudioContext, BaseAudioContext, GainNode, HtmlCanvasElement, HtmlInputElement,
     OfflineAudioContext, Path2d,
 };
-use yew::{html, AttrValue, Html, TargetCast};
+use yew::{AttrValue, Html, TargetCast};
+use yew_html_ext::html;
 
 #[derive(Debug, Clone)]
 pub struct SoundBlock {
@@ -337,9 +338,9 @@ impl Sequencer {
 
     pub fn params(&self, ctx: ContextRef) -> Html {
         let emitter = ctx.event_emitter();
-        match ctx.selected_tab() {
-            0 /* General */ => html! {
-                <div id="inputs">
+        html! {
+            match ctx.selected_tab() {
+                0 /* General */=> <div id="inputs">
                     <Slider
                         key="tmp"
                         name="Tempo"
@@ -355,9 +356,7 @@ impl Sequencer {
                         setter={emitter.reform(|x| AppEvent::MasterVolume(R32::from(x)))}
                         initial={self.volume()}
                     />
-                    <div
-                        class="export-options"
-                    >
+                    <div class="export-options">
                         <Button
                             name="Export the project"
                             class="wide"
@@ -390,12 +389,10 @@ impl Sequencer {
                             <img::FloppyDisk />
                         </Button>
                     </div>
-                </div>
-            },
+                </div>,
 
-            1 /* Inputs */ => html!{
-                <div class="horizontal-menu dark-bg">
-                    { for self.comp.inputs.iter().map(|input| html! {
+                1 /* Inputs */=> <div class="horizontal-menu dark-bg">
+                    for input in &self.comp.inputs {
                         <AudioInputButton
                             playing={self.playback_ctx.played_input().is_some_and(|i| i.eq(input))}
                             name={input.get().map_or_default(|x| AttrValue::from(x.name().clone()))}
@@ -404,17 +401,17 @@ impl Sequencer {
                             bps={self.comp.bps}
                             class="extend-inner-button-panel"
                         />
-                    }) }
+                    }
                     <Button
                         name="Add audio input"
                         onclick={emitter.reform(|_| AppEvent::StartInputAdd)}
                     >
                         <img::Plus />
                     </Button>
-                </div>
-            },
+                </div>,
 
-            tab_id => html!(<p style="color:red">{ format!("Invalid tab ID: {tab_id}") }</p>)
+                tab_id => <p style="color:red">{ format!("Invalid tab ID: {tab_id}") }</p>,
+            }
         }
     }
 

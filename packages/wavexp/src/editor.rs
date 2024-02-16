@@ -18,7 +18,8 @@ use wavexp_utils::{
     real::R64,
     ToAttrValue,
 };
-use yew::{html, AttrValue, Callback, Html};
+use yew::{AttrValue, Callback, Html};
+use yew_html_ext::html;
 
 pub struct EditorContext {
     actions: Vec<EditorAction>,
@@ -317,12 +318,9 @@ impl Editor {
                 </div>
                 <div id="io-panel" data-main-hint="Editor plane settings">
                     <div class="horizontal-menu" id="actions">
-                        { for ctx
-                            .actions()
-                            .iter()
-                            .rev()
-                            .enumerate()
-                            .map(|(i, a)| self.render_action(a, i, emitter)) }
+                        for (index, action) in ctx.actions().iter().rev().enumerate() {
+                            { self.render_action(action, index, emitter) }
+                        }
                     </div>
                     <div id="special-actions">
                         <Button
@@ -418,48 +416,47 @@ impl Editor {
         index: usize,
         emitter: &Callback<AppEvent>,
     ) -> Html {
+        let Some(name) = action.name() else { return html!() };
         match index.cmp(&self.ctx.undid_actions) {
-            Ordering::Less if let Some(name) = action.name() => {
+            Ordering::Less => {
                 let index = self.ctx.undid_actions - index;
                 html! {
                     <Button
                         {name}
                         class="undone"
                         help={match index {
-                        1 => AttrValue::Static("Click to redo this action"),
-                        2 => AttrValue::Static("Click to redo this and the previous action"),
-                        _ => format!("Click to redo this and {index} previous actions").into()
-                    }}
+                            1 => AttrValue::Static("Click to redo this action"),
+                            2 => AttrValue::Static("Click to redo this and the previous action"),
+                            _ => format!("Click to redo this and {index} previous actions").into(),
+                        }}
                         onclick={emitter.reform(move |_| AppEvent::Rewind(index))}
                     >
                         <s>{ name }</s>
                     </Button>
                 }
-            },
+            }
 
             Ordering::Equal => html! {
-                if let Some(name) = action.name() {
-                    <Button {name} class="selected" help="Last action"><p>{ name }</p></Button>
-                }
+                <Button {name} class="selected" help="Last action">
+                    <p>{ name }</p>
+                </Button>
             },
 
-            Ordering::Greater if let Some(name) = action.name() => {
+            Ordering::Greater => {
                 let index = index - self.ctx.undid_actions;
                 html! {
                     <Button
                         {name}
                         help={match index {
-                        1 => AttrValue::Static("Click to undo the next action"),
-                        _ => format!("Click to undo {index} subsequent actions").into()
-                    }}
+                            1 => AttrValue::Static("Click to undo the next action"),
+                            _ => format!("Click to undo {index} subsequent actions").into()
+                        }}
                         onclick={emitter.reform(move |_| AppEvent::Unwind(index))}
                     >
                         <p>{ name }</p>
                     </Button>
                 }
             }
-
-            _ => html!()
         }
     }
 }

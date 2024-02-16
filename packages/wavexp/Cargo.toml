@@ -12,6 +12,7 @@ wasm-bindgen-futures.workspace = true
 web-sys.workspace = true
 hound.workspace = true
 macro_rules_attribute.workspace = true
+yew-html-ext.workspace = true
 
 [lints]
 workspace = true

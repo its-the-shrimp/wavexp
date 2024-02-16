@@ -7,7 +7,8 @@ use wavexp_utils::{
     fallible,
 };
 use web_sys::HtmlInputElement;
-use yew::{html, AttrValue, Callback, Html, TargetCast};
+use yew::{AttrValue, Callback, Html, TargetCast};
+use yew_html_ext::html;
 
 use crate::{
     ctx::{AppEvent, ContextMut, EditorAction},
@@ -204,17 +205,21 @@ impl Popup {
                     <div class="blue-border" data-main-hint="Choose audio input">
                         <div class="dark-bg horizontal-menu-wrapper full">
                             <div class="horizontal-menu dark-bg">
-                                { for sequencer.inputs().iter().map(|input| html!{
-                                    <AudioInputButton class="extend-inner-button-panel"
-                                    bps={sequencer.bps()} {input} {emitter}
-                                    onclick={{
+                                for input in sequencer.inputs() {
+                                    <AudioInputButton
+                                        class="extend-inner-button-panel"
+                                        bps={sequencer.bps()}
+                                        {input}
+                                        {emitter}
+                                        onclick={{
                                         let i = input.clone();
                                         emitter.reform(move |_| AppEvent::SelectInput(i.clone()))
                                     }}
-                                    playing={sequencer.playback_ctx().played_input()
+                                        playing={sequencer.playback_ctx().played_input()
                                         .is_some_and(|cur| cur.eq(input))}
-                                    name={input.get().map_or_default(|x| AttrValue::Rc(x.name().clone()))}/>
-                                }) }
+                                        name={input.get().map_or_default(|x| AttrValue::Rc(x.name().clone()))}
+                                    />
+                                }
                                 <Button
                                     name="Add audio input"
                                     onclick={emitter.reform(|_| AppEvent::StartInputAdd)}
@@ -314,10 +319,7 @@ impl Popup {
                         >
                             <img::Cross />
                         </Button>
-                        <div
-                            class="dark-bg blue-border"
-                            data-main-hint={title}
-                        >
+                        <div class="dark-bg blue-border" data-main-hint={title}>
                             <div id="popup-core">
                                 <input
                                     type="text"
@@ -330,11 +332,7 @@ impl Popup {
                                     oninvalid={emitter.reform(AppEvent::ExplainInvalidExportFileName)}
                                     onchange={emitter.reform(AppEvent::SetOutputFileName)}
                                 />
-                                <Button
-                                    name="Save"
-                                    class="wide"
-                                    submit=true
-                                >
+                                <Button name="Save" class="wide" submit=true>
                                     <p>{ "Save" }</p>
                                 </Button>
                             </div>

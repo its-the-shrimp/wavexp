@@ -13,12 +13,20 @@ pub fn Settings() -> Html {
 
 #[function_component]
 pub fn Play() -> Html {
-    html! { <svg viewBox="0 0 100 100"><polygon points="25,25 75,50 25,75" /></svg> }
+    html! {
+        <svg viewBox="0 0 100 100">
+            <polygon points="25,25 75,50 25,75" />
+        </svg>
+    }
 }
 
 #[function_component]
 pub fn Stop() -> Html {
-    html! { <svg viewBox="0 0 100 100"><polygon points="25,25 75,25 75,75 25,75" /></svg> }
+    html! {
+        <svg viewBox="0 0 100 100">
+            <polygon points="25,25 75,25 75,75 25,75" />
+        </svg>
+    }
 }
 
 #[function_component]
@@ -37,7 +45,11 @@ pub fn Plus() -> Html {
 
 #[function_component]
 pub fn Minus() -> Html {
-    html! { <svg viewBox="0 0 100 100"><rect x=10 y=40 width=80 height=20 /></svg> }
+    html! {
+        <svg viewBox="0 0 100 100">
+            <rect x=10 y=40 width=80 height=20 />
+        </svg>
+    }
 }
 
 #[function_component]
@@ -111,5 +123,9 @@ pub fn Selection() -> Html {
 
 #[function_component]
 pub fn FloppyDisk() -> Html {
-    html! { <svg viewBox="0 0 100 100"><polygon points="40,15 80,15 80,85 20,85 20,30" /></svg> }
+    html! {
+        <svg viewBox="0 0 100 100">
+            <polygon points="40,15 80,15 80,85 20,85 20,30" />
+        </svg>
+    }
 }

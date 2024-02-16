@@ -8,7 +8,6 @@ use crate::{
     sequencer::Sequencer,
 };
 pub use custom::*;
-use macro_rules_attribute::apply;
 pub use noise::*;
 pub use note::*;
 use std::{
@@ -21,9 +20,10 @@ use std::{
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use wavexp_utils::{error::Result, ext::default, fallible, r32, r64, real::R32, real::R64};
+use wavexp_utils::{error::Result, ext::default, r32, r64, real::R32, real::R64};
 use web_sys::{AudioBuffer, AudioBufferOptions, AudioNode, BaseAudioContext, File};
-use yew::{html, Html};
+use yew::Html;
+use yew_html_ext::html;
 
 pub type MSecs = R64;
 pub type Secs = R64;
@@ -414,12 +414,14 @@ impl Sound {
                 let emitter = ctx.event_emitter();
                 html! {
                     <div class="horizontal-menu">
-                        { for Sound::TYPES.iter().map(|x| html!{
-                        <Button name={x.name()}
-                            onclick={emitter.reform(|_| AppEvent::SetBlockType(*x))}>
-                            <p>{x.name()}</p>
-                        </Button>
-                    }) }
+                        for x in Sound::TYPES {
+                            <Button
+                                name={x.name()}
+                                onclick={emitter.reform(move |_| AppEvent::SetBlockType(x))}
+                            >
+                                <p>{ x.name() }</p>
+                            </Button>
+                        }
                     </div>
                 }
             }
@@ -430,14 +432,13 @@ impl Sound {
         }
     }
 
-    #[apply(fallible!)]
     pub fn handle_event(
         &mut self,
         event: &AppEvent,
         mut ctx: ContextMut,
         sequencer: &Sequencer,
         offset: Beats,
-    ) {
+    ) -> Result {
         let r = &mut false;
         match self {
             Sound::None => match event {
@@ -466,5 +467,6 @@ impl Sound {
         if *r {
             *self = Self::None
         }
+        Ok(())
     }
 }

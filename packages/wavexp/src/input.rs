@@ -333,7 +333,8 @@ pub struct Button;
 pub struct ButtonProps {
     pub name: AttrValue,
     pub children: Children,
-    pub help: Option<AttrValue>,
+    #[prop_or_default]
+    pub help: AttrValue,
     #[prop_or_default]
     pub onclick: Callback<PointerEvent>,
     #[prop_or(false)]
@@ -388,6 +389,7 @@ pub struct GraphEditorCanvas<T>(PhantomData<T>);
 pub struct GraphEditorCanvasProps<T: GraphPoint> {
     pub emitter: Callback<AppEvent>,
     pub editor: Shared<GraphEditor<T>>,
+    #[prop_or_default]
     pub id: Option<&'static str>,
 }
 
@@ -555,10 +557,11 @@ pub struct AudioInputButtonProps {
     pub bps: Beats,
     pub name: AttrValue,
     pub input: Option<Shared<AudioInput>>,
-    pub help: Option<AttrValue>,
+    #[prop_or_default]
+    pub help: AttrValue,
     #[prop_or_default]
     pub onclick: Callback<PointerEvent>,
-    #[prop_or(false)]
+    #[prop_or_default]
     pub playing: bool,
     #[prop_or_default]
     pub emitter: Callback<AppEvent>,
@@ -578,9 +581,9 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                             name="Stop playing"
                             help="Click to stop the playback"
                             onclick={emitter.reform(move |e: PointerEvent| {
-                            e.stop_propagation();
-                            AppEvent::StopPlay
-                        })}
+                                e.stop_propagation();
+                                AppEvent::StopPlay
+                            })}
                         >
                             <img::Stop />
                         </Button>
@@ -589,12 +592,12 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                             name="Play audio input"
                             help="Click to hear how the input sounds"
                             onclick={{
-                            let s = input.outer();
-                            emitter.reform(move |e: PointerEvent| {
-                                e.stop_propagation();
-                                AppEvent::PreparePlay(Some(s.clone()))
-                            })
-                        }}
+                                let s = input.outer();
+                                emitter.reform(move |e: PointerEvent| {
+                                    e.stop_propagation();
+                                    AppEvent::PreparePlay(Some(s.clone()))
+                                })
+                            }}
                         >
                             <img::Play />
                         </Button>
@@ -604,12 +607,12 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                         name="Edit audio input"
                         help="Click to edit the audio input"
                         onclick={{
-                        let s = input.outer();
-                        emitter.reform(move |e: PointerEvent| {
-                            e.stop_propagation();
-                            AppEvent::OpenPopup(Popup::EditInput(s.clone()))
-                        })
-                    }}
+                            let s = input.outer();
+                            emitter.reform(move |e: PointerEvent| {
+                                e.stop_propagation();
+                                AppEvent::OpenPopup(Popup::EditInput(s.clone()))
+                            })
+                        }}
                     >
                         <img::Settings />
                     </Button>
@@ -634,9 +637,7 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                     >
                         <img::Play />
                     </Button>
-                    <p>
-                        { "Not chosen" }
-                    </p>
+                    <p>{ "Not chosen" }</p>
                     <Button
                         class="unavailable"
                         name="Edit audio input (not chosen)"

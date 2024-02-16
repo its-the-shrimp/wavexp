@@ -1,2 +1,4 @@
 yew.use_prop_init_shorthand = true
 use_small_heuristics = "Max"
+yew.use_small_heuristics = "Default"
+yew.html_flavor = "Ext"
