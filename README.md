@@ -1,3 +1,6 @@
+> [!NOTE]
+> More than anything, this project was a way for me to learn Rust, and it completed this mission; The project is abandoned.
+
 # Wave Explorer
 Wave Explorer, or `wavexp` for short - a utility for editing and generating audio right in the browser. 
 ## Setup
