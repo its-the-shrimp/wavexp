@@ -591,13 +591,13 @@ pub fn AudioInputButton(props: &AudioInputButtonProps) -> Html {
                         <Button
                             name="Play audio input"
                             help="Click to hear how the input sounds"
-                            onclick={{
+                            onclick={
                                 let s = input.outer();
                                 emitter.reform(move |e: PointerEvent| {
                                     e.stop_propagation();
                                     AppEvent::PreparePlay(Some(s.clone()))
                                 })
-                            }}
+                            }
                         >
                             <img::Play />
                         </Button>

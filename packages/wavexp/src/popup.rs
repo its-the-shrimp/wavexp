@@ -211,10 +211,10 @@ impl Popup {
                                         bps={sequencer.bps()}
                                         {input}
                                         {emitter}
-                                        onclick={{
-                                        let i = input.clone();
-                                        emitter.reform(move |_| AppEvent::SelectInput(i.clone()))
-                                    }}
+                                        onclick={
+                                            let i = input.clone();
+                                            emitter.reform(move |_| AppEvent::SelectInput(i.clone()))
+                                        }
                                         playing={sequencer.playback_ctx().played_input()
                                         .is_some_and(|cur| cur.eq(input))}
                                         name={input.get().map_or_default(|x| AttrValue::Rc(x.name().clone()))}
@@ -276,15 +276,16 @@ impl Popup {
                                     />
                                 </div>
                                 <div style="display: grid; grid-template-columns: repeat(2, 1fr)">
+                                    let max = input.raw_duration().secs_to_beats(sequencer.bps());
                                     <Slider
                                         name="Start cut-off"
-                                        max={input.raw_duration().secs_to_beats(sequencer.bps())}
+                                        {max}
                                         initial={input.changes().cut_start}
                                         setter={emitter.reform(AppEvent::SetStartCutOff)}
                                     />
                                     <Slider
                                         name="End cut-off"
-                                        max={input.raw_duration().secs_to_beats(sequencer.bps())}
+                                        {max}
                                         initial={input.changes().cut_end}
                                         setter={emitter.reform(AppEvent::SetEndCutOff)}
                                     />
@@ -306,10 +307,10 @@ impl Popup {
                     <form
                         id="popup-bg"
                         method="dialog"
-                        onsubmit={emitter.reform({
+                        onsubmit={
                             let filename = filename.clone();
-                            move |_| event(filename.clone())
-                        })}
+                            emitter.reform(move |_| event(filename.clone()))
+                        }
                     >
                         <p>{ title }</p>
                         <Button
